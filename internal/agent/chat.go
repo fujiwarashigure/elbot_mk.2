@@ -396,6 +396,14 @@ func (a *Agent) modelSelectionForTurn(ctx context.Context, session *storage.Sess
 		mode = session.Mode
 	}
 	selection := a.modelForMode(mode)
+	if override, ok := turnModelOverride(ctx); ok {
+		if override.Provider != "" {
+			selection.Provider = override.Provider
+		}
+		if override.Model != "" {
+			selection.Model = override.Model
+		}
+	}
 	if override, ok := ctx.Value(cronModelSelectionKey{}).(config.ModelSelection); ok {
 		if override.Provider != "" {
 			selection.Provider = override.Provider

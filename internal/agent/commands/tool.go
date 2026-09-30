@@ -41,18 +41,18 @@ func (c toolsCommand) Handle(ctx context.Context, req command.Request) (*command
 		return &command.Result{Content: "skill reload completed"}, nil
 	case "uninstall", "remove":
 		if len(fields) < 2 {
-			return &command.Result{Content: "usage: /tools remove <name> --confirm"}, nil
+			return &command.Result{Content: "usage: " + req.Prefix + "tools remove <name> --confirm"}, nil
 		}
 		name := fields[1]
 		if !hasFlag(fields[2:], "--confirm") {
-			return &command.Result{Content: fmt.Sprintf("将删除外置 skill %q 及其目录。确认请执行：/tools remove %s --confirm", name, name)}, nil
+			return &command.Result{Content: fmt.Sprintf("将删除外置 skill %q 及其目录。确认请执行：%stools remove %s --confirm", name, req.Prefix, name)}, nil
 		}
 		if err := deps.Tools.Remove(ctx, name); err != nil {
 			return &command.Result{Content: fmt.Sprintf("remove failed: %v", err)}, nil
 		}
 		return &command.Result{Content: fmt.Sprintf("removed skill: %s", name)}, nil
 	default:
-		return &command.Result{Content: "usage: /tools [reload|uninstall|remove] [name]"}, nil
+		return &command.Result{Content: "usage: " + req.Prefix + "tools [reload|uninstall|remove] [name]"}, nil
 	}
 }
 

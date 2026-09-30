@@ -1,0 +1,52 @@
+# ElBot 离线包专用 Compose（基于预编译二进制，不需要 Go）
+#
+#   cd offline-amd64
+#   cp .env.example .env   # 填 Key / token
+#   docker compose build
+#   docker compose up -d
+#
+# 如果已经用 `docker load` 载入了 elbot-0.5.0-linux-amd64.tar.gz，
+# 可直接 `docker compose up -d`，无需 build。
+
+services:
+  elbot:
+    image: ${ELBOT_IMAGE:-elbot:0.5.0}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 国内可换成：registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim
+        BASE_IMAGE: ${BASE_IMAGE:-debian:bookworm-slim}
+    container_name: elbot
+    hostname: elbot
+
+    restart: unless-stopped
+    stop_grace_period: 40s
+    init: true
+
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      XDG_CONFIG_HOME: /data/config
+      XDG_DATA_HOME: /data
+      XDG_RUNTIME_DIR: /data/run
+
+    volumes:
+      - ./data:/data
+
+    ports:
+      - "127.0.0.1:32172:32172"
+      - "127.0.0.1:32170:32170"
+
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

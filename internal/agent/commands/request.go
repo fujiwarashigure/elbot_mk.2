@@ -58,7 +58,7 @@ func (c stopCommand) Info() command.Info {
 	return command.Info{
 		Name:        "stop",
 		Usage:       "/stop [request_id|number]",
-		Description: "Stop a request or all requests in current session. Use /requests to see numbers like 1 or 1.1.",
+		Description: "Stop a request or all requests in current session. Numbers like 1 or 1.1 come from the requests command output.",
 		MinRole:     security.RoleUser,
 	}
 }

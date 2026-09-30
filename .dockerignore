@@ -1,0 +1,28 @@
+# Docker 构建上下文裁剪（构建上下文 = 仓库根目录）
+# 说明：如果 BuildKit 识别 deploy/Dockerfile.dockerignore，会优先使用那份。
+
+.git
+.gitattributes
+.gitignore
+.github
+
+docs
+docs.en
+devdocs
+*.md
+!README.md
+
+.translation-cache
+scripts
+*.zip
+*.tar.gz
+*.tar
+
+data
+bin
+dist
+release-assets
+deploy/dist
+deploy/data
+deploy/backups
+deploy/.env

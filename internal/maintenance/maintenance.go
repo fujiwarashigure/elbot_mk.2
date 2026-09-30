@@ -25,7 +25,11 @@ type Service struct {
 	chatHistoryCleanup config.ChatHistoryCleanupConfig
 	sandboxRoot        string
 	sandboxCleanup     config.MaintenanceCleanupConfig
+	report             config.DailyReportConfig
 	logger             *slog.Logger
+
+	// Report delivers the daily report text (wired to superadmins by app).
+	Report func(ctx context.Context, text string) error
 }
 
 func NewService(logs *logging.Manager, store storage.Store, sessionCleanup config.MaintenanceCleanupConfig, logger *slog.Logger) *Service {
@@ -36,7 +40,7 @@ func NewServiceWithConfig(logs *logging.Manager, store storage.Store, chatHistor
 	if cfg == nil {
 		return NewService(logs, store, config.MaintenanceCleanupConfig{}, logger)
 	}
-	return &Service{logs: logs, store: store, chatHistory: chatHistory, sessionCleanup: cfg.Maintenance.SessionCleanup, chatHistoryCleanup: cfg.Maintenance.ChatHistoryCleanup, sandboxRoot: cfg.Sandbox.Root, sandboxCleanup: cfg.Maintenance.SandboxCleanup, logger: logger}
+	return &Service{logs: logs, store: store, chatHistory: chatHistory, sessionCleanup: cfg.Maintenance.SessionCleanup, chatHistoryCleanup: cfg.Maintenance.ChatHistoryCleanup, sandboxRoot: cfg.Sandbox.Root, sandboxCleanup: cfg.Maintenance.SandboxCleanup, report: cfg.Maintenance.DailyReport, logger: logger}
 }
 
 func (s *Service) RegisterCronHandlers(manager *elcron.Manager) error {
@@ -71,6 +75,11 @@ func (s *Service) RegisterCronHandlers(manager *elcron.Manager) error {
 	}); err != nil {
 		return err
 	}
+	if err := manager.RegisterHandler("maintenance.daily_report", func(ctx context.Context, job storage.CronJob) error {
+		return s.RunDailyReport(ctx)
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -91,6 +100,9 @@ func SetupCron(ctx context.Context, manager *elcron.Manager, cfg *config.Config)
 		return err
 	}
 	if err := upsertOrDisable(ctx, manager, true, "system.maintenance.media_cleanup", "maintenance.media_cleanup", cfg.Maintenance.SandboxCleanup.Schedule); err != nil {
+		return err
+	}
+	if err := upsertOrDisable(ctx, manager, cfg.Maintenance.DailyReport.Enabled, "system.maintenance.daily_report", "maintenance.daily_report", cfg.Maintenance.DailyReport.Schedule); err != nil {
 		return err
 	}
 	return manager.Start(ctx)

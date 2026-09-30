@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 
 	"elbot/internal/command"
 	"elbot/internal/hook"
@@ -34,7 +33,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (err error) {
 	}()
 	woken := a.messageWakeup(ctx, llm.SegmentsTextOnly(segments))
 	ctx = withMessageWakeup(ctx, woken)
-	if strings.TrimSpace(llm.SegmentsTextOnly(segments)) == "/cancel" {
+	if a.isCancelCommand(llm.SegmentsTextOnly(segments)) {
 		cancelEvent := a.fillHookContext(ctx, hook.Event{Point: hook.PointPlatformMessageReceived, Actor: actorContext(actor), Message: hook.MessagePayload{Role: string(llm.RoleUser), Segments: segments}})
 		if a.cancelHookRoute(cancelEvent) {
 			a.sendChat(ctx, "已取消当前 Hook 会话。")
@@ -74,7 +73,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (err error) {
 	}
 	ctx = withInboundSegments(ctx, segments)
 	text = llm.SegmentsTextOnly(segments)
-	if strings.TrimSpace(text) == "/cancel" && a.cancelHookRoute(event) {
+	if a.isCancelCommand(text) && a.cancelHookRoute(event) {
 		a.sendChat(ctx, "已取消当前 Hook 会话。")
 		return nil
 	}

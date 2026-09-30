@@ -49,10 +49,10 @@ func (e Executor) Execute(ctx context.Context, call llm.ToolCallRequest) Executi
 	}
 	info := tool.Info()
 	if info.SuperadminOnly && actor.Role != security.RoleSuperadmin {
-		return executionError(call, message, fmt.Errorf("tool %q requires superadmin role", call.Name))
+		return executionError(call, message, fmt.Errorf("tool %q requires superadmin role; ask an administrator to add you to security.superadmins", call.Name))
 	}
 	if !policy.CanUseTool(actor, assessment.Level, info.OwnerScoped) {
-		return executionError(call, message, fmt.Errorf("risk %s is above your allowed tool level", assessment.Level))
+		return executionError(call, message, fmt.Errorf("risk %s is above your allowed tool level; ask an administrator to raise security.user_max_tool_risk or add you to security.superadmins", assessment.Level))
 	}
 	result, err := tool.Call(ctx, CallRequest{ID: call.ID, Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
 	if err != nil {

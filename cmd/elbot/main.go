@@ -31,6 +31,15 @@ func main() {
 		fmt.Fprintf(os.Stdout, "elbot %s\n", version)
 		return
 	}
+	if opts.Command == launcher.CommandConfigCheck {
+		summary, err := app.CheckConfig(opts.ConfigPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "elbot: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprint(os.Stdout, summary)
+		return
+	}
 	if opts.Command == launcher.CommandCompletion {
 		if err := launcher.WriteCompletion(os.Stdout, opts.Completion); err != nil {
 			fmt.Fprintf(os.Stderr, "elbot: %v\n", err)

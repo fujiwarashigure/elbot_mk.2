@@ -5,6 +5,7 @@ import (
 	"elbot/internal/config"
 	"elbot/internal/llm"
 	"elbot/internal/security"
+	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
 	"elbot/internal/tool/builtin"
@@ -658,5 +659,39 @@ func TestSoulPromptAndToolsByMode(t *testing.T) {
 	}
 	if tools.calls != 1 {
 		t.Fatalf("tool provider calls = %d", tools.calls)
+	}
+}
+
+func TestChatModeToolDirectiveNotifiesInsteadOfSilent(t *testing.T) {
+	p := &fakePlatform{}
+	store := newTestStore(t)
+	f := &fakeLLM{replies: []string{"done"}}
+	a := New(p, f, "test-model", config.ProviderConfig{}, store)
+	a.SetSecurityPolicy(security.NewPolicy("low", "critical", map[string][]string{"cli": {"local"}}))
+	registry := tool.NewRegistry()
+	_ = registry.Register(tool.NewDiscoverTool(registry))
+	_ = registry.Register(builtin.NewWebSearchTool())
+	a.SetToolRuntime(registry, nil)
+
+	ctx := context.Background()
+	if _, err := a.sessions.Create(ctx, a.scope(ctx), session.CreateRequest{Title: "chat only", Mode: storage.SessionModeChat}); err != nil {
+		t.Fatalf("create chat session: %v", err)
+	}
+	if err := a.HandleMessage(ctx, "@tool:web_search 查资料"); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	if notice := p.out.String(); !strings.Contains(notice, "工具预载仅在 work 模式可用") {
+		t.Fatalf("expected chat-mode directive notice, got %q", notice)
+	}
+	requests := f.chatRequests()
+	if len(requests) != 1 {
+		t.Fatalf("chat requests = %d", len(requests))
+	}
+	if got := toolNames(requests[0].Tools); got != "" {
+		t.Fatalf("chat mode must not expose tools, got %q", got)
+	}
+	latest := llm.SegmentsContentText(requests[0].Messages[len(requests[0].Messages)-1].Segments)
+	if latest != "查资料" {
+		t.Fatalf("directive should be stripped in chat mode, got %q", latest)
 	}
 }

@@ -12,8 +12,9 @@ import (
 type Command string
 
 const (
-	CommandRun        Command = "run"
-	CommandCompletion Command = "completion"
+	CommandRun         Command = "run"
+	CommandCompletion  Command = "completion"
+	CommandConfigCheck Command = "config-check"
 )
 
 type Options struct {
@@ -84,6 +85,11 @@ func ParseArgs(args []string) (Options, error) {
 			return Options{}, fmt.Errorf("usage: elbot service run [--config path]")
 		}
 		opts.Mode = app.RunModeService
+	case "config":
+		if len(positionals) != 2 || positionals[1] != "check" {
+			return Options{}, fmt.Errorf("usage: elbot config check [--config path]")
+		}
+		opts.Command = CommandConfigCheck
 	case "completion":
 		if len(positionals) != 2 || !SupportedCompletionShell(positionals[1]) {
 			return Options{}, fmt.Errorf("usage: elbot completion [auto|bash|zsh|fish|nushell|powershell]")
@@ -111,13 +117,15 @@ func WriteUsage(w io.Writer) {
   elbot run [--config path]
   elbot cli [--config path] [-c client]
   elbot service run [--config path]
+  elbot config check [--config path]
   elbot completion [auto|bash|zsh|fish|nushell|powershell]
 
 Commands:
-  run          Run full foreground mode: CLI plus enabled platforms and cron.
-  cli          Run local CLI-only mode: CLI without background platforms or cron.
-  service run  Run headless service mode for Linux service managers.
-  completion   Generate shell completion scripts.
+  run           Run full foreground mode: CLI plus enabled platforms and cron.
+  cli           Run local CLI-only mode: CLI without background platforms or cron.
+  service run   Run headless service mode for Linux service managers.
+  config check  Load app.toml, print a summary and warnings, exit non-zero on error.
+  completion    Generate shell completion scripts.
 
 Options:
   -c, --client name  CLI client profile name.

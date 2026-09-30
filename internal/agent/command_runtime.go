@@ -44,11 +44,11 @@ func (e *commandExecutor) Handle(ctx context.Context, text string) (bool, error)
 		return true, e.handleRisk(ctx, sessionRow.ID, text)
 	}
 	if sessionErr == nil && hasInfo && snapshot.Phase != turn.PhaseIdle && blocksDuringActiveTurn(info.SessionEffect) {
-		e.sendChat(ctx, activeTurnCommandBlockedText())
+		e.sendChat(ctx, e.activeTurnCommandBlockedText())
 		return true, nil
 	}
 	if sessionErr == nil && hasInfo && e.compactActive(sessionRow.ID) && blocksDuringCompact(info.SessionEffect) {
-		e.sendChat(ctx, compactCommandBlockedText(text))
+		e.sendChat(ctx, e.compactCommandBlockedText(text))
 		return true, nil
 	}
 

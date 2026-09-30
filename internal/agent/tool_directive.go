@@ -13,11 +13,12 @@ import (
 )
 
 type toolDirectiveResult struct {
-	Text     string
-	Injected []string
-	Existing []string
-	Invalid  []string
-	Err      error
+	Text        string
+	Injected    []string
+	Existing    []string
+	Invalid     []string
+	ModeBlocked bool
+	Err         error
 }
 
 type skillDirectiveResult struct {
@@ -26,19 +27,30 @@ type skillDirectiveResult struct {
 	InjectedWrappers []string
 	ExistingWrappers []string
 	Invalid          []string
+	ModeBlocked      bool
 }
 
 func (a *Agent) applyToolDirectives(ctx context.Context, session *storage.Session, text string) toolDirectiveResult {
 	result := toolDirectiveResult{Text: text}
-	if session == nil || session.Mode != storage.SessionModeWork || a.toolRuntime.registry == nil || !containsAny(text, directive.ToolPrefix, directive.ToolFullPrefix, directive.ToolShortPrefix, directive.ToolShortFull) {
+	if session == nil || a.toolRuntime.registry == nil || !containsAny(text, directive.ToolPrefix, directive.ToolFullPrefix, directive.ToolShortPrefix, directive.ToolShortFull) {
 		return result
-	}
-	if !isBackgroundSession(session) {
-		ctx = tool.WithWorkspaceStore(ctx, sessionWorkspaceStore{agent: a, session: session})
 	}
 	matches := directive.ToolMatches(text)
 	if len(matches) == 0 {
 		return result
+	}
+	if session.Mode != storage.SessionModeWork {
+		result.ModeBlocked = true
+		remove := make([]bool, len(matches))
+		for i, match := range matches {
+			result.Invalid = append(result.Invalid, match.Name)
+			remove[i] = true
+		}
+		result.Text = directive.StripToolMatches(text, matches, remove)
+		return result
+	}
+	if !isBackgroundSession(session) {
+		ctx = tool.WithWorkspaceStore(ctx, sessionWorkspaceStore{agent: a, session: session})
 	}
 
 	remove := make([]bool, len(matches))
@@ -113,11 +125,21 @@ func (a *Agent) preloadedContextDiscoveryContent(ctx context.Context, discovery 
 
 func (a *Agent) applySkillDirectives(ctx context.Context, session *storage.Session, text string) skillDirectiveResult {
 	result := skillDirectiveResult{Text: text}
-	if session == nil || session.Mode != storage.SessionModeWork || a.toolRuntime.registry == nil || !containsAny(text, directive.SkillPrefix, directive.SkillFullPrefix, directive.SkillShortPrefix, directive.SkillShortFull) {
+	if session == nil || a.toolRuntime.registry == nil || !containsAny(text, directive.SkillPrefix, directive.SkillFullPrefix, directive.SkillShortPrefix, directive.SkillShortFull) {
 		return result
 	}
 	matches := directive.SkillMatches(text)
 	if len(matches) == 0 {
+		return result
+	}
+	if session.Mode != storage.SessionModeWork {
+		result.ModeBlocked = true
+		remove := make([]bool, len(matches))
+		for i, match := range matches {
+			result.Invalid = append(result.Invalid, strings.TrimSpace(match.Name))
+			remove[i] = true
+		}
+		result.Text = directive.StripToolMatches(text, matches, remove)
 		return result
 	}
 	ctx = tool.WithShownRuleCardFormats(ctx, decodeSessionMetadata(session.Metadata).ShownRuleCardFormats)
@@ -338,8 +360,11 @@ func (a *Agent) notifyToolDirectiveResult(ctx context.Context, result toolDirect
 	if len(result.Existing) > 0 {
 		parts = append(parts, "已存在工具："+strings.Join(sortedUnique(result.Existing), ", "))
 	}
-	if len(result.Invalid) > 0 {
+	if len(result.Invalid) > 0 && !result.ModeBlocked {
 		parts = append(parts, "未找到或不可用的工具："+strings.Join(sortedUnique(result.Invalid), ", "))
+	}
+	if result.ModeBlocked {
+		parts = append(parts, fmt.Sprintf("工具预载仅在 work 模式可用，当前是 chat 模式。发送 %swork 切换后再试。", a.commandPrefix()))
 	}
 	if len(parts) == 0 {
 		return
@@ -358,8 +383,11 @@ func (a *Agent) notifySkillDirectiveResult(ctx context.Context, result skillDire
 	if len(result.ExistingWrappers) > 0 {
 		parts = append(parts, "已存在 Skill 工具："+strings.Join(sortedUnique(result.ExistingWrappers), ", "))
 	}
-	if len(result.Invalid) > 0 {
+	if len(result.Invalid) > 0 && !result.ModeBlocked {
 		parts = append(parts, "未找到或不可用的 Skill："+strings.Join(sortedUnique(result.Invalid), ", "))
+	}
+	if result.ModeBlocked {
+		parts = append(parts, fmt.Sprintf("Skill 预载仅在 work 模式可用，当前是 chat 模式。发送 %swork 切换后再试。", a.commandPrefix()))
 	}
 	if len(parts) == 0 {
 		return

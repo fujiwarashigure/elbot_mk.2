@@ -96,7 +96,7 @@ func (t WebSearchTool) Schema() llm.ToolSchema {
 
 func webSearchBuilder() *tool.Builder {
 	return tool.NewBuilder("web_search").
-		Description("执行网页搜索，返回简洁答案、来源链接和摘要；需要完整网页内容时继续调用 web_extract。").
+		Description("执行网页搜索，返回简洁答案、来源链接和摘要；需要完整网页内容时继续调用 web_extract。未配置 TAVILY_API_KEY 时不可用。").
 		Risk(tool.RiskLow).
 		Tags("web").
 		DependsOn("web_extract").

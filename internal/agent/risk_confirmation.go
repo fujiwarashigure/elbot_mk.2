@@ -20,35 +20,35 @@ type riskConfirmationCommand struct {
 	Description string
 }
 
-func riskConfirmationCommands() []riskConfirmationCommand {
+func riskConfirmationCommands(prefix string) []riskConfirmationCommand {
 	return []riskConfirmationCommand{
-		{Name: "detail", Aliases: []string{"details"}, Usage: "/detail", Description: "查看完整参数"},
-		{Name: "confirm", Aliases: []string{"c"}, Usage: "/confirm", Description: "确认本次"},
-		{Name: "confirmtool", Aliases: []string{"ct"}, Usage: "/confirmtool", Description: "确认本次并自动确认后续同工具调用"},
-		{Name: "confirmall", Aliases: []string{"ca"}, Usage: "/confirmall", Description: "确认本次并自动确认当前 Session 后续所有工具调用"},
-		{Name: "reject", Usage: "/reject <原因>", Description: "拒绝"},
-		{Name: "stop", Usage: "/stop", Description: "停止当前请求"},
+		{Name: "detail", Aliases: []string{"details"}, Usage: prefix + "detail", Description: "查看完整参数"},
+		{Name: "confirm", Aliases: []string{"c"}, Usage: prefix + "confirm", Description: "确认本次"},
+		{Name: "confirmtool", Aliases: []string{"ct"}, Usage: prefix + "confirmtool", Description: "确认本次并自动确认后续同工具调用"},
+		{Name: "confirmall", Aliases: []string{"ca"}, Usage: prefix + "confirmall", Description: "确认本次并自动确认当前 Session 后续所有工具调用"},
+		{Name: "reject", Usage: prefix + "reject <原因>", Description: "拒绝"},
+		{Name: "stop", Usage: prefix + "stop", Description: "停止当前请求"},
 	}
 }
 
-func riskConfirmationCommandHelp() string {
-	parts := make([]string, 0, len(riskConfirmationCommands()))
-	for _, cmd := range riskConfirmationCommands() {
+func riskConfirmationCommandHelp(prefix string) string {
+	parts := make([]string, 0, len(riskConfirmationCommands(prefix)))
+	for _, cmd := range riskConfirmationCommands(prefix) {
 		parts = append(parts, cmd.Usage+" "+cmd.Description)
 	}
 	return strings.Join(parts, "；")
 }
 
-func riskConfirmationPromptText(timeout time.Duration) string {
-	text := "可用指令：" + riskConfirmationCommandHelp()
+func riskConfirmationPromptText(prefix string, timeout time.Duration) string {
+	text := "可用指令：" + riskConfirmationCommandHelp(prefix)
 	if timeout > 0 {
-		text += fmt.Sprintf("；超过 %s 没有执行有效操作将自动停止，/detail 可重新计时", confirmationWaitDurationText(timeout))
+		text += fmt.Sprintf("；超过 %s 没有执行有效操作将自动停止，%sdetail 可重新计时", confirmationWaitDurationText(timeout), prefix)
 	}
 	return text
 }
 
-func riskConfirmationWaitingText() string {
-	return "正在等待高风险工具调用确认，只接受：" + riskConfirmationCommandHelp() + "。\n"
+func riskConfirmationWaitingText(prefix string) string {
+	return "正在等待高风险工具调用确认，只接受：" + riskConfirmationCommandHelp(prefix) + "。\n"
 }
 
 func riskConfirmationDetailText(confirmation turn.RiskConfirmation) string {
@@ -189,7 +189,7 @@ func riskIndent(level int) string {
 }
 
 func riskConfirmationCommandNames() []string {
-	commands := riskConfirmationCommands()
+	commands := riskConfirmationCommands("/")
 	names := make([]string, 0, len(commands)*2)
 	for _, cmd := range commands {
 		names = append(names, cmd.Name)

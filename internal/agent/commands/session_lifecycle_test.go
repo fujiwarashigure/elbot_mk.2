@@ -37,7 +37,7 @@ func TestLifecycleCommandsArchiveAndArchives(t *testing.T) {
 		SessionState: selections,
 	}
 
-	preview, err := NewArchive(deps).Handle(ctx, command.Request{Args: "1"})
+	preview, err := NewArchive(deps).Handle(ctx, command.Request{Prefix: "/", Args: "1"})
 	if err != nil {
 		t.Fatalf("archive preview: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestLifecycleCommandsArchiveAndArchives(t *testing.T) {
 		t.Fatalf("archives list missing page: %q", list.Content)
 	}
 
-	deletePreview, err := NewDelete(deps).Handle(ctx, command.Request{Args: "1"})
+	deletePreview, err := NewDelete(deps).Handle(ctx, command.Request{Prefix: "/", Args: "1"})
 	if err != nil {
 		t.Fatalf("delete preview: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestArchiveCurrentConfirmationPinsSessionID(t *testing.T) {
 		Scope:    func(context.Context) session.Scope { return scope },
 	}
 
-	preview, err := NewArchive(deps).Handle(ctx, command.Request{})
+	preview, err := NewArchive(deps).Handle(ctx, command.Request{Prefix: "/"})
 	if err != nil {
 		t.Fatalf("archive preview: %v", err)
 	}

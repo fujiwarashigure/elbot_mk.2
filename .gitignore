@@ -17,3 +17,5 @@ data/cron_sandbox/
 data/elbot_sessions.db
 bin/
 
+# Generated offline/image artifacts (use GitHub Releases instead)
+deploy/dist/

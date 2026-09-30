@@ -64,6 +64,7 @@ type Service struct {
 	runner           LLMRunner
 	enabledPlatforms []PlatformTarget
 	sandboxRoot      string
+	commandPrefix    string
 	now              func() time.Time
 
 	mu                 sync.Mutex
@@ -80,6 +81,7 @@ type Options struct {
 	Runner           LLMRunner
 	EnabledPlatforms []PlatformTarget
 	SandboxRoot      string
+	CommandPrefix    string
 }
 
 func NewService(opts Options) *Service {
@@ -87,7 +89,11 @@ func NewService(opts Options) *Service {
 	if sandboxRoot == "" {
 		sandboxRoot = filepath.Join("data", "sandbox")
 	}
-	s := &Service{manager: opts.Manager, store: opts.Store, logger: opts.Logger, audit: opts.Audit, sendTarget: opts.SendTarget, runner: opts.Runner, sandboxRoot: sandboxRoot, now: time.Now, connectedPlatforms: map[string]bool{}, deliveryGates: map[string]*sync.Mutex{}}
+	commandPrefix := strings.TrimSpace(opts.CommandPrefix)
+	if commandPrefix == "" {
+		commandPrefix = "/"
+	}
+	s := &Service{manager: opts.Manager, store: opts.Store, logger: opts.Logger, audit: opts.Audit, sendTarget: opts.SendTarget, runner: opts.Runner, sandboxRoot: sandboxRoot, commandPrefix: commandPrefix, now: time.Now, connectedPlatforms: map[string]bool{}, deliveryGates: map[string]*sync.Mutex{}}
 	s.enabledPlatforms = normalizePlatformTargets(opts.EnabledPlatforms)
 	return s
 }

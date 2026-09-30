@@ -161,7 +161,7 @@ func (a *Agent) SelectModelForMode(mode, arg string) (agentcommands.ModelOption,
 func (a *Agent) selectModelOption(arg string) (agentcommands.ModelOption, error) {
 	name := strings.TrimSpace(arg)
 	if name == "" {
-		return agentcommands.ModelOption{}, fmt.Errorf("usage: /model <name or number>")
+		return agentcommands.ModelOption{}, fmt.Errorf("usage: %smodel <name or number>", a.commandPrefix())
 	}
 
 	models := a.modelOptions("", modelListOptions{}).Options

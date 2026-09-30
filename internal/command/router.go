@@ -9,11 +9,15 @@ import (
 	"elbot/internal/security"
 )
 
+// defaultCommandPrefix 是未显式配置命令前缀时的默认值。
+const defaultCommandPrefix = "/*"
+
 type Router struct {
-	prefixes []string
-	handlers map[string]Handler
-	primary  map[string]bool
-	order    []string
+	prefixes      []string
+	defaultPrefix string
+	handlers      map[string]Handler
+	primary       map[string]bool
+	order         []string
 }
 
 type Parsed struct {
@@ -24,12 +28,32 @@ type Parsed struct {
 }
 
 func NewRouter(prefixes []string) *Router {
+	defaultPrefix := PrimaryPrefix(prefixes)
 	prefixes = normalizePrefixes(prefixes)
 	return &Router{
-		prefixes: prefixes,
-		handlers: map[string]Handler{},
-		primary:  map[string]bool{},
+		prefixes:      prefixes,
+		defaultPrefix: defaultPrefix,
+		handlers:      map[string]Handler{},
+		primary:       map[string]bool{},
 	}
+}
+
+// PrimaryPrefix 返回配置里第一个非空命令前缀，用于生成提示文案和平台按钮。
+func PrimaryPrefix(prefixes []string) string {
+	for _, prefix := range prefixes {
+		if prefix = strings.TrimSpace(prefix); prefix != "" {
+			return prefix
+		}
+	}
+	return defaultCommandPrefix
+}
+
+// PrimaryPrefix 返回该 Router 的主命令前缀。
+func (r *Router) PrimaryPrefix() string {
+	if r == nil || r.defaultPrefix == "" {
+		return defaultCommandPrefix
+	}
+	return r.defaultPrefix
 }
 
 func (r *Router) Register(h Handler) error {
@@ -219,7 +243,7 @@ func (r *Router) Prefixes() []string {
 func normalizePrefixes(prefixes []string) []string {
 
 	if len(prefixes) == 0 {
-		prefixes = []string{"/"}
+		prefixes = []string{defaultCommandPrefix}
 	}
 	seen := map[string]bool{}
 	out := []string{}
@@ -232,7 +256,7 @@ func normalizePrefixes(prefixes []string) []string {
 		out = append(out, prefix)
 	}
 	if len(out) == 0 {
-		out = []string{"/"}
+		out = []string{defaultCommandPrefix}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
 	return out

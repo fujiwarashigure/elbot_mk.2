@@ -81,6 +81,10 @@ func (t discoverTool) Call(ctx context.Context, req CallRequest) (*Result, error
 		}
 		result = &DiscoveryResult{Tools: out}
 	} else {
+		names = expandDiscoveryTagNames(t.registry, names, func(candidate Tool) bool {
+			info := candidate.Info()
+			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info)
+		})
 		details, errors := t.registry.DiscoverDetails(names, func(candidate Tool) bool {
 			info := candidate.Info()
 			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info)
@@ -211,4 +215,39 @@ func discoverySecurity(ctx context.Context) (security.Actor, *security.Policy) {
 		actor = security.Actor{Role: security.RoleUser}
 	}
 	return actor, policy
+}
+
+// expandDiscoveryTagNames 把 discover_tool 请求里“不是工具名”的条目当作 tag 展开成工具名。
+// 这样隐藏工具（例如 chat 组里的 get_media）也能通过 discover_tool(name="<tag>") 被发现。
+func expandDiscoveryTagNames(registry *Registry, names []string, allowed func(Tool) bool) []string {
+	if registry == nil || len(names) == 0 {
+		return names
+	}
+	out := make([]string, 0, len(names))
+	seen := map[string]bool{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		if _, ok := registry.Get(name); ok {
+			seen[name] = true
+			out = append(out, name)
+			continue
+		}
+		matches := registry.NamesByTag(name, allowed)
+		if len(matches) == 0 {
+			seen[name] = true
+			out = append(out, name)
+			continue
+		}
+		for _, match := range matches {
+			if seen[match] {
+				continue
+			}
+			seen[match] = true
+			out = append(out, match)
+		}
+	}
+	return out
 }

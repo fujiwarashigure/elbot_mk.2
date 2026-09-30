@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 
+	"elbot/internal/character"
 	"elbot/internal/command"
 	"elbot/internal/hook"
 	hookruntime "elbot/internal/hook/runtime"
@@ -119,6 +120,7 @@ type Deps struct {
 	Tools         ToolService
 	Hooks         HookService
 	SessionState  *SessionCommandState
+	Characters    *character.Store
 	Audit         func(event string, attrs ...any)
 	Logs          LogService
 	RuntimeStatus func(sessionID string) runtimestatus.Snapshot
@@ -151,6 +153,7 @@ func DefaultModules() []Module {
 		RequestModule{},
 		LogModule{},
 		ToolModule{},
+		CharacterModule{},
 		HookModule{},
 	}
 }

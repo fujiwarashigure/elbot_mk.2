@@ -96,7 +96,7 @@ func (d agentToolRunDeps) ConfirmToolCall(ctx context.Context, sessionID string,
 	previewArgs := previewArguments(fullArgs)
 	timeout := d.agent.confirmationWaitTimeout(ctx)
 	d.agent.logRiskConfirmationWait(sessionID, call, assessment.Level, assessment.Reasons)
-	d.agent.sendChat(ctx, fmt.Sprintf("高风险工具调用等待确认\n工具：%s\n风险：%s\n参数：%s%s\n%s。", call.Name, assessment.Level, previewArgs, riskReasonsText(assessment.Reasons), riskConfirmationPromptText(timeout)))
+	d.agent.sendChat(ctx, fmt.Sprintf("高风险工具调用等待确认\n工具：%s\n风险：%s\n参数：%s%s\n%s。", call.Name, assessment.Level, previewArgs, riskReasonsText(assessment.Reasons), riskConfirmationPromptText(d.agent.commandPrefix(), timeout)))
 	resp, ok := d.agent.turns.AwaitRiskConfirmationContext(ctx, sessionID, turn.RiskConfirmation{ID: call.ID, ToolName: call.Name, Arguments: fullArgs, Risk: string(assessment.Level), Summary: fmt.Sprintf("%s %s", call.Name, previewArgs), Detail: detail}, timeout)
 	if resp.Expired {
 		d.agent.logRiskConfirmationResult(sessionID, call, assessment.Level, "expire", resp.Extra, "confirmation wait expired")

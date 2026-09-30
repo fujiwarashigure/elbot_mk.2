@@ -25,6 +25,16 @@ func DecodeConfig(raw map[string]any, out any) error {
 	return nil
 }
 
+// PrimaryCommandPrefix 返回平台适配器应使用的主命令前缀（配置里第一个非空项）。
+func PrimaryCommandPrefix(prefixes []string) string {
+	for _, prefix := range prefixes {
+		if prefix = strings.TrimSpace(prefix); prefix != "" {
+			return prefix
+		}
+	}
+	return "/*"
+}
+
 // StripTriggerKeyword removes only the matched keyword prefix from text.
 func StripTriggerKeyword(text string, keywords []string) (string, bool) {
 	text = strings.TrimSpace(text)

@@ -6,19 +6,37 @@ import (
 )
 
 const (
-	ToolPrefix       = "@tool:"
-	ToolFullPrefix   = "@tool："
-	ToolShortPrefix  = "@t:"
-	ToolShortFull    = "@t："
-	SkillPrefix      = "@skill:"
-	SkillFullPrefix  = "@skill："
-	SkillShortPrefix = "@s:"
-	SkillShortFull   = "@s："
+	ToolPrefix              = "@tool:"
+	ToolFullPrefix          = "@tool："
+	ToolShortPrefix         = "@t:"
+	ToolShortFull           = "@t："
+	SkillPrefix             = "@skill:"
+	SkillFullPrefix         = "@skill："
+	SkillShortPrefix        = "@s:"
+	SkillShortFull          = "@s："
+	CharacterPrefix         = "@char:"
+	CharacterFullPrefix     = "@char："
+	CharacterShortPrefix    = "@c:"
+	CharacterShortFull      = "@c："
+	ModelProfilePrefix      = "@model:"
+	ModelProfileFullPrefix  = "@model："
+	ModelProfileShortPrefix = "@m:"
+	ModelProfileShortFull   = "@m："
+	ImageProfilePrefix      = "@image:"
+	ImageProfileFullPrefix  = "@image："
+	ImageProfileShortPrefix = "@img:"
+	ImageProfileShortFull   = "@img："
+	ToolProfilePrefix       = "@use:"
+	ToolProfileFullPrefix   = "@use："
 )
 
 var (
-	toolPattern  = regexp.MustCompile(`@(?:tool|t)[:：]([A-Za-z0-9_.-]+)`)
-	skillPattern = regexp.MustCompile(`@(?:skill|s)[:：]([A-Za-z0-9_.-]+)`)
+	toolPattern         = regexp.MustCompile(`@(?:tool|t)[:：]([A-Za-z0-9_.-]+)`)
+	skillPattern        = regexp.MustCompile(`@(?:skill|s)[:：]([A-Za-z0-9_.-]+)`)
+	characterPattern    = regexp.MustCompile(`@(?:char|c)[:：]([A-Za-z0-9_.-]+)`)
+	modelProfilePattern = regexp.MustCompile(`@(?:model|m)[:：]([A-Za-z0-9_.-]+)`)
+	imageProfilePattern = regexp.MustCompile(`@(?:image|img)[:：]([A-Za-z0-9_.-]+)`)
+	toolProfilePattern  = regexp.MustCompile(`@use[:：]([A-Za-z0-9_.-]+)`)
 )
 
 type ToolMatch struct {
@@ -28,6 +46,14 @@ type ToolMatch struct {
 }
 
 type SkillMatch = ToolMatch
+
+type CharacterMatch = ToolMatch
+
+type ModelProfileMatch = ToolMatch
+
+type ImageProfileMatch = ToolMatch
+
+type ToolProfileMatch = ToolMatch
 
 type ToolCompletionToken struct {
 	Start      int
@@ -45,6 +71,22 @@ func ToolMatches(text string) []ToolMatch {
 
 func SkillMatches(text string) []SkillMatch {
 	return matches(text, skillPattern)
+}
+
+func CharacterMatches(text string) []CharacterMatch {
+	return matches(text, characterPattern)
+}
+
+func ModelProfileMatches(text string) []ModelProfileMatch {
+	return matches(text, modelProfilePattern)
+}
+
+func ImageProfileMatches(text string) []ImageProfileMatch {
+	return matches(text, imageProfilePattern)
+}
+
+func ToolProfileMatches(text string) []ToolProfileMatch {
+	return matches(text, toolProfilePattern)
 }
 
 func matches(text string, pattern *regexp.Regexp) []ToolMatch {
@@ -76,6 +118,10 @@ func ParseToolCompletionToken(text string, cursor int) ToolCompletionToken {
 
 func ParseSkillCompletionToken(text string, cursor int) SkillCompletionToken {
 	return parseCompletionToken(text, cursor, []string{SkillShortPrefix, SkillShortFull, SkillPrefix, SkillFullPrefix})
+}
+
+func ParseCharacterCompletionToken(text string, cursor int) ToolCompletionToken {
+	return parseCompletionToken(text, cursor, []string{CharacterShortPrefix, CharacterShortFull, CharacterPrefix, CharacterFullPrefix})
 }
 
 func parseCompletionToken(text string, cursor int, prefixes []string) ToolCompletionToken {

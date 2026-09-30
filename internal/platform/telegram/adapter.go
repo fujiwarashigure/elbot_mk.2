@@ -318,10 +318,10 @@ func telegramMediaReceipt(receipt delivery.Receipt, target target, out delivery.
 func (a *Adapter) sendToTarget(ctx context.Context, t target, out delivery.Output) (delivery.Receipt, error) {
 	switch out.Kind {
 	case delivery.KindText:
-		return a.sendText(ctx, t, out.Text, 0, shouldAttachRiskKeyboard(out.Text))
+		return a.sendText(ctx, t, out.Text, 0, shouldAttachRiskKeyboard(out.Text, a.commandPrefix()))
 	case delivery.KindReply:
 		replyID, _ := strconv.ParseInt(strings.TrimSpace(out.ReplyToPlatformMessageID), 10, 64)
-		return a.sendText(ctx, t, out.Text, replyID, shouldAttachRiskKeyboard(out.Text))
+		return a.sendText(ctx, t, out.Text, replyID, shouldAttachRiskKeyboard(out.Text, a.commandPrefix()))
 	case delivery.KindEmoticon:
 		return a.sendSticker(ctx, t, out, 0)
 	case delivery.KindImage:
@@ -363,7 +363,7 @@ func (a *Adapter) sendRichText(ctx context.Context, t target, text string, reply
 				req.ReplyParameters = &replyParameters{MessageID: replyTo}
 			}
 			if keyboard {
-				req.ReplyMarkup = riskKeyboard()
+				req.ReplyMarkup = riskKeyboard(a.commandPrefix())
 			}
 		}
 		msg, err := a.client.sendRichMessage(ctx, req)
@@ -398,7 +398,7 @@ func (a *Adapter) sendFormattedText(ctx context.Context, t target, text, parseMo
 		if i == 0 {
 			req.ReplyToMessageID = replyTo
 			if keyboard {
-				req.ReplyMarkup = riskKeyboard()
+				req.ReplyMarkup = riskKeyboard(a.commandPrefix())
 			}
 		}
 		msg, err := a.client.sendMessage(ctx, req)
@@ -480,7 +480,16 @@ func mediaSourceName(out delivery.Output) string {
 	return "file"
 }
 
+func (a *Adapter) commandPrefix() string {
+	return platform.PrimaryCommandPrefix(a.cfg.CommandPrefixes)
+}
+
 func (a *Adapter) syncBotCommands(ctx context.Context) error {
+	// Telegram 的 bot 命令菜单只支持 "/" 前缀；前缀不是 "/" 时不同步，避免菜单点了不生效。
+	if prefix := a.commandPrefix(); prefix != "/" {
+		a.logWarn("telegram bot command menu skipped: command prefix is not /", "prefix", prefix)
+		return nil
+	}
 	commands := telegramBotCommands(a.commandCatalog)
 	if len(commands) == 0 {
 		return nil

@@ -58,8 +58,8 @@ func formatSessionsPage(sessions []storage.SessionSummary, currentID string, pag
 	return formatSessionsPageWithOffset(sessions, currentID, page, query, hasNext, commandPrefix, 0)
 }
 
-func formatResumableSessionsPage(sessions []storage.SessionSummary, page, pageSize int, hasNext bool) string {
-	return formatSessionsPageWithOffset(sessions, "", page, "", hasNext, "/resume --page", (page-1)*pageSize)
+func formatResumableSessionsPage(sessions []storage.SessionSummary, page, pageSize int, hasNext bool, prefix string) string {
+	return formatSessionsPageWithOffset(sessions, "", page, "", hasNext, prefix+"resume --page", (page-1)*pageSize)
 }
 
 func formatSessionsPageWithOffset(sessions []storage.SessionSummary, currentID string, page int, query string, hasNext bool, commandPrefix string, numberOffset int) string {
@@ -80,7 +80,7 @@ func formatSessionsPageWithOffset(sessions []storage.SessionSummary, currentID s
 }
 
 func nextPageCommand(commandPrefix string, page int, query string) string {
-	if commandPrefix == "/resume --page" || strings.TrimSpace(query) == "" {
+	if strings.TrimSpace(query) == "" {
 		return fmt.Sprintf("%s %d", commandPrefix, page)
 	}
 	return fmt.Sprintf("%s %d %s", commandPrefix, page, query)

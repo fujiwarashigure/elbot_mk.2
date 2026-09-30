@@ -96,7 +96,7 @@ func (s *Service) runLLMReport(ctx context.Context, job storage.CronJob, meta Me
 		result, parsed, err = s.retryLLMResultFormat(ctx, job, meta, actor, result.SessionID)
 	}
 	if err != nil {
-		message := cronParseFailedMessage(meta.Title, result.SessionID, err)
+		message := cronParseFailedMessage(s.commandPrefixValue(), meta.Title, result.SessionID, err)
 		state.ReportReady = true
 		state.Report = message
 		state.ReportSessionID = result.SessionID
@@ -121,7 +121,7 @@ func (s *Service) runLLMReport(ctx context.Context, job storage.CronJob, meta Me
 	if report == "" {
 		report = "任务未完成。"
 	}
-	report += fmt.Sprintf("\n可 /resume 到 cron session 查看详情。\nsession: %s", result.SessionID)
+	report += fmt.Sprintf("\n可 %sresume 到 cron session 查看详情。\nsession: %s", s.commandPrefixValue(), result.SessionID)
 	state.Report = report
 	return state, report, nil
 }
@@ -138,8 +138,21 @@ func (s *Service) retryLLMResultFormat(ctx context.Context, job storage.CronJob,
 	return result, parsed, err
 }
 
-func cronParseFailedMessage(title, sessionID string, err error) string {
-	return fmt.Sprintf("cron 任务 %s 解析格式失败，请 /resume 到 cron session 查看详情。\nsession: %s\n错误：%v", title, sessionID, err)
+func cronParseFailedMessage(prefix, title, sessionID string, err error) string {
+	if strings.TrimSpace(prefix) == "" {
+		prefix = "/"
+	}
+	return fmt.Sprintf("cron 任务 %s 解析格式失败，请 %sresume 到 cron session 查看详情。\nsession: %s\n错误：%v", title, prefix, sessionID, err)
+}
+
+// commandPrefixValue 返回用于提示文案的主命令前缀，未配置时回退到 "/"。
+func (s *Service) commandPrefixValue() string {
+	if s != nil {
+		if prefix := strings.TrimSpace(s.commandPrefix); prefix != "" {
+			return prefix
+		}
+	}
+	return "/"
 }
 
 func cronPrompt(message string) string {

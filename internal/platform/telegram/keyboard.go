@@ -2,23 +2,23 @@ package telegram
 
 import "strings"
 
-func shouldAttachRiskKeyboard(text string) bool {
-	return strings.Contains(text, "高风险工具调用等待确认") && strings.Contains(text, "/confirm")
+func shouldAttachRiskKeyboard(text, prefix string) bool {
+	return strings.Contains(text, "高风险工具调用等待确认") && strings.Contains(text, prefix+"confirm")
 }
 
-func riskKeyboard() *replyMarkup {
+func riskKeyboard(prefix string) *replyMarkup {
 	return &replyMarkup{InlineKeyboard: [][]inlineKeyboardButton{
 		{
-			commandButton("详情", "/detail"),
-			commandButton("确认", "/confirm"),
+			commandButton("详情", prefix+"detail"),
+			commandButton("确认", prefix+"confirm"),
 		},
 		{
-			commandButton("确认此工具", "/confirmtool"),
-			commandButton("全部确认", "/confirmall"),
+			commandButton("确认此工具", prefix+"confirmtool"),
+			commandButton("全部确认", prefix+"confirmall"),
 		},
 		{
-			commandButton("拒绝", "/reject"),
-			commandButton("停止", "/stop"),
+			commandButton("拒绝", prefix+"reject"),
+			commandButton("停止", prefix+"stop"),
 		},
 	}}
 }

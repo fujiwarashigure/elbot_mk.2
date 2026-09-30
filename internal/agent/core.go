@@ -9,6 +9,7 @@ import (
 	"time"
 
 	agentcommands "elbot/internal/agent/commands"
+	"elbot/internal/character"
 	"elbot/internal/command"
 	"elbot/internal/completion"
 	"elbot/internal/config"
@@ -46,6 +47,14 @@ type Agent struct {
 	titleGen           *titleGenerator
 	soul               SoulProvider
 	residentMemory     *resident.Store
+	characters         *character.Store
+	modelProfiles      map[string]config.ModelSelection
+	modelAliases       map[string]string
+	toolProfiles       map[string][]string
+	toolAliases        map[string]string
+	imageProfiles      map[string]bool
+	imageAliases       map[string]string
+	turnDirectives     config.TurnDirectivesConfig
 	promptBuilder      PromptBuilder
 	toolRuntime        toolRuntimeState
 	securityPolicy     *security.Policy
@@ -176,6 +185,14 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		commands:                command.NewRouter(prefixes),
 		soul:                    promptSoul,
 		residentMemory:          opts.ResidentMemoryStore,
+		characters:              opts.CharacterStore,
+		modelProfiles:           opts.ModelProfiles,
+		modelAliases:            opts.ModelAliases,
+		toolProfiles:            opts.ToolProfiles,
+		toolAliases:             opts.ToolAliases,
+		imageProfiles:           opts.ImageProfiles,
+		imageAliases:            opts.ImageAliases,
+		turnDirectives:          opts.TurnDirectives,
 		securityPolicy:          policy,
 		contextRuntime:          newContextRuntimeState(store, sessions, requests, turns),
 		hooks:                   hookManager,
@@ -232,6 +249,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		Tools:         a,
 		Hooks:         hookService,
 		SessionState:  sessionCommands,
+		Characters:    a.characters,
 		Audit:         a.audit,
 		Logs:          a,
 		RuntimeStatus: a.runtimeStatusForSession,
@@ -256,6 +274,20 @@ func NewWithOptions(opts Options) (*Agent, error) {
 	a.completion = completion.NewService(
 		completion.RiskConfirmationSource{Router: a.commands, Sessions: a.sessions, Turns: a.turns, Scope: a.scope, CommandNames: riskConfirmationCommandNames()},
 		completion.ForkMessageSource{Router: a.commands, Sessions: a.sessions, Store: a.store, Scope: a.scope},
+		completion.CharacterDirectiveSource{Characters: func(ctx context.Context) []completion.CharacterOption {
+			if a.characters == nil || !a.characters.Enabled() {
+				return nil
+			}
+			items, err := a.characters.List(ctx, a.characterViewer(ctx))
+			if err != nil {
+				return nil
+			}
+			out := make([]completion.CharacterOption, 0, len(items))
+			for _, item := range items {
+				out = append(out, completion.CharacterOption{ID: item.ID, Name: item.Name, Description: item.Description})
+			}
+			return out
+		}},
 		completion.ToolDirectiveSource{
 			Registry:       func() *tool.Registry { return a.toolRuntime.registry },
 			Actor:          a.actor,

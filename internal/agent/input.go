@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"elbot/internal/character"
 	"elbot/internal/command"
 	"elbot/internal/hook"
 	"elbot/internal/llm"
@@ -74,12 +75,12 @@ func (a *Agent) handleAppendConfirmationInput(ctx context.Context, session *stor
 	}
 }
 
-func compactCommandBlockedText(command string) string {
-	return fmt.Sprintf("正在压缩当前会话，暂不执行 %s。请等待压缩完成，或先使用 /stop 取消。", command)
+func (e *commandExecutor) compactCommandBlockedText(command string) string {
+	return fmt.Sprintf("正在压缩当前会话，暂不执行 %s。请等待压缩完成，或先使用 %sstop 取消。", command, e.router.PrimaryPrefix())
 }
 
-func activeTurnCommandBlockedText() string {
-	return "当前会话处理中，暂不支持切换。如有必要，请先使用 /stop 结束当前处理。"
+func (e *commandExecutor) activeTurnCommandBlockedText() string {
+	return fmt.Sprintf("当前会话处理中，暂不支持切换。如有必要，请先使用 %sstop 结束当前处理。", e.router.PrimaryPrefix())
 }
 
 func (a *Agent) handleInput(ctx context.Context, text string) error {
@@ -109,7 +110,7 @@ func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session
 	text = llm.SegmentsTextOnly(event.Message.Segments)
 
 	if session.ArchivedAt != nil {
-		a.sendChat(ctx, "当前会话已归档，不能继续聊天。若要继续，请先使用 /unarchive。")
+		a.sendChat(ctx, "当前会话已归档，不能继续聊天。若要继续，请先使用 "+a.commandPrefix()+"unarchive。")
 		return nil
 	}
 
@@ -119,15 +120,29 @@ func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session
 		if directives.Err != nil {
 			return directives.Err
 		}
-		if len(directives.Injected) > 0 || len(directives.Existing) > 0 || len(directives.Invalid) > 0 {
+		if len(directives.Injected) > 0 || len(directives.Existing) > 0 || len(directives.Invalid) > 0 || directives.ModeBlocked {
 			a.notifyToolDirectiveResult(ctx, directives)
 		}
 		text = directives.Text
 		skillDirectives := a.applySkillDirectives(ctx, session, text)
-		if len(skillDirectives.Skills) > 0 || len(skillDirectives.InjectedWrappers) > 0 || len(skillDirectives.ExistingWrappers) > 0 || len(skillDirectives.Invalid) > 0 {
+		if len(skillDirectives.Skills) > 0 || len(skillDirectives.InjectedWrappers) > 0 || len(skillDirectives.ExistingWrappers) > 0 || len(skillDirectives.Invalid) > 0 || skillDirectives.ModeBlocked {
 			a.notifySkillDirectiveResult(ctx, skillDirectives)
 		}
 		text = skillDirectives.Text
+		characterDirectives := a.applyCharacterDirectives(ctx, text)
+		if len(characterDirectives.Applied) > 0 || len(characterDirectives.Invalid) > 0 {
+			a.notifyCharacterDirectiveResult(ctx, characterDirectives)
+		}
+		if len(characterDirectives.Applied) > 0 {
+			ctx = character.WithActive(ctx, characterDirectives.Applied...)
+		}
+		text = characterDirectives.Text
+		var turnOverride turnDirectiveResult
+		ctx, turnOverride = a.applyTurnOverrides(ctx, text)
+		if len(turnOverride.Applied) > 0 || len(turnOverride.Invalid) > 0 || len(turnOverride.Denied) > 0 {
+			a.notifyTurnOverrideResult(ctx, turnOverride)
+		}
+		text = turnOverride.Text
 		ctx = withInboundSegments(ctx, replaceInboundTextSegments(ctx, text))
 		if strings.TrimSpace(text) == "" && !hasInboundNonTextSegment(ctx) {
 			if len(directives.Injected) > 0 || len(skillDirectives.InjectedWrappers) > 0 {
@@ -162,10 +177,10 @@ func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session
 		return nil
 	case turn.PhaseTool:
 		a.turns.AppendPendingInput(session.ID, inboundTurnInput(ctx, text))
-		a.sendChat(ctx, "已追加，将在当前流程下一次模型调用时带上。发送 /stop 可打断当前流程。")
+		a.sendChat(ctx, fmt.Sprintf("已追加，将在当前流程下一次模型调用时带上。发送 %sstop 可打断当前流程。", a.commandPrefix()))
 		return nil
 	case turn.PhaseCompact:
-		a.sendChat(ctx, "正在压缩上下文，请稍后再发送。可使用 /stop 取消当前请求。")
+		a.sendChat(ctx, fmt.Sprintf("正在压缩上下文，请稍后再发送。可使用 %sstop 取消当前请求。", a.commandPrefix()))
 		return nil
 	default:
 		return a.startChat(ctx, session, text)
@@ -223,7 +238,7 @@ func (a *Agent) handleRiskConfirmationInput(ctx context.Context, sessionID, text
 	// 或污染下一次 LLM 调用上下文。
 	if !a.commands.IsCommand(text) {
 		a.logRiskConfirmationAction(sessionID, "invalid_text", confirmation, "")
-		a.sendChat(ctx, riskConfirmationWaitingText())
+		a.sendChat(ctx, riskConfirmationWaitingText(a.commandPrefix()))
 		return nil
 	}
 
@@ -257,7 +272,7 @@ func (a *Agent) handleRiskConfirmationInput(ctx context.Context, sessionID, text
 		if hasConfirmation {
 			a.logRiskConfirmationAction(sessionID, "invalid_command", confirmation, parsed.Name)
 		}
-		a.sendChat(ctx, riskConfirmationWaitingText())
+		a.sendChat(ctx, riskConfirmationWaitingText(a.commandPrefix()))
 
 	}
 	return nil

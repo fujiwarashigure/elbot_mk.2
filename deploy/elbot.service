@@ -1,0 +1,55 @@
+# 原生二进制部署（不用容器）的 systemd 单元。
+# 适用于你已经把 elbot 二进制放到 /opt/elbot/elbot 的场景。
+#
+# 安装：
+#   useradd -r -s /usr/sbin/nologin elbot
+#   mkdir -p /opt/elbot/data/config /opt/elbot/data/run
+#   chown -R elbot:elbot /opt/elbot
+#   cp deploy/elbot.service /etc/systemd/system/elbot.service
+#   systemctl daemon-reload && systemctl enable --now elbot
+#
+# 注意：ElBot 是自动化 Agent，会按设计执行 shell / 写文件。下面的加固
+# 只允许它写入 /opt/elbot；如果你要让 Agent 管理其他目录（如 /www），
+# 必须在 ReadWritePaths 中追加对应路径，或放宽 ProtectSystem。
+
+[Unit]
+Description=ElBot Agent Service
+Documentation=https://github.com/Elflare/elbot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=elbot
+Group=elbot
+WorkingDirectory=/opt/elbot
+
+Environment=TZ=Asia/Shanghai
+Environment=XDG_CONFIG_HOME=/opt/elbot/data/config
+Environment=XDG_DATA_HOME=/opt/elbot/data
+Environment=XDG_RUNTIME_DIR=/opt/elbot/data/run
+# .env 不存在时忽略，不阻止启动
+EnvironmentFile=-/opt/elbot/data/config/.env
+
+ExecStart=/opt/elbot/elbot service run
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=40
+
+# ---- 安全加固（可按需放宽）----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/elbot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,70 @@
+# ElBot 单机常驻服务（Docker Compose）
+#
+# 使用：
+#   cd deploy
+#   cp .env.example .env   # 填写密钥
+#   docker compose build
+#   docker compose up -d
+#
+# 说明：
+# - 只映射到宿主机 127.0.0.1，公网访问统一走宝塔 Nginx 反向代理。
+# - 数据持久化在 ./data，备份直接打包该目录即可。
+# - 单实例运行，请勿 scale，也不要在多台机器共享同一个 ./data。
+
+services:
+  elbot:
+    image: ${ELBOT_IMAGE:-elbot:0.5.0}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: ${ELBOT_BUILD_TARGET:-runtime}   # runtime 或 go-runtime
+      args:
+        GO_VERSION: ${GO_VERSION:-1.26}
+        VERSION: ${ELBOT_VERSION:-0.5.0}
+    container_name: elbot
+    hostname: elbot
+
+    # 崩溃/重启/宿主机重启后自动拉起；配合下方 systemd 单元可确保开机即启动
+    restart: unless-stopped
+
+    # ElBot 收到 SIGTERM 后最多需要约 30s 优雅关闭
+    stop_grace_period: 40s
+
+    # 不再需要 docker 的 --init，镜像内 tini 已作为 PID 1
+    init: false
+
+    # 密钥和 token 全部通过 .env 注入，不要写进配置文件
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      XDG_CONFIG_HOME: /data/config
+      XDG_DATA_HOME: /data
+      XDG_RUNTIME_DIR: /data/run
+      # 不要在这里无条件设置 ELBOT_GO_BINARY，否则空值会覆盖 go-runtime 镜像里的默认值；
+      # 如使用 go-runtime，镜像内已设置 /usr/local/go/bin/go；需要自定义时写到 .env 即可。
+
+    volumes:
+      - ./data:/data
+
+    # 只监听宿主机回环地址；公网入口由宝塔 Nginx 反代 + TLS 提供
+    # 32172: CLI 远程 WebSocket 服务端（platform.cli.server.enabled=true 时生效）
+    # 32170: Elnis 事件 HTTP 入口（elnis.toml enabled=true 时生效）
+    ports:
+      - "127.0.0.1:32172:32172"
+      - "127.0.0.1:32170:32170"
+
+    # 2 核 4G 机器上限制资源，避免异常时拖垮宝塔和其他站点
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    pids_limit: 512
+
+    security_opt:
+      - no-new-privileges:true
+
+    # 限制容器 stdout 日志大小，防止 40G 磁盘被 Docker 日志写满
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

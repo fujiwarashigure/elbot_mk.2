@@ -216,14 +216,14 @@ func TestParseSessionsArgs(t *testing.T) {
 }
 
 func TestParseResumePageArg(t *testing.T) {
-	page, err := parseResumePageArg("--page 2")
+	page, err := parseResumePageArg("/", "--page 2")
 	if err != nil {
 		t.Fatalf("parseResumePageArg: %v", err)
 	}
 	if page != 2 {
 		t.Fatalf("page = %d", page)
 	}
-	if _, err := parseResumePageArg("2"); err == nil {
+	if _, err := parseResumePageArg("/", "2"); err == nil {
 		t.Fatal("expected usage error")
 	}
 }

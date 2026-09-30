@@ -112,8 +112,9 @@ func (a *Adapter) sendText(ctx context.Context, target sendTarget, text string) 
 		msg := a.baseMessage(target)
 		msg.MsgType = msgTypeMarkdown
 		msg.Markdown = &messageMarkdown{Content: text}
-		if a.cfg.enableKeyboard() && shouldAttachRiskKeyboard(text) {
-			msg.Keyboard = riskKeyboard(a.cfg.AppID)
+		prefix := platform.PrimaryCommandPrefix(a.cfg.CommandPrefixes)
+		if a.cfg.enableKeyboard() && shouldAttachRiskKeyboard(text, prefix) {
+			msg.Keyboard = riskKeyboard(a.cfg.AppID, prefix)
 		}
 		resp, err := a.client.sendMessage(ctx, target, msg)
 		if err == nil {

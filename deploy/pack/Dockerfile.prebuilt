@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1.7
+#
+# 预编译二进制版运行镜像（不需要 Go 工具链，也不需要拉 golang:1.26 大镜像）
+# 构建上下文需要包含名为 `elbot` 的 Linux 静态二进制。
+#
+#   docker build -t elbot:0.5.0 .
+#   docker run -d --name elbot -v $PWD/data:/data -p 127.0.0.1:32172:32172 elbot:0.5.0
+#
+# 国内服务器拉 debian 慢时，可换镜像源：
+#   docker build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim -t elbot:0.5.0 .
+
+ARG BASE_IMAGE=debian:bookworm-slim
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV TZ=Asia/Shanghai \
+    XDG_CONFIG_HOME=/data/config \
+    XDG_DATA_HOME=/data \
+    XDG_RUNTIME_DIR=/data/run \
+    HOME=/home/elbot \
+    LANG=C.UTF-8
+
+# 保留常用 CLI 工具，保证 ElBot 的 shell 工具可用
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+        tini \
+        curl \
+        wget \
+        git \
+        jq \
+        unzip \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -g 10001 elbot \
+ && useradd -u 10001 -g 10001 -d /home/elbot -m -s /usr/sbin/nologin elbot \
+ && mkdir -p /data/config /data/run /home/elbot \
+ && chown -R elbot:elbot /data /home/elbot \
+ && chmod 750 /data/run
+
+COPY elbot /usr/local/bin/elbot
+RUN chmod 0755 /usr/local/bin/elbot
+
+USER elbot:elbot
+WORKDIR /home/elbot
+
+VOLUME ["/data"]
+EXPOSE 32170 32172
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["sh", "-c", "test -f /data/run/elbot/elbot.pid && kill -0 \"$(cat /data/run/elbot/elbot.pid)\""]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/elbot"]
+CMD ["service", "run"]

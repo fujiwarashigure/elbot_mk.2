@@ -5,7 +5,7 @@
 ## 环境要求
 
 - Go 1.26 或更新版本。
-- 一个 OpenAI-compatible LLM 服务，例如 DeepSeek、OpenAI 或其他兼容 `/chat/completions` 的服务。
+- 一个 OpenAI-compatible LLM 服务，例如 DeepSeek、OpenAI 或其他兼容 `/*chat/completions` 的服务。
 - 至少一个可用 API Key。
 
 ## 获取代码
@@ -88,7 +88,7 @@ elbot service run  # Linux/headless 服务模式：不启动 CLI，启动已启�
 
 自动模式下，Linux 如果检测到当前用户已有 `elbot service run` 在运行，会进入本地 CLI-only，避免重复连接平台或重复运行 Cron；否则进入完整前台模式。Windows 不做 service 检测，默认完整前台启动。
 
-`elbot cli` 是独立本地进程，会使用同一套配置和 SQLite 数据，但不会接管 service 进程中的当前请求、确认状态或内存里的当前 Session。需要继续历史会话时，可用 `/list` 和 `/resume`。
+`elbot cli` 是独立本地进程，会使用同一套配置和 SQLite 数据，但不会接管 service 进程中的当前请求、确认状态或内存里的当前 Session。需要继续历史会话时，可用 `/list` 和 `/*resume`。
 
 CLI TUI 常用按键：
 
@@ -150,20 +150,20 @@ elbot completion nushell > ~/.config/nushell/completions/elbot.nu
 常用起步命令：
 
 ```text
-/help
-/status
-/models
-/model 1
-/chat
-/work
+/*help
+/*status
+/*models
+/*model 1
+/*chat
+/*work
 ```
 
-- `/help` 查看可用命令。
-- `/status` 查看当前 Session、模型、上下文和请求状态。
-- `/models` 查看可用模型列表。
-- `/model <编号或名称>` 切换模型。
-- `/chat` 切到低成本聊天模式。
-- `/work` 切到可使用工具的工作模式。
+- `/*help` 查看可用命令。
+- `/*status` 查看当前 Session、模型、上下文和请求状态。
+- `/*models` 查看可用模型列表。
+- `/*model <编号或名称>` 切换模型。
+- `/*chat` 切到低成本聊天模式。
+- `/*work` 切到可使用工具的工作模式。
 
 更多命令见 [命令速查](commands.md)。
 
@@ -195,7 +195,7 @@ elbot completion nushell > ~/.config/nushell/completions/elbot.nu
 
 - `state.toml` 中的 `provider` 是否存在于 `providers.toml`。
 - `model` 名称是否被 Provider 支持。
-- 可以启动后用 `/models --fresh` 或 `/models --refresh` 刷新模型列表。
+- 可以启动后用 `/*models --fresh` 或 `/*models --refresh` 刷新模型列表。
 
 ### 不想默认启用工具
 
@@ -206,4 +206,4 @@ elbot completion nushell > ~/.config/nushell/completions/elbot.nu
 default_mode = "chat"
 ```
 
-需要工具时再输入 `/work`。
+需要工具时再输入 `/*work`。

@@ -24,7 +24,7 @@ func formatCommandHelp(prefix string, info command.Info) *command.Result {
 	}
 	if strings.TrimSpace(info.Help) != "" {
 		sb.WriteString("\n")
-		sb.WriteString(strings.TrimSpace(info.Help))
+		sb.WriteString(rewriteHelpPrefix(prefix, strings.TrimSpace(info.Help)))
 		sb.WriteString("\n")
 	}
 	return &command.Result{Content: trimTrailingNewlines(sb.String())}
@@ -32,6 +32,22 @@ func formatCommandHelp(prefix string, info command.Info) *command.Result {
 
 func trimTrailingNewlines(text string) string {
 	return strings.TrimRight(text, "\n")
+}
+
+// rewriteHelpPrefix 把帮助文本中行首的 "/" 命令示例替换成配置的前缀。
+func rewriteHelpPrefix(prefix, text string) string {
+	if prefix == "" || prefix == "/" || text == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "/") {
+			indent := line[:len(line)-len(trimmed)]
+			lines[i] = indent + prefix + strings.TrimPrefix(trimmed, "/")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func commandUsage(prefix string, info command.Info) string {

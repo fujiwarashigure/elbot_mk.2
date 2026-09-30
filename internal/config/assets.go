@@ -108,6 +108,84 @@ enabled = true
 schedule = "35 4 * * *"
 retention_days = 180
 
+# 每天两次的资源/用量报告（生图量、Token、费用、磁盘、内存）。
+[maintenance.daily_report]
+enabled = false
+schedule = "0 9,21 * * *"    # 每天 9:00 和 21:00
+window_hours = 12            # 每次统计最近 12 小时
+provider = "deepseek"        # 统计哪个 provider 的 llm_usage；留空统计全部
+# platform = ""              # 指定发送平台（按 superadmins 发送）；留空用主平台
+currency = "CNY"
+image_price_per_image = 0.05 # 生图服务每张价格（只统计成功出图；失败不计费）
+peak_pricing = true          # DeepSeek 高峰/空闲双档
+# holidays = ["2026-10-01", "2026-10-02", "2026-10-03"]  # 法定节假日按空闲价
+# data_root = ""             # 默认取 SQLite 所在数据目录
+
+# DeepSeek 官方单价（单位：元 / 百万 tokens，2026 定价页）。
+# 基准字段是高峰价；offpeak_* 是空闲价，未填则沿用高峰价。
+[maintenance.daily_report.prices."deepseek-v4-pro"]
+input_per_million = 9.0
+cache_input_per_million = 0.30
+output_per_million = 27.0
+offpeak_input_per_million = 4.5
+offpeak_cache_input_per_million = 0.15
+offpeak_output_per_million = 13.5
+
+[maintenance.daily_report.prices."deepseek-flash"]
+input_per_million = 2.0
+cache_input_per_million = 0.04
+output_per_million = 8.0
+offpeak_input_per_million = 1.0
+offpeak_cache_input_per_million = 0.02
+offpeak_output_per_million = 4.0
+
+# 旧模型名仍可调用，按 Flash 价格计费。
+[maintenance.daily_report.prices."deepseek-v4-flash"]
+input_per_million = 2.0
+cache_input_per_million = 0.04
+output_per_million = 8.0
+offpeak_input_per_million = 1.0
+offpeak_cache_input_per_million = 0.02
+offpeak_output_per_million = 4.0
+
+# ── 命名 profile：群聊消息里声明，仅本轮有效，仅超级管理员 ──
+#
+# 触发写法（可自定义）：
+#   @model:强 / #模型:强 / #生图:高清 / #工具:管理
+#   @m:pro / @image:hq / @use:admin
+[turn_directives]
+prefixes = ["@", "#"]                 # 触发符号，可再加 "！" 等
+model_keywords = ["model", "m", "模型", "用模型"]
+image_keywords = ["image", "img", "生图", "出图"]
+tool_keywords = ["use", "工具", "用工具"]
+
+# 模型 profile：默认模型仍来自 state.toml 的 mode_models.*。
+# aliases 是中文/短标签，声明时用它代替 profile 名。
+# [model_profiles.pro]
+# provider = "deepseek"
+# model = "deepseek-v4-pro"
+# aliases = ["强", "强模型", "pro"]
+#
+# [model_profiles.cheap]
+# provider = "deepseek"
+# model = "deepseek-flash"
+# aliases = ["快", "便宜", "flash"]
+
+# 工具 profile：声明后为本轮额外注入这些工具（不写入 Session）。
+# [tool_profiles.admin]
+# tools = ["shell", "read_file", "edit_file"]
+# aliases = ["管理", "运维"]
+
+# 生图 profile：没写的字段沿用上面的 [image_generation] 基础配置。
+# 用 [image_generation] default_profile = "fast" 可把某个 profile 设为默认。
+# [image_generation.profiles.fast]
+# base_url = "https://another-relay.example.com/v1"
+# api_key_env = "IMAGE_API_KEY_FAST"
+# model = "gpt-image-2.5"
+# quality = "medium"
+# superadmin_only = true
+# aliases = ["快", "高清"]
+
 [sandbox]
 root = ""
 
@@ -148,11 +226,66 @@ compact_trigger_ratio = 0.8
 [soul]
 path = "SOUL.md"
 
+[character_library]
+enabled = true
+root = "characters"
+
+# Optional image generation tool. The endpoint must be OpenAI-compatible
+# POST {base_url}/images/generations. Provide the API key via api_key_env.
+[image_generation]
+enabled = false
+# base_url = "https://your-relay.example.com/v1"  # /images/generations is appended
+# endpoint = ""                                    # override the full URL when the relay differs
+api_key_env = "IMAGE_API_KEY"
+# api_key = ""                                     # discouraged; prefer api_key_env
+model = "gpt-image-2.5"
+size = "1024x1024"
+quality = "high"          # low / medium / high (depends on the relay)
+output_format = "png"     # png / jpeg / webp
+# response_format = "b64_json"  # set only if the relay requires it
+timeout_seconds = 180
+
+# 预设提示词：最终 prompt = preset_prompt + 角色预设 + 场景描述。
+preset_prompt = ""
+# negative_prompt = ""
+max_prompt_runes = 4000
+
+# 提示词优化：off 或 rules（使用内置的 GPT Image Prompts 大全规则库）。
+optimize = "rules"
+optimize_term_mode = "phrase"   # phrase：短语锚点；tag：单个单词 tag 串
+optimize_max_anchors = 4
+optimize_max_negatives = 10
+optimize_max_added_runes = 400
+optimize_max_tags = 12
+
+# LLM 语义改写：off / auto（短或含糊的 prompt 才改写）/ always。
+optimize_rewrite = "auto"
+optimize_rewrite_model = "naming"   # naming / compact / chat / work
+optimize_rewrite_min_runes = 40
+
+# 自动编排：从 prompt 里识别角色名/别名并自动选角、自动拉当前群聊上下文。
+auto_character = true
+auto_context = true
+context_default_limit = 6
+
+# 权限与落盘。
+superadmin_only = true       # 只有超级管理员能调用 image_generate
+save_to_character = true     # 出图写回当前角色的 images/
+send_by_default = false      # 生成后是否默认发到当前聊天
+
+# 参考图（视中转站是否支持）。开启后会把角色图片按 reference_field 字段透传。
+supports_reference = false
+reference_field = "image"
+
+# extra_payload = { }
+# extra_headers = { }
+# proxy = ""
+
 [view]
 session_list_page_size = 10
 
 [commands]
-prefixes = ["/"]
+prefixes = ["/*"]
 
 [tools]
 max_rounds_per_turn = 10

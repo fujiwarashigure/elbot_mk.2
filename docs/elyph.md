@@ -284,7 +284,7 @@ each($city in $cities, limit=5) {
 - 如果同一 AgentSkill 同时存在 `SKILL.md` 和 `SKILL.elyph`，ELyph 文件的描述会优先被 Agent 使用。
 
 
-更多 skill 管理操作见 [命令速查](commands.md) 的 `/tools` 部分。
+更多 skill 管理操作见 [命令速查](commands.md) 的 `/*tools` 部分。
 
 ## 与 Cron 的关系
 

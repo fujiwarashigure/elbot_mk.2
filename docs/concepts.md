@@ -31,7 +31,7 @@ ElBot 把对话分成两种模式：
 - 工作任务可以使用更强模型和工具能力。
 - 两种模式可以配置不同模型。
 
-运行时可以使用 `/chat` 和 `/work` 切换模式。
+运行时可以使用 `/*chat` 和 `/*work` 切换模式。
 
 ## 工具发现
 
@@ -65,7 +65,7 @@ Session 是 ElBot 的持久化会话单位，用来保存一次连续对话的�
 
 Session 的创建、恢复、归档、置顶和删除等操作见 [命令速查：Session](commands.md#session)。
 
-在支持引用回复的平台中，回复自己在当前聊天作用域内某个 Session 的最后一条 assistant 消息会自动恢复该 Session；回复更早的 assistant 消息会从该位置 Fork。即使 Session 已因闲置过期或 `/new` 不再是当前会话，引用最后回复仍会恢复原 Session。
+在支持引用回复的平台中，回复自己在当前聊天作用域内某个 Session 的最后一条 assistant 消息会自动恢复该 Session；回复更早的 assistant 消息会从该位置 Fork。即使 Session 已因闲置过期或 `/*new` 不再是当前会话，引用最后回复仍会恢复原 Session。
 
 ## Fork
 
@@ -176,7 +176,7 @@ ElBot 包含两层 Cron 能力：
 | Direct Cron | 按计划直接发送固定内容。 |
 | LLM Cron | 按任务描述驱动模型执行，并可使用工具。 |
 
-LLM Cron 每次调度触发都会创建独立的后台 Session，把任务作为新输入执行，并在完成后发送本轮结果。Session 可在创建 Cron 的平台通过 `/sessions`、`/resume` 查看；广播任务会为其他目标平台复制 Session，CLI 可查看全部平台 Session。
+LLM Cron 每次调度触发都会创建独立的后台 Session，把任务作为新输入执行，并在完成后发送本轮结果。Session 可在创建 Cron 的平台通过 `/*sessions`、`/*resume` 查看；广播任务会为其他目标平台复制 Session，CLI 可查看全部平台 Session。
 
 
 
@@ -247,7 +247,7 @@ ElBot 区分：
 | 运行日志 | 排查启动、模型请求、平台连接、持久化等运行问题。 |
 | 审计日志 | 追踪权限拒绝、工具调用、危险确认、Cron 投递等关键行为。 |
 
-可以用 `/log` 和 `/audit` 在运行时查询。
+可以用 `/*log` 和 `/*audit` 在运行时查询。
 
 ## 开发期约定
 

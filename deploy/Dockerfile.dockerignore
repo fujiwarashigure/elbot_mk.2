@@ -1,0 +1,30 @@
+# BuildKit 会为同目录下的 Dockerfile 自动读取 Dockerfile.dockerignore。
+# 该文件相对构建上下文根目录（仓库根目录）生效。
+
+.git
+.gitattributes
+.gitignore
+.github
+
+# 仅文档，运行时不需要
+docs
+docs.en
+devdocs
+*.md
+!README.md
+
+# 翻译缓存 / 脚本 / 发布包
+.translation-cache
+scripts
+*.zip
+*.tar.gz
+*.tar
+
+# 本地运行数据与构建产物
+data
+bin
+dist
+release-assets
+deploy/dist
+deploy/data
+deploy/.env

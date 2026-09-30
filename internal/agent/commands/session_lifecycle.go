@@ -26,13 +26,13 @@ func NewArchive(deps Deps) command.Handler {
 		handle: func(ctx context.Context, deps Deps, req command.Request) (*command.Result, error) {
 			target, confirmed := parseTargetConfirm(req.Args)
 			if !confirmed {
-				content, err := confirmCommandMessage(ctx, deps, "archive", target)
+				content, err := confirmCommandMessage(ctx, deps, req.Prefix, "archive", target)
 				if err != nil {
 					return nil, err
 				}
 				return &command.Result{Content: content}, nil
 			}
-			sessionID, err := resolveSessionTarget(ctx, deps, target)
+			sessionID, err := resolveSessionTarget(ctx, deps, req.Prefix, target)
 			if err != nil {
 				return nil, err
 			}
@@ -53,7 +53,7 @@ func NewUnarchive(deps Deps) command.Handler {
 		description: "Unarchive a session. Defaults to current session.",
 		archived:    true,
 		handle: func(ctx context.Context, deps Deps, req command.Request) (*command.Result, error) {
-			sessionID, err := resolveSessionTarget(ctx, deps, strings.TrimSpace(req.Args))
+			sessionID, err := resolveSessionTarget(ctx, deps, req.Prefix, strings.TrimSpace(req.Args))
 			if err != nil {
 				return nil, err
 			}
@@ -73,7 +73,7 @@ func NewPin(deps Deps) command.Handler {
 		usage:       "/pin [number|session_id]",
 		description: "Pin a session. Defaults to current session.",
 		handle: func(ctx context.Context, deps Deps, req command.Request) (*command.Result, error) {
-			sessionID, err := resolveSessionTarget(ctx, deps, strings.TrimSpace(req.Args))
+			sessionID, err := resolveSessionTarget(ctx, deps, req.Prefix, strings.TrimSpace(req.Args))
 			if err != nil {
 				return nil, err
 			}
@@ -93,7 +93,7 @@ func NewUnpin(deps Deps) command.Handler {
 		usage:       "/unpin [number|session_id]",
 		description: "Unpin a session. Defaults to current session.",
 		handle: func(ctx context.Context, deps Deps, req command.Request) (*command.Result, error) {
-			sessionID, err := resolveSessionTarget(ctx, deps, strings.TrimSpace(req.Args))
+			sessionID, err := resolveSessionTarget(ctx, deps, req.Prefix, strings.TrimSpace(req.Args))
 			if err != nil {
 				return nil, err
 			}
@@ -127,7 +127,7 @@ func (c renameCommand) Info() command.Info {
 
 func (c renameCommand) Handle(ctx context.Context, req command.Request) (*command.Result, error) {
 	deps := c.deps
-	sessionID, title, err := parseRenameArgs(ctx, deps, req.Args)
+	sessionID, title, err := parseRenameArgs(ctx, deps, req.Prefix, req.Args)
 	if err != nil {
 		return nil, err
 	}
@@ -156,16 +156,16 @@ func NewDelete(deps Deps) command.Handler {
 		handle: func(ctx context.Context, deps Deps, req command.Request) (*command.Result, error) {
 			target, confirmed := parseTargetConfirm(req.Args)
 			if strings.TrimSpace(target) == "" {
-				return nil, fmt.Errorf("usage: /delete <number|session_id> --confirm")
+				return nil, fmt.Errorf("usage: %sdelete <number|session_id> --confirm", req.Prefix)
 			}
 			if !confirmed {
-				content, err := confirmCommandMessage(ctx, deps, "delete", target)
+				content, err := confirmCommandMessage(ctx, deps, req.Prefix, "delete", target)
 				if err != nil {
 					return nil, err
 				}
 				return &command.Result{Content: content}, nil
 			}
-			sessionID, err := resolveSessionTarget(ctx, deps, target)
+			sessionID, err := resolveSessionTarget(ctx, deps, req.Prefix, target)
 			if err != nil {
 				return nil, err
 			}
@@ -198,7 +198,7 @@ func (c cleanCommand) Handle(ctx context.Context, req command.Request) (*command
 	deps := c.deps
 	_, confirmed := parseTargetConfirm(req.Args)
 	if !confirmed {
-		return &command.Result{Content: "clean will permanently delete expired sessions that are not archived or pinned. Run /clean --confirm to continue."}, nil
+		return &command.Result{Content: fmt.Sprintf("clean will permanently delete expired sessions that are not archived or pinned. Run %sclean --confirm to continue.", req.Prefix)}, nil
 	}
 	deleted, err := deps.Sessions.CleanupExpired(ctx, storage.Now().AddDate(0, 0, -cleanupRetentionDays(deps)))
 	if err != nil {
@@ -267,15 +267,15 @@ func cleanupRetentionDays(deps Deps) int {
 	return days
 }
 
-func parseRenameArgs(ctx context.Context, deps Deps, args string) (string, string, error) {
+func parseRenameArgs(ctx context.Context, deps Deps, prefix, args string) (string, string, error) {
 	fields := strings.Fields(args)
 	if len(fields) == 0 {
-		return "", "", fmt.Errorf("usage: /rename [number|session_id|current_title] <title>")
+		return "", "", fmt.Errorf("usage: %srename [number|session_id|current_title] <title>", prefix)
 	}
 	if len(fields) == 1 {
 		return "", fields[0], nil
 	}
-	if sessionID, ok, err := resolveRenameTarget(ctx, deps, fields[0]); err != nil {
+	if sessionID, ok, err := resolveRenameTarget(ctx, deps, prefix, fields[0]); err != nil {
 		return "", "", err
 	} else if ok {
 		return sessionID, strings.Join(fields[1:], " "), nil
@@ -283,11 +283,11 @@ func parseRenameArgs(ctx context.Context, deps Deps, args string) (string, strin
 	return "", strings.Join(fields, " "), nil
 }
 
-func resolveRenameTarget(ctx context.Context, deps Deps, target string) (string, bool, error) {
+func resolveRenameTarget(ctx context.Context, deps Deps, prefix, target string) (string, bool, error) {
 	if idx, err := strconv.Atoi(target); err == nil {
 		ids := deps.SessionState.get(deps.Scope(ctx))
 		if idx < 1 || idx > len(ids) {
-			return "", true, fmt.Errorf("session index %d out of range; run /sessions or /archives first", idx)
+			return "", true, fmt.Errorf("session index %d out of range; run %ssessions or %sarchives first", idx, prefix, prefix)
 		}
 		return ids[idx-1], true, nil
 	}
@@ -316,7 +316,7 @@ func resolveRenameTarget(ctx context.Context, deps Deps, target string) (string,
 	case 1:
 		return matches[0], true, nil
 	default:
-		return "", true, fmt.Errorf("session title %q matches multiple sessions; use /sessions and rename by number or session id", target)
+		return "", true, fmt.Errorf("session title %q matches multiple sessions; use %ssessions and rename by number or session id", target, prefix)
 	}
 }
 
@@ -334,10 +334,10 @@ func parseSessionsArgs(args string) (int, string, error) {
 	return 1, strings.Join(fields, " "), nil
 }
 
-func parseResumePageArg(args string) (int, error) {
+func parseResumePageArg(prefix, args string) (int, error) {
 	fields := strings.Fields(args)
 	if len(fields) != 2 || fields[0] != "--page" {
-		return 0, fmt.Errorf("usage: /resume --page <page>")
+		return 0, fmt.Errorf("usage: %sresume --page <page>", prefix)
 	}
 	page, err := strconv.Atoi(fields[1])
 	if err != nil || page < 1 {
@@ -360,8 +360,8 @@ func parseTargetConfirm(args string) (string, bool) {
 	return strings.Join(kept, " "), confirmed
 }
 
-func confirmCommandMessage(ctx context.Context, deps Deps, name, target string) (string, error) {
-	sessionID, err := resolveSessionTarget(ctx, deps, target)
+func confirmCommandMessage(ctx context.Context, deps Deps, prefix, name, target string) (string, error) {
+	sessionID, err := resolveSessionTarget(ctx, deps, prefix, target)
 	if err != nil {
 		return "", err
 	}
@@ -369,7 +369,7 @@ func confirmCommandMessage(ctx context.Context, deps Deps, name, target string) 
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s will modify session:\n  title: %s\n  id: %s\nRun /%s %s --confirm to continue.", name, emptyTitle(session.Title), session.ID, name, session.ID), nil
+	return fmt.Sprintf("%s will modify session:\n  title: %s\n  id: %s\nRun %s%s %s --confirm to continue.", name, emptyTitle(session.Title), session.ID, prefix, name, session.ID), nil
 }
 
 func emptyTitle(title string) string {
@@ -379,7 +379,7 @@ func emptyTitle(title string) string {
 	return title
 }
 
-func resolveSessionTarget(ctx context.Context, deps Deps, target string) (string, error) {
+func resolveSessionTarget(ctx context.Context, deps Deps, prefix, target string) (string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		current, err := deps.Sessions.Current(ctx, deps.Scope(ctx))
@@ -391,7 +391,7 @@ func resolveSessionTarget(ctx context.Context, deps Deps, target string) (string
 	if idx, err := strconv.Atoi(target); err == nil {
 		ids := deps.SessionState.get(deps.Scope(ctx))
 		if idx < 1 || idx > len(ids) {
-			return "", fmt.Errorf("session index %d out of range; run /sessions or /archives first", idx)
+			return "", fmt.Errorf("session index %d out of range; run %ssessions or %sarchives first", idx, prefix, prefix)
 		}
 		return ids[idx-1], nil
 	}

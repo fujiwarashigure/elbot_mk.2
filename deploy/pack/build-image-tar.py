@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+离线构造标准 `docker save` 格式的 ElBot 镜像 tar.gz。
+
+不需要 Docker 守护进程，也不需要联网：
+  - 输入一个静态 Linux 二进制（CGO_ENABLED=0，已用 Go 交叉编译）
+  - 组装最小 rootfs（二进制 + CA 证书 + /etc/passwd + 时区数据）
+  - 生成单层 Docker 镜像归档，服务器上 docker load -i 即可
+
+用法：
+  python build-image-tar.py --binary ./elbot-linux-amd64 --arch amd64 \
+      --version 0.5.0 --output elbot-0.5.0-linux-amd64.tar.gz
+
+注意：scratch 镜像内没有 /bin/sh 和 coreutils，ElBot 的 shell 工具不可用；
+需要完整工具能力请用同目录的 Dockerfile（基于 debian:bookworm-slim）在服务器上构建。
+"""
+
+import argparse
+import gzip
+import hashlib
+import io
+import json
+import os
+import shutil
+import sys
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+
+UID_ELBOT = 10001
+GID_ELBOT = 10001
+CREATED = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def add_dir(tar: tarfile.TarFile, name: str, mode: int = 0o755,
+            uid: int = 0, gid: int = 0, mtime: int = 0):
+    ti = tarfile.TarInfo(name.rstrip("/") + "/")
+    ti.type = tarfile.DIRTYPE
+    ti.mode = mode
+    ti.uid = uid
+    ti.gid = gid
+    ti.uname = "root"
+    ti.gname = "root"
+    ti.mtime = mtime
+    tar.addfile(ti)
+
+
+def add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644,
+              uid: int = 0, gid: int = 0, mtime: int = 0):
+    ti = tarfile.TarInfo(name)
+    ti.size = len(data)
+    ti.mode = mode
+    ti.uid = uid
+    ti.gid = gid
+    ti.uname = "root"
+    ti.gname = "root"
+    ti.mtime = mtime
+    tar.addfile(ti, io.BytesIO(data))
+
+
+def add_file(tar: tarfile.TarFile, arcname: str, src: Path, mode: int,
+             uid: int = 0, gid: int = 0, mtime: int = 0):
+    st = os.stat(src)
+    ti = tarfile.TarInfo(arcname)
+    ti.size = st.st_size
+    ti.mode = mode
+    ti.uid = uid
+    ti.gid = gid
+    ti.uname = "root"
+    ti.gname = "root"
+    ti.mtime = mtime
+    with open(src, "rb") as f:
+        tar.addfile(ti, f)
+
+
+def stage_rootfs(binary: Path, staging: Path, zoneinfo_src):
+    # 二进制
+    (staging / "usr/local/bin").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(binary, staging / "usr/local/bin/elbot")
+    os.chmod(staging / "usr/local/bin/elbot", 0o755)
+
+    # CA 证书
+    (staging / "etc/ssl/certs").mkdir(parents=True, exist_ok=True)
+    import certifi
+    shutil.copy2(certifi.where(), staging / "etc/ssl/certs/ca-certificates.crt")
+
+    # 用户信息
+    (staging / "etc").mkdir(parents=True, exist_ok=True)
+    (staging / "etc/passwd").write_text(
+        "root:x:0:0:root:/root:/sbin/nologin\n"
+        "elbot:x:10001:10001:ElBot:/home/elbot:/usr/sbin/nologin\n",
+        encoding="utf-8",
+    )
+    (staging / "etc/group").write_text(
+        "root:x:0:\nelbot:x:10001:\n",
+        encoding="utf-8",
+    )
+
+    # 时区数据（没有则退化成 UTC）
+    if zoneinfo_src and Path(zoneinfo_src).exists():
+        dst = staging / "usr/share/zoneinfo"
+        shutil.copytree(
+            Path(zoneinfo_src),
+            dst,
+            ignore=shutil.ignore_patterns("*.py", "__pycache__"),
+            symlinks=False,
+        )
+        shanghai = dst / "Asia/Shanghai"
+        if shanghai.exists():
+            shutil.copy2(shanghai, staging / "etc/localtime")
+
+    # 工作目录 / 数据目录 / tmp
+    (staging / "home/elbot").mkdir(parents=True, exist_ok=True)
+    (staging / "data/run").mkdir(parents=True, exist_ok=True)
+    (staging / "tmp").mkdir(parents=True, exist_ok=True)
+    os.chmod(staging / "tmp", 0o1777)
+
+
+def build_layer(staging: Path, out_path: Path):
+    mtime = 0
+    with tarfile.open(out_path, "w", format=tarfile.GNU_FORMAT) as tar:
+        add_dir(tar, "usr", mtime=mtime)
+        add_dir(tar, "usr/local", mtime=mtime)
+        add_dir(tar, "usr/local/bin", mtime=mtime)
+        add_dir(tar, "usr/share", mtime=mtime)
+        add_dir(tar, "etc", mtime=mtime)
+        add_dir(tar, "etc/ssl", mtime=mtime)
+        add_dir(tar, "etc/ssl/certs", mtime=mtime)
+        add_dir(tar, "tmp", mode=0o1777, mtime=mtime)
+        add_dir(tar, "home", mtime=mtime)
+        add_dir(tar, "home/elbot", uid=UID_ELBOT, gid=GID_ELBOT, mtime=mtime)
+        add_dir(tar, "data", uid=UID_ELBOT, gid=GID_ELBOT, mtime=mtime)
+        add_dir(tar, "data/run", uid=UID_ELBOT, gid=GID_ELBOT, mtime=mtime)
+
+        add_file(tar, "usr/local/bin/elbot", staging / "usr/local/bin/elbot",
+                 mode=0o755, mtime=mtime)
+        add_file(tar, "etc/ssl/certs/ca-certificates.crt",
+                 staging / "etc/ssl/certs/ca-certificates.crt", mode=0o644, mtime=mtime)
+        add_file(tar, "etc/passwd", staging / "etc/passwd", mode=0o644, mtime=mtime)
+        add_file(tar, "etc/group", staging / "etc/group", mode=0o644, mtime=mtime)
+        if (staging / "etc/localtime").exists():
+            add_file(tar, "etc/localtime", staging / "etc/localtime",
+                     mode=0o644, mtime=mtime)
+
+        zi = staging / "usr/share/zoneinfo"
+        if zi.exists():
+            add_dir(tar, "usr/share/zoneinfo", mtime=mtime)
+            for p in sorted(zi.rglob("*"), key=lambda x: str(x)):
+                rel = "usr/share/zoneinfo/" + str(p.relative_to(zi)).replace("\\", "/")
+                if p.is_dir():
+                    add_dir(tar, rel, mtime=mtime)
+                else:
+                    add_file(tar, rel, p, mode=0o644, mtime=mtime)
+
+
+def make_layer_tar(staging: Path, layer_path: Path) -> str:
+    build_layer(staging, layer_path)
+    return sha256_file(layer_path)
+
+
+def make_config(arch: str, version: str, diff_id: str):
+    return {
+        "architecture": arch,
+        "os": "linux",
+        "created": CREATED,
+        "config": {
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "TZ=Asia/Shanghai",
+                "XDG_CONFIG_HOME=/data/config",
+                "XDG_DATA_HOME=/data",
+                "XDG_RUNTIME_DIR=/data/run",
+                "HOME=/home/elbot",
+                "LANG=C.UTF-8",
+            ],
+            "Entrypoint": ["/usr/local/bin/elbot"],
+            "Cmd": ["service", "run"],
+            "WorkingDir": "/home/elbot",
+            "User": "10001:10001",
+            "ExposedPorts": {"32170/tcp": {}, "32172/tcp": {}},
+            "Volumes": {"/data": {}},
+            "Healthcheck": {
+                "Test": ["CMD", "/usr/local/bin/elbot", "--version"],
+                "Interval": 30000000000,
+                "Timeout": 5000000000,
+                "StartPeriod": 30000000000,
+                "Retries": 3,
+            },
+            "Labels": {
+                "org.opencontainers.image.title": "elbot",
+                "org.opencontainers.image.version": version,
+            },
+        },
+        "history": [
+            {
+                "created": CREATED,
+                "created_by": "elbot offline image packer",
+                "comment": "elbot " + version,
+            }
+        ],
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:" + diff_id]},
+    }
+
+
+def make_image_archive(binary: Path, arch: str, version: str, tag: str,
+                       output: Path, zoneinfo_src):
+    with tempfile.TemporaryDirectory(prefix="elbot-image-") as tmp:
+        tmpdir = Path(tmp)
+        staging = tmpdir / "rootfs"
+        staging.mkdir()
+        stage_rootfs(binary, staging, zoneinfo_src)
+
+        layer_tar = tmpdir / "layer.tar"
+        diff_id = make_layer_tar(staging, layer_tar)
+        config = make_config(arch, version, diff_id)
+        config_bytes = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
+        config_hex = sha256_bytes(config_bytes)
+        config_name = config_hex + ".json"
+        layer_dir = diff_id
+
+        manifest = [
+            {
+                "Config": config_name,
+                "RepoTags": [tag],
+                "Layers": [layer_dir + "/layer.tar"],
+            }
+        ]
+        repositories = {"elbot": {tag.split(":")[-1]: config_hex}}
+        layer_meta = {
+            "id": layer_dir,
+            "parent": "",
+            "created": CREATED,
+            "container_config": {},
+            "config": {},
+            "os": "linux",
+        }
+
+        raw_tar = tmpdir / "image.tar"
+        with tarfile.open(raw_tar, "w", format=tarfile.GNU_FORMAT) as tar:
+            add_dir(tar, layer_dir, mtime=0)
+            add_file(tar, layer_dir + "/layer.tar", layer_tar, mode=0o644, mtime=0)
+            add_bytes(tar, layer_dir + "/VERSION", b"1.0\n", mode=0o644, mtime=0)
+            add_bytes(tar, layer_dir + "/json",
+                      json.dumps(layer_meta, indent=2).encode("utf-8"), mode=0o644, mtime=0)
+            add_bytes(tar, config_name, config_bytes, mode=0o644, mtime=0)
+            add_bytes(tar, "manifest.json",
+                      json.dumps(manifest, indent=2).encode("utf-8"), mode=0o644, mtime=0)
+            add_bytes(tar, "repositories",
+                      json.dumps(repositories, indent=2).encode("utf-8"), mode=0o644, mtime=0)
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with open(raw_tar, "rb") as src, open(output, "wb") as raw_out, \
+                gzip.GzipFile(fileobj=raw_out, mode="wb", compresslevel=6, mtime=0) as dst:
+            shutil.copyfileobj(src, dst)
+
+        return {
+            "output": str(output),
+            "tag": tag,
+            "arch": arch,
+            "diff_id": diff_id,
+            "config_digest": config_hex,
+            "layer_bytes": layer_tar.stat().st_size,
+            "image_bytes": output.stat().st_size,
+        }
+
+
+def main():
+    ap = argparse.ArgumentParser(description="构造 ElBot 离线 Docker 镜像 tar.gz")
+    ap.add_argument("--binary", required=True, type=Path)
+    ap.add_argument("--arch", default="amd64", choices=["amd64", "arm64"])
+    ap.add_argument("--version", default="0.5.0")
+    ap.add_argument("--tag", default=None, help="默认为 elbot:<version>")
+    ap.add_argument("--output", required=True, type=Path)
+    ap.add_argument("--zoneinfo", default=None, type=Path,
+                    help="zoneinfo 目录；默认自动探测 python tzdata 包")
+    args = ap.parse_args()
+
+    if not args.binary.is_file():
+        sys.exit("binary not found: " + str(args.binary))
+
+    zoneinfo = args.zoneinfo
+    if zoneinfo is None:
+        try:
+            import tzdata
+            candidate = Path(tzdata.__file__).parent / "zoneinfo"
+            if candidate.exists():
+                zoneinfo = candidate
+        except Exception:
+            zoneinfo = None
+
+    tag = args.tag or ("elbot:" + args.version)
+    info = make_image_archive(args.binary, args.arch, args.version, tag,
+                              args.output, zoneinfo)
+    print(json.dumps(info, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

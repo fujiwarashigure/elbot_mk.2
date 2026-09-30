@@ -54,22 +54,22 @@ func (a *Agent) messageWakeup(ctx context.Context, text string) bool {
 
 func (a *Agent) stripWakeupPrefix(ctx context.Context, text string) string {
 	if msg, ok := platform.MessageContextFrom(ctx); ok {
-		return stripWakeupPrefixFromText(text, msg)
+		return stripWakeupPrefixFromText(text, msg, a.commandPrefixes())
 	}
 	return text
 }
 
-func stripWakeupPrefixFromText(text string, msg platform.MessageContext) string {
+func stripWakeupPrefixFromText(text string, msg platform.MessageContext, prefixes []string) string {
 	if stripped, ok := platform.StripTriggerKeyword(text, msg.TriggerKeywords); ok {
 		return stripped
 	}
 	if before, after, ok := strings.Cut(text, "\n\n"); ok {
-		stripped := stripWakeupPrefixFromText(after, msg)
+		stripped := stripWakeupPrefixFromText(after, msg, prefixes)
 		if stripped != after {
 			return before + "\n\n" + stripped
 		}
 	}
-	return stripBotMention(text, msg)
+	return stripBotMention(text, msg, prefixes)
 }
 
 func inboundRawText(ctx context.Context) string {
@@ -93,13 +93,13 @@ func mentionsBot(msg platform.MessageContext) bool {
 	return false
 }
 
-func stripBotMention(text string, msg platform.MessageContext) string {
+func stripBotMention(text string, msg platform.MessageContext, prefixes []string) string {
 	botUsername := strings.TrimPrefix(strings.TrimSpace(msg.Bot.Username), "@")
 	if botUsername == "" || text == "" {
 		return text
 	}
 	fields := strings.Fields(text)
-	if len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
+	if len(fields) > 0 && startsWithCommandPrefix(fields[0], prefixes) {
 		if name, mention, ok := strings.Cut(fields[0], "@"); ok && strings.EqualFold(mention, botUsername) {
 			fields[0] = name
 			return strings.TrimSpace(strings.Join(fields, " "))
@@ -113,6 +113,15 @@ func stripBotMention(text string, msg platform.MessageContext) string {
 		kept = append(kept, field)
 	}
 	return strings.TrimSpace(strings.Join(kept, " "))
+}
+
+func startsWithCommandPrefix(token string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if prefix != "" && strings.HasPrefix(token, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) isReplyToBot(ctx context.Context, msg platform.MessageContext) bool {

@@ -93,8 +93,8 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 1. 在 `config/providers.toml` 配置 OpenAI-compatible Provider。
 2. 通过系统环境变量或配置目录 `.env` 设置 `api_key_env` 对应的 API Key。
-3. 启动后使用命令 `/models` 查看然后使用 `/model xx` 选择模型。或手动在 `config/state.toml` 选择默认 `chat` / `work` 模式和模型。
-4. 输入 `/help` 查看命令，或直接开始对话。
+3. 启动后使用命令 `/*models` 查看然后使用 `/*model xx` 选择模型。或手动在 `config/state.toml` 选择默认 `chat` / `work` 模式和模型。
+4. 输入 `/*help` 查看命令，或直接开始对话。
 
 详细说明见：
 

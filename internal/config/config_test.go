@@ -380,6 +380,7 @@ prompt = "Use agent tools."
 		SessionCleanup:     MaintenanceCleanupConfig{Enabled: true, Schedule: "15 3 * * *", RetentionDays: 14},
 		SandboxCleanup:     MaintenanceCleanupConfig{Enabled: true, Schedule: "0 5 * * *", RetentionDays: 9},
 		ChatHistoryCleanup: ChatHistoryCleanupConfig{Schedule: "35 4 * * *", RetentionDays: 180},
+		DailyReport:        DailyReportConfig{Schedule: "0 9,21 * * *", WindowHours: 12, Provider: "deepseek", Currency: "CNY"},
 	}
 	if !reflect.DeepEqual(cfg.Maintenance, wantMaintenance) {
 		t.Fatalf("maintenance = %#v, want %#v", cfg.Maintenance, wantMaintenance)
@@ -490,7 +491,10 @@ model = "deepseek-chat"
 	if cfg.ModelMetadata.DefaultContextWindow != 256000 {
 		t.Fatalf("DefaultContextWindow = %d", cfg.ModelMetadata.DefaultContextWindow)
 	}
-	if !reflect.DeepEqual(cfg.Commands.Prefixes, []string{"/"}) {
+	if !cfg.CharacterLibrary.IsEnabled() || cfg.CharacterLibrary.Root != filepath.Join(configDir, "characters") {
+		t.Fatalf("character library defaults = %#v", cfg.CharacterLibrary)
+	}
+	if !reflect.DeepEqual(cfg.Commands.Prefixes, []string{"/*"}) {
 		t.Fatalf("Command prefixes = %#v", cfg.Commands.Prefixes)
 	}
 	if cfg.Tools.MaxRoundsPerTurn != 2 {

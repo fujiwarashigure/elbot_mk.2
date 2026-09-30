@@ -8,10 +8,13 @@
 2. [配置说明](configuration.md)：了解配置文件、路径规则、Provider、运行数据和插件目录。
 3. [命令速查](commands.md)：查看常用 slash 命令和会话管理方式。
 4. [核心概念](concepts.md)：理解 Chat / Work 模式、工具发现、Session、Hook、Cron、Skill 和安全策略。
-5. [Hook](hooks.md)：规则 Hook 配置、action 类型、segments 多段输出、exec 脚本和表情提取示例。
-6. [Elnis 监听枢纽](elnis.md)：了解 Elnis、Elwisp、Elvena 和外部事件接入。
-7. [Elnis 配置与使用](elnis-usage.md)：启用 Elnis、配置 Elwisp，并用 Elvena 投递事件。
-8. [前端 API](frontend-api.md)：WebSocket 协议、消息类型和补全接口，用于编写自定义前端。
+5. [角色素材库](character-library.md)：用文件夹管理角色文本与图片，支持索引检索和 `@char:<id>` 临时启用。
+6. [生图服务](image-generation.md)：对接中转站 GPT Image 2.5，自动拼接预设提示词并出图。
+7. [定时报告](reports.md)：每天两次推送生图量、Token、费用、磁盘和内存。
+8. [Hook](hooks.md)：规则 Hook 配置、action 类型、segments 多段输出、exec 脚本和表情提取示例。
+9. [Elnis 监听枢纽](elnis.md)：了解 Elnis、Elwisp、Elvena 和外部事件接入。
+10. [Elnis 配置与使用](elnis-usage.md)：启用 Elnis、配置 Elwisp，并用 Elvena 投递事件。
+11. [前端 API](frontend-api.md)：WebSocket 协议、消息类型和补全接口，用于编写自定义前端。
 
 ## 文档维护约定
 

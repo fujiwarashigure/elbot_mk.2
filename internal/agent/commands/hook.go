@@ -55,7 +55,7 @@ func (c hooksCommand) Handle(ctx context.Context, req command.Request) (*command
 		return &command.Result{Content: formatHookReloadResult(report)}, nil
 	case "start", "stop", "restart":
 		if len(fields) != 2 {
-			return &command.Result{Content: fmt.Sprintf("usage: /hooks %s <id>", fields[0])}, nil
+			return &command.Result{Content: fmt.Sprintf("usage: %shooks %s <id>", req.Prefix, fields[0])}, nil
 		}
 		var err error
 		switch fields[0] {
@@ -72,7 +72,7 @@ func (c hooksCommand) Handle(ctx context.Context, req command.Request) (*command
 		return &command.Result{Content: fmt.Sprintf("hook %s completed: %s", fields[0], fields[1])}, nil
 	default:
 		name := fields[0]
-		return &command.Result{Content: formatHookDetail(deps, name)}, nil
+		return &command.Result{Content: formatHookDetail(deps, req.Prefix, name)}, nil
 	}
 }
 
@@ -245,7 +245,7 @@ func formatHookReloadResult(report hook.ReloadReport) string {
 	return trimTrailingNewlines(sb.String())
 }
 
-func formatHookDetail(deps Deps, name string) string {
+func formatHookDetail(deps Deps, prefix, name string) string {
 	groups := collectHookGroups(deps)
 	for _, group := range groups {
 		if group.plugin && group.name == name {
@@ -259,7 +259,7 @@ func formatHookDetail(deps Deps, name string) string {
 			}
 		}
 	}
-	return fmt.Sprintf("hook %q not found. Use /hooks to list all hooks.", name)
+	return fmt.Sprintf("hook %q not found. Use %shooks to list all hooks.", name, prefix)
 }
 
 func formatPluginHookDetail(group *hookGroup) string {

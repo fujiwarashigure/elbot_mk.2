@@ -23,7 +23,7 @@ func TestFormatSessionsPageShowsNextCommand(t *testing.T) {
 	if !strings.Contains(resume, "prev: /resume --page 1") {
 		t.Fatalf("resume content = %q", resume)
 	}
-	resumable := formatResumableSessionsPage([]storage.SessionSummary{{ID: "s11", Title: "eleven"}}, 2, 10, false)
+	resumable := formatResumableSessionsPage([]storage.SessionSummary{{ID: "s11", Title: "eleven"}}, 2, 10, false, "/")
 	if !strings.Contains(resumable, "[11] eleven") || !strings.Contains(resumable, "prev: /resume --page 1") {
 		t.Fatalf("resumable content = %q", resumable)
 	}

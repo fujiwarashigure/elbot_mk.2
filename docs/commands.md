@@ -1,102 +1,104 @@
 # 命令速查
 
-ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共享同一套语义。默认命令前缀是 `/`，可在 `app.toml` 的 `[commands]` 中配置。
+ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共享同一套语义。默认命令前缀是 `/*`，可在 `app.toml` 的 `[commands]` 中配置。
+
+> 说明：当前默认命令前缀是 `/*`，本文示例已按 `/*` 书写。
 
 ## 帮助
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help` | 查看可用命令列表。 |
-| `/help <command>` | 查看某个命令的详细帮助。 |
+| `/*help` | 查看可用命令列表。 |
+| `/*help <command>` | 查看某个命令的详细帮助。 |
 
 示例：
 
 ```text
-/help
-/help model
-/help log
+/*help
+/*help model
+/*help log
 ```
 
 ## 模型
 
 | 命令 | 作用 |
 | --- | --- |
-| `/models` | 查看模型列表。 |
-| `/models --fresh` 或 `/models --refresh` | 强制刷新模型列表缓存。 |
-| `/model <编号或名称>` | 切换当前 Session 模式使用的模型。 |
-| `/model --chat <模型>` | 切换 chat 模式模型。 |
-| `/model --work <模型>` | 切换 work 模式模型。 |
-| `/model --elwisp1 <模型>` | 切换 Elnis elwisp1 模型槽位。 |
-| `/model --elwisp2 <模型>` | 切换 Elnis elwisp2 模型槽位。 |
-| `/model --elwisp3 <模型>` | 切换 Elnis elwisp3 模型槽位。 |
-| `/model --compact <模型>` | 切换上下文压缩模型。 |
-| `/model --naming <模型>` | 切换 Session 自动命名模型。 |
-| `/checkmodel [关键词]` | 查看或搜索模型。 |
+| `/*models` | 查看模型列表。 |
+| `/*models --fresh` 或 `/*models --refresh` | 强制刷新模型列表缓存。 |
+| `/*model <编号或名称>` | 切换当前 Session 模式使用的模型。 |
+| `/*model --chat <模型>` | 切换 chat 模式模型。 |
+| `/*model --work <模型>` | 切换 work 模式模型。 |
+| `/*model --elwisp1 <模型>` | 切换 Elnis elwisp1 模型槽位。 |
+| `/*model --elwisp2 <模型>` | 切换 Elnis elwisp2 模型槽位。 |
+| `/*model --elwisp3 <模型>` | 切换 Elnis elwisp3 模型槽位。 |
+| `/*model --compact <模型>` | 切换上下文压缩模型。 |
+| `/*model --naming <模型>` | 切换 Session 自动命名模型。 |
+| `/*checkmodel [关键词]` | 查看或搜索模型。 |
 
 模型参数可以是列表编号、模型名或 `provider/model`。
 
 示例：
 
 ```text
-/models
-/models --fresh
-/models --refresh
-/model 2
-/model --work deepseek/deepseek-chat
-/model --chat openai/gpt-4o-mini
-/model --elwisp2 openai/gpt-4.1
-/checkmodel deepseek
+/*models
+/*models --fresh
+/*models --refresh
+/*model 2
+/*model --work deepseek/deepseek-chat
+/*model --chat openai/gpt-4o-mini
+/*model --elwisp2 openai/gpt-4.1
+/*checkmodel deepseek
 ```
 
 ## 模式
 
 | 命令 | 作用 |
 | --- | --- |
-| `/chat [消息]` | 切换到 chat 模式，或创建新的 chat Session；提供消息时会切换后立即发送。 |
-| `/work [消息]` | 切换到 work 模式，或创建新的 work Session；提供消息时会切换后立即发送。 |
+| `/*chat [消息]` | 切换到 chat 模式，或创建新的 chat Session；提供消息时会切换后立即发送。 |
+| `/*work [消息]` | 切换到 work 模式，或创建新的 work Session；提供消息时会切换后立即发送。 |
 
 说明：
 
 - `chat` 模式不注入工具，适合闲聊、陪伴和低成本问答。
 - `work` 模式启用工具发现和工具调用。
-- 已有历史的 work Session 不能直接切到 chat；需要先 `/new`，再 `/chat`。
-- 例如 `/chat 随便聊聊` 会先切换到 chat 模式，再把“随便聊聊”作为同一条用户消息发给模型；若模式切换被拒绝，消息不会发送。
+- 已有历史的 work Session 不能直接切到 chat；需要先 `/*new`，再 `/*chat`。
+- 例如 `/*chat 随便聊聊` 会先切换到 chat 模式，再把“随便聊聊”作为同一条用户消息发给模型；若模式切换被拒绝，消息不会发送。
 
 ## Session
 
 | 命令 | 作用 |
 | --- | --- |
-| `/new` | 创建并切换到新 Session。 |
-| `/status` | 查看当前 Session 状态。 |
-| `/sessions [关键词]` | 列出或搜索可见 Session。 |
-| `/resume [最近编号或session_id]` | 恢复历史 Session；编号 `1` 表示最近更新的非当前 Session。 |
-| `/archives [页码] [关键词]` | 查看已归档 Session。 |
-| `/archive [编号或session_id] --confirm` | 归档 Session，默认当前 Session。 |
-| `/unarchive [编号或session_id]` | 取消归档 Session，默认当前 Session。 |
-| `/pin [编号或session_id]` | 置顶 Session，默认当前 Session。 |
-| `/unpin [编号或session_id]` | 取消置顶 Session，默认当前 Session。 |
-| `/rename [编号或session_id|当前标题] <新标题>` | 重命名当前或指定 Session。 |
-| `/delete <编号或session_id> --confirm` | 永久删除 Session。 |
-| `/clean --confirm` | 删除过期且未归档、未置顶的 Session。 |
+| `/*new` | 创建并切换到新 Session。 |
+| `/*status` | 查看当前 Session 状态。 |
+| `/*sessions [关键词]` | 列出或搜索可见 Session。 |
+| `/*resume [最近编号或session_id]` | 恢复历史 Session；编号 `1` 表示最近更新的非当前 Session。 |
+| `/*archives [页码] [关键词]` | 查看已归档 Session。 |
+| `/*archive [编号或session_id] --confirm` | 归档 Session，默认当前 Session。 |
+| `/*unarchive [编号或session_id]` | 取消归档 Session，默认当前 Session。 |
+| `/*pin [编号或session_id]` | 置顶 Session，默认当前 Session。 |
+| `/*unpin [编号或session_id]` | 取消置顶 Session，默认当前 Session。 |
+| `/*rename [编号或session_id|当前标题] <新标题>` | 重命名当前或指定 Session。 |
+| `/*delete <编号或session_id> --confirm` | 永久删除 Session。 |
+| `/*clean --confirm` | 删除过期且未归档、未置顶的 Session。 |
 
 示例：
 
 ```text
-/new
-/status
-/sessions
-/sessions project
-/resume 1
-/rename 我的新会话标题
-/archive --confirm
-/delete 2 --confirm
+/*new
+/*status
+/*sessions
+/*sessions project
+/*resume 1
+/*rename 我的新会话标题
+/*archive --confirm
+/*delete 2 --confirm
 ```
 
 说明：
 
-- `/resume 1` 可以直接恢复最近更新的非当前 Session，无需先执行裸 `/resume`；编号按更新时间排列，不受置顶影响，翻页时编号连续。
-- 当前会话处理中时，不支持执行 `/new`、`/resume`、`/fork`、`/chat`、`/work` 等 Session 切换命令；如有必要，请先使用 `/stop` 结束当前处理。
-- `/sessions` 展示的编号可被 `/archive`、`/pin`、`/delete` 等 Session 操作命令复用。
+- `/*resume 1` 可以直接恢复最近更新的非当前 Session，无需先执行裸 `/*resume`；编号按更新时间排列，不受置顶影响，翻页时编号连续。
+- 当前会话处理中时，不支持执行 `/*new`、`/*resume`、`/*fork`、`/*chat`、`/*work` 等 Session 切换命令；如有必要，请先使用 `/*stop` 结束当前处理。
+- `/*sessions` 展示的编号可被 `/*archive`、`/*pin`、`/*delete` 等 Session 操作命令复用。
 - CLI 作为本地高权限入口，可以跨平台查看 Session；非 CLI 平台默认只查看当前平台和作用域下的 Session。
 - 删除是永久操作，需要显式 `--confirm`。
 
@@ -104,14 +106,14 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/messages [页码]` | 列出当前 Session 中可用于 fork 的 assistant message ID。 |
-| `/fork <message_id>` | 从指定 assistant 消息创建分支 Session。 |
+| `/*messages [页码]` | 列出当前 Session 中可用于 fork 的 assistant message ID。 |
+| `/*fork <message_id>` | 从指定 assistant 消息创建分支 Session。 |
 
 示例：
 
 ```text
-/messages
-/fork msg_xxx
+/*messages
+/*fork msg_xxx
 ```
 
 Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下文分支。
@@ -120,25 +122,25 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/requests` | 查看当前进程中的 active request，包括 turn、LLM、tool、hook 等请求；turn 会显示运行阶段和阶段耗时。 |
-| `/stop [request_id]` | 停止指定请求；也可使用 `/requests` 显示的编号；不传参数时停止当前 Session 的请求。停止一次性 exec Hook 时会结束该 Hook 的完整进程树；持久 Worker 只取消当前调用。 |
-| `/stopall` | 停止当前进程中的所有 active request。 |
+| `/*requests` | 查看当前进程中的 active request，包括 turn、LLM、tool、hook 等请求；turn 会显示运行阶段和阶段耗时。 |
+| `/*stop [request_id]` | 停止指定请求；也可使用 `/*requests` 显示的编号；不传参数时停止当前 Session 的请求。停止一次性 exec Hook 时会结束该 Hook 的完整进程树；持久 Worker 只取消当前调用。 |
+| `/*stopall` | 停止当前进程中的所有 active request。 |
 
 示例：
 
 ```text
-/requests
-/stop
-/stop 1.1
-/stop req_xxx
-/stopall
+/*requests
+/*stop
+/*stop 1.1
+/*stop req_xxx
+/*stopall
 ```
 
 ## 上下文压缩
 
 | 命令 | 作用 |
 | --- | --- |
-| `/compact` | 手动压缩当前 Session 上下文。 |
+| `/*compact` | 手动压缩当前 Session 上下文。 |
 
 说明：
 
@@ -149,42 +151,64 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/tools` | 列出已注册工具和外置 Skill。 |
-| `/tools reload` | 重新扫描并加载 Skill。 |
-| `/tools remove <name> --confirm` | 删除外置 Skill 及其目录。 |
-| `/tools uninstall <name> --confirm` | 等同于 remove。 |
+| `/*tools` | 列出已注册工具和外置 Skill。 |
+| `/*tools reload` | 重新扫描并加载 Skill。 |
+| `/*tools remove <name> --confirm` | 删除外置 Skill 及其目录。 |
+| `/*tools uninstall <name> --confirm` | 等同于 remove。 |
 
 示例：
 
 ```text
-/tools
-/tools reload
-/tools remove my_skill --confirm
+/*tools
+/*tools reload
+/*tools remove my_skill --confirm
 ```
 
-`/tools reload` 会先完整扫描并验证候选 Skill，再一次性替换当前集合。若存在重名 Skill、与内置工具重名或读取失败，reload 会返回错误并保留原有工具集合。
+`/*tools reload` 会先完整扫描并验证候选 Skill，再一次性替换当前集合。若存在重名 Skill、与内置工具重名或读取失败，reload 会返回错误并保留原有工具集合。
 
 LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。聊天中也可以用 `@tool:<name-or-tag>`（简写 `@t:<name-or-tag>`）预载工具，或用 `@skill:<name>`（简写 `@s:<name>`）把 Skill 文档加入本轮消息并预载对应运行 wrapper。冒号也可以写成中文全角冒号 `：`。
+
+`@model:` / `@image:` / `@use:`（也支持 `#模型:`、`#生图:`、`#工具:` 和中文别名）是"单轮声明"：只对当前这一轮生效，下条消息要重新声明，且仅超级管理员可用。触发符号、关键字和别名都可配置，详见 [配置说明](configuration.md#命名-profile-与单轮声明)。
+
+`@tool:` / `@skill:` 预载只在 work 模式生效。在 chat 模式下发送预载指令时，ElBot 会剥离指令并提示先发送 `/*work` 切换；不会静默忽略。
+
+`discover_tool` 的 `name` / `names` 除了工具名和 Skill 名，也可以传 tag（例如 `chat`、`web`），会展开成该 tag 下的全部工具；`discover_tool` 列表中的 `tags` 字段可以用来发现可用的 tag。
+
+## 角色素材库
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*chars` | 列出当前可见角色。 |
+| `/*chars <关键词>` | 按 id / 名称 / 别名 / tags / 简介过滤。 |
+| `/*chars reload` | 超级管理员重建角色索引。 |
+
+在消息里写 `@char:<id>`（简写 `@c:<id>`，支持全角冒号 `：`）可以把该角色的设定临时注入当轮，仅影响这一轮：
+
+```text
+@char:catgirl 你好呀
+```
+
+角色不存在或无权访问会提示“未找到或不可用的角色”。完整说明见 [角色素材库](character-library.md)。
 
 ## Hook
 
 
 | 命令 | 作用 |
 | --- | --- |
-| `/hooks` | 列出所有已注册 Hook。 |
-| `/hooks <name>` | 查看某个 Hook 的详细配置。 |
-| `/hooks start <id>` | 启动一个持久 Hook。 |
-| `/hooks stop <id>` | 优雅停止一个 Hook。 |
-| `/hooks restart <id>` | 停止并重新启动一个持久 Hook。 |
-| `/hooks reload` | 重读规则和持久 Hook 配置，并重新协调进程生命周期。 |
+| `/*hooks` | 列出所有已注册 Hook。 |
+| `/*hooks <name>` | 查看某个 Hook 的详细配置。 |
+| `/*hooks start <id>` | 启动一个持久 Hook。 |
+| `/*hooks stop <id>` | 优雅停止一个 Hook。 |
+| `/*hooks restart <id>` | 停止并重新启动一个持久 Hook。 |
+| `/*hooks reload` | 重读规则和持久 Hook 配置，并重新协调进程生命周期。 |
 
 示例：
 
 ```text
-/hooks
-/hooks greet
-/hooks restart weather
-/hooks reload
+/*hooks
+/*hooks greet
+/*hooks restart weather
+/*hooks reload
 ```
 
 说明：
@@ -192,15 +216,15 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 - 规则 Hook 直接使用配置里的 `name`；内置 Hook 使用 `builtin.*` 名称，例如 `builtin.cron.missed_once`。
 - `Description` 会显示在列表和详情里；规则细节只在详情里显示。
 - `reload` 会重新读取 `hooks.toml` 和各插件 `hook.toml`，并重建 Hook 注册、替换受影响的持久进程。
-- `/hooks` 为超级管理员命令。
+- `/*hooks` 为超级管理员命令。
 
 ## 日志和审计
 
 | 命令 | 作用 |
 | --- | --- |
-| `/log [options]` | 查询运行日志。 |
-| `/audit [options]` | 查询审计日志。 |
-| `/elwisp [name] [options]` | 查询 Elnis/Elwisp 事件日志。 |
+| `/*log [options]` | 查询运行日志。 |
+| `/*audit [options]` | 查询审计日志。 |
+| `/*elwisp [name] [options]` | 查询 Elnis/Elwisp 事件日志。 |
 
 常用选项：
 
@@ -215,7 +239,7 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 | `--msg <text>` | 按 msg 字段过滤。 |
 | `--contains <text>` | 按文本、参数、结果或 raw 内容过滤。 |
 
-`/log` 额外支持：
+`/*log` 额外支持：
 
 | 选项 | 作用 |
 | --- | --- |
@@ -223,7 +247,7 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 | `-s, --system` | 筛选并显示 `system prompt` 日志。 |
 | `--hook` | 筛选 Hook 事件。 |
 
-`/audit` 额外支持：
+`/*audit` 额外支持：
 
 | 选项 | 作用 |
 | --- | --- |
@@ -233,7 +257,7 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 | `--session <id>` | 按 Session ID 过滤。 |
 | `--tool <name>` | 按工具名过滤。 |
 
-`/elwisp` 查询 `elnis-YYYY-MM-DD.log`，额外支持：
+`/*elwisp` 查询 `elnis-YYYY-MM-DD.log`，额外支持：
 
 | 选项 | 作用 |
 | --- | --- |
@@ -249,22 +273,22 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 示例：
 
 ```text
-/log
-/log -w -n 10
-/log --system
-/log --msg startup --days 3
-/audit --event tool_call --risk high -n 10
-/audit --actor cli:local --since 24h
-/elwisp
-/elwisp server-watchdog -n 20
-/elwisp --source minecraft-main --mode llm --since 2h
+/*log
+/*log -w -n 10
+/*log --system
+/*log --msg startup --days 3
+/*audit --event tool_call --risk high -n 10
+/*audit --actor cli:local --since 24h
+/*elwisp
+/*elwisp server-watchdog -n 20
+/*elwisp --source minecraft-main --mode llm --since 2h
 ```
 
 ## Token 消耗统计
 
 | 命令 | 作用 |
 | --- | --- |
-| `/usage [options]` | 汇总审计日志中的 token 消耗数据。 |
+| `/*usage [options]` | 汇总审计日志中的 token 消耗数据。 |
 
 选项：
 
@@ -280,17 +304,17 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 示例：
 
 ```text
-/usage
-/usage -d 7
-/usage -m gpt-4o
-/usage -s sess-xxx
-/usage --by day -d 30
-/usage --since 2h
+/*usage
+/*usage -d 7
+/*usage -m gpt-4o
+/*usage -s sess-xxx
+/*usage --by day -d 30
+/*usage --since 2h
 ```
 
 说明：
 
-- `/usage` 从审计日志的 `llm_usage` 事件聚合 token 用量，按模型/天/会话分组统计 prompt、completion、total、cache 和耗时。
+- `/*usage` 从审计日志的 `llm_usage` 事件聚合 token 用量，按模型/天/会话分组统计 prompt、completion、total、cache 和耗时。
 - 仅超级管理员可用。
 
 ## 高风险工具确认
@@ -299,13 +323,13 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/detail` | 查看待确认工具调用详情；支持工具自定义纯文本详情，未自定义时显示格式化后的参数。 |
-| `/confirm` | 确认当前待确认工具调用。 |
-| `/confirmtool` | 确认当前工具。 |
-| `/confirmall` | 确认当前批次全部待确认工具。 |
-| `/reject` | 拒绝当前待确认工具调用。 |
-| `/stop` | 停止当前请求。 |
+| `/*detail` | 查看待确认工具调用详情；支持工具自定义纯文本详情，未自定义时显示格式化后的参数。 |
+| `/*confirm` | 确认当前待确认工具调用。 |
+| `/*confirmtool` | 确认当前工具。 |
+| `/*confirmall` | 确认当前批次全部待确认工具。 |
+| `/*reject` | 拒绝当前待确认工具调用。 |
+| `/*stop` | 停止当前请求。 |
 
-普通用户的确认等待默认在 10 分钟无有效操作后过期；若当前群聊或私聊的 Session TTL 更短，则使用更短的时限。超级管理员不受额外的 10 分钟限制，但仍遵守大于 0 的 Session TTL。执行 `/detail` 会重新计时；过期后工具不会执行，当前处理会停止。
+普通用户的确认等待默认在 10 分钟无有效操作后过期；若当前群聊或私聊的 Session TTL 更短，则使用更短的时限。超级管理员不受额外的 10 分钟限制，但仍遵守大于 0 的 Session TTL。执行 `/*detail` 会重新计时；过期后工具不会执行，当前处理会停止。
 
 具体提示以运行时输出为准。

@@ -120,7 +120,7 @@ systemd 用户服务没有显式设置 PATH 时，ElBot 使用服务管理器提
 
 ### 生效时机
 
-配置根 `.env` 或 systemd 环境在重启 ElBot 后生效。`plugins/.env` 和插件 `.env` 在启动及 `/hooks reload` 时重新读取，reload 会按新环境重建 Worker；文件不存在时视为空配置。
+配置根 `.env` 或 systemd 环境在重启 ElBot 后生效。`plugins/.env` 和插件 `.env` 在启动及 `/*hooks reload` 时重新读取，reload 会按新环境重建 Worker；文件不存在时视为空配置。
 
 ## Workspace 工具
 
@@ -384,7 +384,7 @@ model = "deepseek-chat"
 - `work` 模式启用工具发现和工具调用。
 - `chat` 模式不注入工具，适合闲聊和低成本对话。
 - `elwisp1`、`elwisp2`、`elwisp3` 是 Elnis LLM 事件可选模型槽位；Elvena 请求可通过 `model_slot` 指定，未配置时回退到 `work`。
-- 运行时使用 `/model` 切换模型后，状态会写回 `state.toml`。
+- 运行时使用 `/*model` 切换模型后，状态会写回 `state.toml`。
 
 ## 存储与运行数据
 
@@ -475,7 +475,7 @@ compact_trigger_ratio = 0.8
 ```
 
 - 开启后，Session 上下文接近窗口上限时会触发压缩。
-- 也可以通过 `/compact` 手动压缩当前 Session。
+- 也可以通过 `/*compact` 手动压缩当前 Session。
 - 压缩成功后会切换到独立的新 Session，不修改原 Session 的历史。
 
 模型窗口在 `providers.toml` 的 `model_configs` 中配置：
@@ -494,7 +494,7 @@ default_context_window = 256000
 
 ```toml
 [commands]
-prefixes = ["/"]
+prefixes = ["/*"]
 ```
 
 默认使用 `/`。如果要支持其他命令前缀，可以在这里添加。
@@ -567,10 +567,163 @@ MUST:
 - 配置 tag 会追加到内置 tag，不覆盖内置 tag。
 - 只有 `@tool:<tag>` 或 `@t:<tag>` 成功命中至少一个工具后，当前 Session 才会激活该 tag 的 prompt。
 - 直接 `@tool:<tool-name>` 或 `@t:<tool-name>` 只预载指定工具，不激活 tag prompt。
-- 激活的 tag 会写入 Session metadata，`/resume` 后仍生效。
+- 激活的 tag 会写入 Session metadata，`/*resume` 后仍生效。
 - prompt 文本从 `tool_tags.toml` 动态读取；文件变更后影响后续请求，行为类似 `SOUL.md`。
 - 重复预载已经存在的工具时不会重复添加，平台会提示 `已存在工具：<name>`。
 - 建议把 `prompt` 写成具体工具使用策略，不要写“当前 tag 是 xxx”这类模型不需要知道的配置机制。
+
+## 命名 profile 与单轮声明
+
+模型、生图、工具都支持"多个命名 profile + 一个默认"。非默认 profile 需要在群聊消息里显式声明，**只对当前这一轮生效**（回复结束即失效，下条消息要重新声明），**只有超级管理员**能声明。
+
+| 声明 | 作用 | 配置 |
+| --- | --- | --- |
+| `@model:<名字>` / `#模型:<名字>` | 本轮换模型 | `[model_profiles.<name>]` |
+| `@image:<名字>` / `#生图:<名字>` | 本轮换生图端点 | `[image_generation.profiles.<name>]` |
+| `@use:<名字>` / `#工具:<名字>` | 本轮额外注入工具 | `[tool_profiles.<name>]` |
+
+**触发符号和关键字都可以自定义**，中文关键字默认就支持：
+
+```toml
+[turn_directives]
+prefixes = ["@", "#"]                 # 触发符号，可再加 "！" 等
+model_keywords = ["model", "m", "模型", "用模型"]
+image_keywords = ["image", "img", "生图", "出图"]
+tool_keywords = ["use", "工具", "用工具"]
+```
+
+**每个 profile 可以配中文/短别名**，声明时就不用打全名：
+
+```toml
+# 模型 profile：默认模型仍是 state.toml 的 mode_models.*
+[model_profiles.pro]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+aliases = ["强", "强模型", "pro"]
+
+[model_profiles.cheap]
+provider = "deepseek"
+model = "deepseek-flash"
+aliases = ["快", "便宜", "flash"]
+
+# 工具 profile：只在本轮额外注入（不写 Session）
+[tool_profiles.admin]
+tools = ["shell", "read_file", "edit_file"]
+aliases = ["管理", "运维"]
+
+# 生图 profile：未写的字段沿用 [image_generation] 基础配置
+[image_generation]
+enabled = true
+base_url = "https://relay-a.example.com/v1"
+api_key_env = "IMAGE_API_KEY"
+model = "gpt-image-2.5"
+# default_profile = "fast"   # 可选：把某个 profile 设为默认
+
+[image_generation.profiles.fast]
+base_url = "https://relay-b.example.com/v1"
+api_key_env = "IMAGE_API_KEY_FAST"
+quality = "medium"
+superadmin_only = true
+aliases = ["高清", "fast"]
+```
+
+使用示例（全角冒号 `：` 也可以）：
+
+```text
+#模型:强 帮我看看这张图的排版        # 本轮用 deepseek-v4-pro
+#生图:高清 画一张赛博朋克城市        # 本轮用 relay-b
+#工具:管理 跑一下 ls 看看目录        # 本轮注入 shell
+@m:flash @image:fast 生成一张产品图  # 可以叠加、可以混用 @ / #
+下一条消息不带声明 → 自动回到默认模型 / 默认生图 / 默认工具集
+```
+
+- profile 名和别名都支持中文；别名匹配不区分英文大小写。
+- 声明会被从消息里剥离，不会发给模型；ElBot 会回一条"本轮已启用：…（仅本轮有效）"。
+- 普通用户声明会被拒绝并提示"仅超级管理员可以声明"。
+- `#生图:` 只影响 `image_generate`；也可以直接给工具传 `profile` 参数。
+- `#工具:` 注入的工具仍要经过原有的角色/风险校验，不会绕过安全策略。
+
+## 角色素材库
+
+```toml
+[character_library]
+enabled = true
+root = "characters"
+```
+
+- `enabled`：默认 `true`；为 `false` 时不注册角色工具，`@char:` 也会被忽略。
+- `root`：角色库根目录。相对路径以 `app.toml` 所在目录为基准，默认 `characters`，即 `data/config/elbot/characters/`。
+
+目录结构、可见性、工具和 `@char:<id>` 用法见 [角色素材库](character-library.md)。
+
+## 生图服务
+
+```toml
+[image_generation]
+enabled = true
+base_url = "https://your-relay.example.com/v1"
+api_key_env = "IMAGE_API_KEY"
+model = "gpt-image-2.5"
+size = "1024x1024"
+quality = "high"
+output_format = "png"
+timeout_seconds = 180
+preset_prompt = ""
+max_prompt_runes = 4000
+optimize = "rules"          # off / rules（内置 GPT Image Prompts 大全规则库）
+optimize_term_mode = "phrase"  # phrase / tag（tag 追加单个单词 tag 串）
+optimize_max_anchors = 4
+optimize_max_negatives = 10
+optimize_max_added_runes = 400
+optimize_max_tags = 12
+optimize_rewrite = "auto"          # off / auto / always
+optimize_rewrite_model = "naming"  # naming / compact / chat / work
+optimize_rewrite_min_runes = 40
+auto_character = true
+auto_context = true
+context_default_limit = 6
+superadmin_only = true
+save_to_character = true
+send_by_default = false
+supports_reference = false
+```
+
+- 端点必须兼容 `POST {base_url}/images/generations`；端点不同时用 `endpoint` 写全路径。
+- API Key 从 `api_key_env` 指定的环境变量读取，也可以直接写 `api_key`（不推荐）。
+- `preset_prompt` 是全局预设；角色预设来自 `characters/<id>/image_prompt.md` 和 `character.toml` 的 `[image]`。
+- `extra_payload` / `extra_headers` 用来透传中转站特有字段。
+- 完整说明见 [生图服务](image-generation.md)。
+
+## 定时报告
+
+```toml
+[maintenance.daily_report]
+enabled = true
+schedule = "0 9,21 * * *"
+window_hours = 12
+provider = "deepseek"
+currency = "CNY"
+image_price_per_image = 0.05
+peak_pricing = true
+
+[maintenance.daily_report.prices."deepseek-v4-pro"]
+input_per_million = 9.0
+cache_input_per_million = 0.30
+output_per_million = 27.0
+offpeak_input_per_million = 4.5
+offpeak_cache_input_per_million = 0.15
+offpeak_output_per_million = 13.5
+
+[maintenance.daily_report.prices."deepseek-flash"]
+input_per_million = 2.0
+cache_input_per_million = 0.04
+output_per_million = 8.0
+offpeak_input_per_million = 1.0
+offpeak_cache_input_per_million = 0.02
+offpeak_output_per_million = 4.0
+```
+
+每天两次推送生图量、Token 消耗、按单价换算的费用（含高峰/空闲双档和生图 0.05/张）、磁盘占用和内存占用。完整说明见 [定时报告](reports.md)。
 
 ## Elnis 监听枢纽
 
@@ -700,7 +853,7 @@ stream_edit_interval_milliseconds = 250
 - `stream_edit_interval_milliseconds` 控制流式刷新节流间隔，默认 250ms，避免触发平台限频。
 - 启动连接成功后，ElBot 会把内置 slash 命令同步到 Telegram bot 命令菜单；只同步主命令名，不同步 alias。
 - 群聊/超级群组中，命令前缀、触发关键词、`@bot_username` 或回复 bot 消息都会触发处理。私聊默认处理。
-- 高风险工具确认消息会附带 Telegram inline keyboard，点击按钮会转换为 `/confirm`、`/reject` 等现有确认命令。
+- 高风险工具确认消息会附带 Telegram inline keyboard，点击按钮会转换为 `/*confirm`、`/*reject` 等现有确认命令。
 - `security.superadmins.telegram` 填 Telegram 用户 ID 或可直接发送的私聊 chat ID，用于超级管理员权限与通知投递。
 
 

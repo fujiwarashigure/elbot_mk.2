@@ -46,7 +46,7 @@ func (h helpCommand) Handle(ctx context.Context, req command.Request) (*command.
 		usage := commandUsage(req.Prefix, info)
 		sb.WriteString(fmt.Sprintf("  %-24s %s\n", usage, info.Description))
 	}
-	sb.WriteString("\nUse /help <command> for details.")
+	sb.WriteString(fmt.Sprintf("\nUse %shelp <command> for details.", req.Prefix))
 	return &command.Result{Content: sb.String()}, nil
 }
 

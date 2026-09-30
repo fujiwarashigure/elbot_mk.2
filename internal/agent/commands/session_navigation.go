@@ -25,7 +25,7 @@ func NewSessions(deps Deps) command.Handler {
 		if len(sessions) == 0 {
 			return &command.Result{Content: "no sessions found"}, nil
 		}
-		return &command.Result{Content: formatSessionsPage(sessions, currentSessionID(ctx, deps), page, query, hasNext, "/sessions")}, nil
+		return &command.Result{Content: formatSessionsPage(sessions, currentSessionID(ctx, deps), page, query, hasNext, req.Prefix+"sessions")}, nil
 	})
 }
 
@@ -41,14 +41,14 @@ func (c resumeCommand) Handle(ctx context.Context, req command.Request) (*comman
 	deps := c.deps
 	arg := strings.TrimSpace(req.Args)
 	if strings.HasPrefix(arg, "--page") {
-		page, err := parseResumePageArg(arg)
+		page, err := parseResumePageArg(req.Prefix, arg)
 		if err != nil {
 			return nil, err
 		}
-		return resumePage(ctx, deps, page)
+		return resumePage(ctx, deps, req.Prefix, page)
 	}
 	if arg == "" {
-		return resumePage(ctx, deps, 1)
+		return resumePage(ctx, deps, req.Prefix, 1)
 	}
 	sessionID := arg
 	if idx, err := strconv.Atoi(arg); err == nil {
@@ -72,7 +72,7 @@ func (c resumeCommand) Handle(ctx context.Context, req command.Request) (*comman
 	return &command.Result{Content: formatResumeResult(ctx, deps, session)}, nil
 }
 
-func resumePage(ctx context.Context, deps Deps, page int) (*command.Result, error) {
+func resumePage(ctx context.Context, deps Deps, prefix string, page int) (*command.Result, error) {
 	pageSize := sessionPageSize(deps)
 	sessions, hasNext, err := listResumablePage(ctx, deps, page, pageSize)
 	if err != nil {
@@ -81,7 +81,7 @@ func resumePage(ctx context.Context, deps Deps, page int) (*command.Result, erro
 	if len(sessions) == 0 {
 		return &command.Result{Content: "no sessions found"}, nil
 	}
-	return &command.Result{Content: formatResumableSessionsPage(sessions, page, pageSize, hasNext)}, nil
+	return &command.Result{Content: formatResumableSessionsPage(sessions, page, pageSize, hasNext, prefix)}, nil
 }
 
 func (c resumeCommand) Complete(ctx context.Context, req command.CompletionRequest) []command.Completion {
@@ -124,7 +124,7 @@ func NewArchives(deps Deps) command.Handler {
 		if len(sessions) == 0 {
 			return &command.Result{Content: "no archived sessions found"}, nil
 		}
-		return &command.Result{Content: formatSessionsPage(sessions, currentSessionID(ctx, deps), page, query, hasNext, "/archives")}, nil
+		return &command.Result{Content: formatSessionsPage(sessions, currentSessionID(ctx, deps), page, query, hasNext, req.Prefix+"archives")}, nil
 	})
 }
 
@@ -162,7 +162,7 @@ func NewFork(deps Deps) command.Handler {
 	return command.NewFunc(command.Info{Name: "fork", Usage: "/fork <message_id>", Description: "Fork current conversation from an assistant message.", SessionEffect: command.SessionEffectSwitchCurrent, MinRole: security.RoleUser}, func(ctx context.Context, req command.Request) (*command.Result, error) {
 		messageID := strings.TrimSpace(req.Args)
 		if messageID == "" {
-			return nil, fmt.Errorf("usage: /fork <message_id>")
+			return nil, fmt.Errorf("usage: %sfork <message_id>", req.Prefix)
 		}
 		session, err := deps.Sessions.Fork(ctx, deps.Scope(ctx), messageID)
 		if err != nil {

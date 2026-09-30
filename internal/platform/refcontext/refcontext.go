@@ -68,7 +68,7 @@ func Apply(ctx context.Context, opts Options) Result {
 	if platform.HasCommandPrefix(trimmed, opts.CommandPrefixes) {
 		if stored != nil && stored.Role == storage.RoleAssistant {
 			if name, ok := platform.CommandName(trimmed, opts.CommandPrefixes); ok && name == "fork" {
-				result.Text = "/fork " + stored.ID
+				result.Text = platform.PrimaryCommandPrefix(opts.CommandPrefixes) + "fork " + stored.ID
 			}
 		}
 		return result

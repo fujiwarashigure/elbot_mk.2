@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"elbot/internal/agent"
+	"elbot/internal/command"
 	"elbot/internal/config"
 	elcron "elbot/internal/cron"
 	"elbot/internal/delivery"
@@ -79,6 +80,7 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	if foundation.Maintenance != nil {
 		foundation.Maintenance.Media = mediaCenter
 	}
+	imageRewriter := buildImagePromptRewriter(cfg, req.Models)
 	toolRuntime, err := builtin.NewRuntime(builtin.RuntimeOptions{
 		ConfigDir: filepath.Dir(cfg.ConfigPath),
 		RuntimeInfo: runtimeinfo.Info{
@@ -91,6 +93,10 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		Store:                  foundation.Store,
 		Media:                  mediaCenter,
 		ResidentMemoryMaxUnits: resident.Limits{Core: cfg.ResidentMemory.CoreMaxUnits, Normal: cfg.ResidentMemory.NormalMaxUnits},
+		CharacterEnabled:       cfg.CharacterLibrary.IsEnabled(),
+		CharacterRoot:          cfg.CharacterLibrary.Root,
+		ImageGeneration:        cfg.ImageGeneration,
+		PromptRewriter:         imageRewriter,
 		ProcessEnv:             shellProcessEnv,
 	})
 	if err != nil {
@@ -135,6 +141,18 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		return nil, err
 	}
 	cronService.SetRunner(agt)
+	if foundation.Maintenance != nil {
+		foundation.Maintenance.Report = func(ctx context.Context, text string) error {
+			if agt == nil {
+				return fmt.Errorf("agent is not ready")
+			}
+			_, err := sendNotice(ctx, delivery.Target{
+				Platform:    cfg.Maintenance.DailyReport.Platform,
+				Superadmins: true,
+			}, []delivery.Output{delivery.Text(text)})
+			return err
+		}
+	}
 	for _, notice := range startupHookNotices {
 		notifyHookIssue(context.Background(), notice)
 	}
@@ -192,6 +210,7 @@ func buildCronService(ctx context.Context, foundation *FoundationComponents, sen
 		Logger:           foundation.Logger,
 		EnabledPlatforms: enabledCronPlatforms(cfg),
 		SandboxRoot:      cfg.Sandbox.Root,
+		CommandPrefix:    command.PrimaryPrefix(cfg.Commands.Prefixes),
 		Audit:            auditFunc(foundation.Logs),
 		SendTarget:       send,
 	})
@@ -268,6 +287,49 @@ func buildAgent(
 	hookService *hookcontrol.Service,
 ) (*agent.Agent, error) {
 	cfg := foundation.Config
+	modelProfiles := map[string]config.ModelSelection{}
+	modelAliases := map[string]string{}
+	for name, profile := range cfg.ModelProfiles {
+		if strings.TrimSpace(profile.Provider) == "" || strings.TrimSpace(profile.Model) == "" {
+			continue
+		}
+		if models.ByProvider[profile.Provider] == nil {
+			continue
+		}
+		modelProfiles[name] = config.ModelSelection{Provider: profile.Provider, Model: profile.Model}
+		registerTurnAlias(modelAliases, name, name)
+		for _, alias := range profile.Aliases {
+			registerTurnAlias(modelAliases, alias, name)
+		}
+	}
+	toolProfiles := map[string][]string{}
+	toolAliases := map[string]string{}
+	for name, profile := range cfg.ToolProfiles {
+		if len(profile.Tools) == 0 {
+			continue
+		}
+		toolProfiles[name] = append([]string(nil), profile.Tools...)
+		registerTurnAlias(toolAliases, name, name)
+		for _, alias := range profile.Aliases {
+			registerTurnAlias(toolAliases, alias, name)
+		}
+	}
+	imageProfiles := map[string]bool{}
+	imageAliases := map[string]string{}
+	if toolRuntime != nil {
+		for name := range toolRuntime.ImageProfiles {
+			if strings.TrimSpace(name) == "" {
+				continue
+			}
+			imageProfiles[name] = true
+			registerTurnAlias(imageAliases, name, name)
+			if profile, ok := cfg.ImageGeneration.Profiles[name]; ok {
+				for _, alias := range profile.Aliases {
+					registerTurnAlias(imageAliases, alias, name)
+				}
+			}
+		}
+	}
 	agt, err := agent.NewWithOptions(agent.Options{
 		Platform:              platforms.Primary,
 		Clients:               models.ByProvider,
@@ -282,6 +344,7 @@ func buildAgent(
 		NamingNotifier:        namingLogger{logger: foundation.Logger},
 		SoulPath:              cfg.Soul.Path,
 		ResidentMemoryStore:   toolRuntime.ResidentMemoryStore,
+		CharacterStore:        toolRuntime.CharacterStore,
 		LLMRequestConfig:      cfg.LLMRequest,
 		HookService:           hookService,
 		HookManager:           hooks,
@@ -302,6 +365,13 @@ func buildAgent(
 		ToolsConfig:           cfg.Tools,
 		ToolTagsPath:          cfg.ToolTagsConfigPath,
 		ToolTags:              cfg.ToolTags,
+		ModelProfiles:         modelProfiles,
+		ModelAliases:          modelAliases,
+		ToolProfiles:          toolProfiles,
+		ToolAliases:           toolAliases,
+		ImageProfiles:         imageProfiles,
+		ImageAliases:          imageAliases,
+		TurnDirectives:        cfg.TurnDirectives,
 	})
 	if err != nil {
 		return nil, err
@@ -321,4 +391,12 @@ type hookRuntimeLifecycle struct {
 
 func (l hookRuntimeLifecycle) Close(ctx context.Context) error {
 	return l.runtime.Close(ctx)
+}
+
+func registerTurnAlias(aliases map[string]string, alias, name string) {
+	key := strings.ToLower(strings.TrimSpace(alias))
+	if key == "" {
+		return
+	}
+	aliases[key] = name
 }

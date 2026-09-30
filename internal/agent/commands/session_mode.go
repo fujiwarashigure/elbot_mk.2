@@ -46,7 +46,7 @@ func NewChat(deps Deps) command.Handler {
 		activated, err := deps.Sessions.ActivateMode(ctx, deps.Scope(ctx), sessionpkg.ActivateModeRequest{Mode: storage.SessionModeChat, NewSessionTitle: "New chat session"})
 		if err != nil {
 			if errors.Is(err, sessionpkg.ErrChatModeRequiresEmptySession) {
-				return &command.Result{Content: "current work session has history; run /new then /chat to start a clean chat session"}, nil
+				return &command.Result{Content: fmt.Sprintf("current work session has history; run %snew then %schat to start a clean chat session", req.Prefix, req.Prefix)}, nil
 			}
 			return nil, err
 		}

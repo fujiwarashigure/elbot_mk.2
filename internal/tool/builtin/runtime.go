@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"elbot/internal/character"
 	"elbot/internal/config"
 	elcron "elbot/internal/cron"
+	"elbot/internal/imagegen"
 	"elbot/internal/media"
 	"elbot/internal/memory/resident"
 	"elbot/internal/processenv"
@@ -18,6 +20,9 @@ import (
 type Runtime struct {
 	Registry            *tool.Registry
 	ResidentMemoryStore *resident.Store
+	CharacterStore      *character.Store
+	ImageProfiles       map[string]ImageProfile
+	DefaultImageProfile string
 	SkillManager        *skill.Manager
 	FileManager         *FileManager
 }
@@ -32,6 +37,10 @@ type RuntimeOptions struct {
 	SandboxRoot            string
 	FileDelivery           config.FileDeliveryConfig
 	ResidentMemoryMaxUnits resident.Limits
+	CharacterEnabled       bool
+	CharacterRoot          string
+	ImageGeneration        config.ImageGenerationConfig
+	PromptRewriter         ImagePromptRewriter
 	ProcessEnv             processenv.Environment
 }
 
@@ -52,15 +61,49 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	info = info.Normalize()
 	registry := tool.NewRegistry()
 	residentStore := resident.NewStoreWithLimits(filepath.Join(opts.ConfigDir, "memories.toml"), opts.ResidentMemoryMaxUnits)
+	var characterStore *character.Store
+	if opts.CharacterEnabled {
+		characterStore = character.NewStore(opts.CharacterRoot)
+	}
+	imageProfiles := map[string]ImageProfile{}
+	imageDefaultProfile := ""
+	if opts.ImageGeneration.Enabled {
+		addProfile := func(name string, cfg config.ImageGenerationConfig) {
+			client := imagegen.New(imageConfigFrom(cfg), opts.ProcessEnv.Lookup)
+			if client == nil {
+				return
+			}
+			imageProfiles[name] = ImageProfile{Name: name, Client: client, Config: client.Config()}
+		}
+		if base, ok := opts.ImageGeneration.ResolveProfile(""); ok {
+			addProfile("", base)
+		}
+		for name := range opts.ImageGeneration.Profiles {
+			resolved, ok := opts.ImageGeneration.ResolveProfile(name)
+			if !ok || !resolved.Enabled {
+				continue
+			}
+			addProfile(name, resolved)
+		}
+		if name := opts.ImageGeneration.DefaultProfileName(); name != "" {
+			if _, ok := imageProfiles[name]; ok {
+				imageDefaultProfile = name
+			}
+		}
+	}
 	skillManager := skill.NewManager(filepath.Join(opts.ConfigDir, "skills"), registry, opts.ProcessEnv)
 	fileManager := NewFileManagerWithMedia(info.SandboxRoot, info.FileDelivery, opts.Store)
 	if opts.Media != nil {
 		fileManager.Media = opts.Media
 	}
-	runtime := &Runtime{Registry: registry, ResidentMemoryStore: residentStore, SkillManager: skillManager, FileManager: fileManager}
+	runtime := &Runtime{Registry: registry, ResidentMemoryStore: residentStore, CharacterStore: characterStore, ImageProfiles: imageProfiles, DefaultImageProfile: imageDefaultProfile, SkillManager: skillManager, FileManager: fileManager}
 	if err := RegisterAll(registry, RegisterOptions{
 		RuntimeInfo:         info,
 		ResidentMemoryStore: residentStore,
+		CharacterStore:      characterStore,
+		ImageProfiles:       imageProfiles,
+		DefaultImageProfile: imageDefaultProfile,
+		PromptRewriter:      opts.PromptRewriter,
 		SkillManager:        skillManager,
 		CronService:         opts.CronService,
 		ChatHistory:         opts.ChatHistory,
@@ -71,4 +114,43 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 		return nil, err
 	}
 	return runtime, nil
+}
+
+func imageConfigFrom(imageCfg config.ImageGenerationConfig) imagegen.Config {
+	return imagegen.Config{
+		Enabled:                 true,
+		BaseURL:                 imageCfg.BaseURL,
+		Endpoint:                imageCfg.Endpoint,
+		APIKey:                  imageCfg.APIKey,
+		APIKeyEnv:               imageCfg.APIKeyEnv,
+		Model:                   imageCfg.Model,
+		Size:                    imageCfg.Size,
+		Quality:                 imageCfg.Quality,
+		OutputFormat:            imageCfg.OutputFormat,
+		ResponseFormat:          imageCfg.ResponseFormat,
+		TimeoutSeconds:          imageCfg.TimeoutSeconds,
+		PresetPrompt:            imageCfg.PresetPrompt,
+		NegativePrompt:          imageCfg.NegativePrompt,
+		MaxPromptRunes:          imageCfg.MaxPromptRunes,
+		Optimize:                imageCfg.Optimize,
+		OptimizeTermMode:        imageCfg.OptimizeTermMode,
+		OptimizeMaxAnchors:      imageCfg.OptimizeMaxAnchors,
+		OptimizeMaxNegatives:    imageCfg.OptimizeMaxNegatives,
+		OptimizeMaxAddedRunes:   imageCfg.OptimizeMaxAddedRunes,
+		OptimizeMaxTags:         imageCfg.OptimizeMaxTags,
+		OptimizeRewrite:         imageCfg.OptimizeRewrite,
+		OptimizeRewriteModel:    imageCfg.OptimizeRewriteModel,
+		OptimizeRewriteMinRunes: imageCfg.OptimizeRewriteMinRunes,
+		AutoCharacter:           imageCfg.IsAutoCharacter(),
+		AutoContext:             imageCfg.IsAutoContext(),
+		ContextDefaultLimit:     imageCfg.ContextDefaultLimit,
+		SuperadminOnly:          imageCfg.IsSuperadminOnly(),
+		SaveToCharacter:         imageCfg.IsSaveToCharacter(),
+		SendByDefault:           imageCfg.SendByDefault,
+		SupportsReference:       imageCfg.SupportsReference,
+		ReferenceField:          imageCfg.ReferenceField,
+		ExtraPayload:            imageCfg.ExtraPayload,
+		ExtraHeaders:            imageCfg.ExtraHeaders,
+		Proxy:                   imageCfg.Proxy,
+	}
 }

@@ -130,7 +130,7 @@ func TestTargetFromDeliveryScope(t *testing.T) {
 }
 
 func TestRiskKeyboard(t *testing.T) {
-	keyboard := riskKeyboard()
+	keyboard := riskKeyboard("/")
 	if keyboard == nil || len(keyboard.InlineKeyboard) != 3 {
 		t.Fatalf("keyboard = %#v", keyboard)
 	}

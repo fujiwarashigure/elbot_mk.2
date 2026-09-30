@@ -251,10 +251,41 @@ func (a *Agent) toolsForSession(ctx context.Context, session *storage.Session) (
 	if session == nil || session.Mode != storage.SessionModeWork {
 		return nil, nil
 	}
+	var schemas []llm.ToolSchema
+	var err error
 	if a.toolRuntime.provider != nil && !a.toolRuntime.defaultProvider {
-		return a.toolRuntime.provider.Schemas(ctx, session.Mode, session, a.scope(ctx))
+		schemas, err = a.toolRuntime.provider.Schemas(ctx, session.Mode, session, a.scope(ctx))
+	} else {
+		schemas, err = a.toolRunManager().Schemas(ctx, toolrun.Context{Mode: session.Mode, Session: session, Scope: a.scope(ctx), Actor: a.actor(ctx), DisableBaseTools: isBackgroundSession(session)}, a.cachedToolsForSession(session))
 	}
-	return a.toolRunManager().Schemas(ctx, toolrun.Context{Mode: session.Mode, Session: session, Scope: a.scope(ctx), Actor: a.actor(ctx), DisableBaseTools: isBackgroundSession(session)}, a.cachedToolsForSession(session))
+	if err != nil {
+		return nil, err
+	}
+	if name := turnToolProfile(ctx); name != "" {
+		schemas = mergeToolSchemas(schemas, a.turnToolSchemas(ctx, name))
+	}
+	return schemas, nil
+}
+
+func mergeToolSchemas(base, extra []llm.ToolSchema) []llm.ToolSchema {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]bool, len(base)+len(extra))
+	out := make([]llm.ToolSchema, 0, len(base)+len(extra))
+	for _, schema := range base {
+		if name := schema.Function.Name; name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, schema)
+		}
+	}
+	for _, schema := range extra {
+		if name := schema.Function.Name; name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, schema)
+		}
+	}
+	return out
 }
 
 func isBackgroundSession(session *storage.Session) bool {

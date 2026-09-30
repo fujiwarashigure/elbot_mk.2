@@ -199,12 +199,12 @@ func (m *Manager) confirm(ctx context.Context, deps RunnerDeps, actor security.A
 	info := resolved.Native.Info()
 	if info.SuperadminOnly && actor.Role != security.RoleSuperadmin {
 		deps.AuditToolDenied(ctx, sessionID, call, assessment.Level, "tool_requires_superadmin")
-		message.Segments = llm.TextSegments(fmt.Sprintf("tool call %s denied: requires superadmin role", call.Name))
+		message.Segments = llm.TextSegments(fmt.Sprintf("tool call %s denied: requires superadmin role; ask an administrator to add you to security.superadmins", call.Name))
 		return ConfirmResult{Message: message}, fmt.Errorf("tool requires superadmin")
 	}
 	if !policy.CanUseTool(actor, assessment.Level, info.OwnerScoped) {
 		deps.AuditToolDenied(ctx, sessionID, call, assessment.Level, "tool_risk_above_allowed_level")
-		message.Segments = llm.TextSegments(fmt.Sprintf("tool call %s denied: risk %s is above your allowed tool level", call.Name, assessment.Level))
+		message.Segments = llm.TextSegments(fmt.Sprintf("tool call %s denied: risk %s is above your allowed tool level; ask an administrator to raise security.user_max_tool_risk or add you to security.superadmins", call.Name, assessment.Level))
 		return ConfirmResult{Message: message}, fmt.Errorf("tool risk above allowed level")
 	}
 	if confirm, handled := deps.ConfirmBackgroundTool(ctx, sessionID, call, resolved, assessment); handled {

@@ -18,36 +18,41 @@ const XDGAppDirName = "elbot"
 const PluginConfigDirName = "plugins"
 
 type Config struct {
-	ConfigFiles         ConfigFilesConfig         `toml:"config_files"`
-	ModeModels          map[string]ModelSelection `toml:"mode_models"`
-	NamingModel         ModelSelection            `toml:"naming_model"`
-	CompactModel        ModelSelection            `toml:"-"`
-	Providers           map[string]ProviderConfig `toml:"providers"`
-	ModelMetadata       ModelMetadataConfig       `toml:"model_metadata"`
-	Storage             StorageConfig             `toml:"storage"`
-	Runtime             RuntimeConfig             `toml:"runtime"`
-	Context             ContextConfig             `toml:"context"`
-	Commands            CommandsConfig            `toml:"commands"`
-	Tools               ToolsConfig               `toml:"tools"`
-	ResidentMemory      ResidentMemoryConfig      `toml:"resident_memory"`
-	View                ViewConfig                `toml:"view"`
-	Security            SecurityConfig            `toml:"security"`
-	Session             SessionConfig             `toml:"session"`
-	LLMRequest          LLMRequestConfig          `toml:"llm_request"`
-	Maintenance         MaintenanceConfig         `toml:"maintenance"`
-	Sandbox             SandboxConfig             `toml:"sandbox"`
-	Media               MediaConfig               `toml:"media"`
-	FileDelivery        FileDeliveryConfig        `toml:"file_delivery"`
-	PlatformFiles       PlatformFilesConfig       `toml:"platform_files"`
-	Platform            PlatformConfig            `toml:"platform"`
-	Elnis               ElnisConfig               `toml:"elnis"`
-	Soul                SoulConfig                `toml:"soul"`
-	ToolTags            ToolTagsConfig            `toml:"-"`
-	ConfigPath          string                    `toml:"-"`
-	ProvidersConfigPath string                    `toml:"-"`
-	StateConfigPath     string                    `toml:"-"`
-	ElnisConfigPath     string                    `toml:"-"`
-	ToolTagsConfigPath  string                    `toml:"-"`
+	ConfigFiles         ConfigFilesConfig             `toml:"config_files"`
+	ModeModels          map[string]ModelSelection     `toml:"mode_models"`
+	NamingModel         ModelSelection                `toml:"naming_model"`
+	CompactModel        ModelSelection                `toml:"-"`
+	Providers           map[string]ProviderConfig     `toml:"providers"`
+	ModelMetadata       ModelMetadataConfig           `toml:"model_metadata"`
+	Storage             StorageConfig                 `toml:"storage"`
+	Runtime             RuntimeConfig                 `toml:"runtime"`
+	Context             ContextConfig                 `toml:"context"`
+	Commands            CommandsConfig                `toml:"commands"`
+	Tools               ToolsConfig                   `toml:"tools"`
+	ResidentMemory      ResidentMemoryConfig          `toml:"resident_memory"`
+	View                ViewConfig                    `toml:"view"`
+	Security            SecurityConfig                `toml:"security"`
+	Session             SessionConfig                 `toml:"session"`
+	LLMRequest          LLMRequestConfig              `toml:"llm_request"`
+	Maintenance         MaintenanceConfig             `toml:"maintenance"`
+	Sandbox             SandboxConfig                 `toml:"sandbox"`
+	Media               MediaConfig                   `toml:"media"`
+	FileDelivery        FileDeliveryConfig            `toml:"file_delivery"`
+	PlatformFiles       PlatformFilesConfig           `toml:"platform_files"`
+	Platform            PlatformConfig                `toml:"platform"`
+	Elnis               ElnisConfig                   `toml:"elnis"`
+	Soul                SoulConfig                    `toml:"soul"`
+	CharacterLibrary    CharacterLibraryConfig        `toml:"character_library"`
+	ImageGeneration     ImageGenerationConfig         `toml:"image_generation"`
+	ModelProfiles       map[string]ModelProfileConfig `toml:"model_profiles"`
+	ToolProfiles        map[string]ToolProfileConfig  `toml:"tool_profiles"`
+	TurnDirectives      TurnDirectivesConfig          `toml:"turn_directives"`
+	ToolTags            ToolTagsConfig                `toml:"-"`
+	ConfigPath          string                        `toml:"-"`
+	ProvidersConfigPath string                        `toml:"-"`
+	StateConfigPath     string                        `toml:"-"`
+	ElnisConfigPath     string                        `toml:"-"`
+	ToolTagsConfigPath  string                        `toml:"-"`
 }
 
 type ConfigFilesConfig struct {
@@ -134,6 +139,232 @@ type ResidentMemoryConfig struct {
 	NormalMaxUnits int `toml:"normal_max_units"`
 }
 
+// CharacterLibraryConfig controls the folder-based character library.
+type CharacterLibraryConfig struct {
+	Enabled *bool  `toml:"enabled"`
+	Root    string `toml:"root"`
+}
+
+// IsEnabled reports whether the character library is enabled (default true).
+func (c CharacterLibraryConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// ImageGenerationConfig controls the optional image generation tool.
+// ModelProfileConfig is one named model profile for the @model: directive.
+type ModelProfileConfig struct {
+	Provider string   `toml:"provider"`
+	Model    string   `toml:"model"`
+	Aliases  []string `toml:"aliases"`
+}
+
+// ToolProfileConfig is one named set of tools for the @use: directive.
+type ToolProfileConfig struct {
+	Tools   []string `toml:"tools"`
+	Aliases []string `toml:"aliases"`
+}
+
+// TurnDirectivesConfig controls how @model: / @image: / @use: style declarations
+// are typed in chat. Prefixes and keywords are additive; Chinese keywords are
+// accepted by default so users can type e.g. #模型:强.
+type TurnDirectivesConfig struct {
+	Prefixes      []string `toml:"prefixes"`
+	ModelKeywords []string `toml:"model_keywords"`
+	ImageKeywords []string `toml:"image_keywords"`
+	ToolKeywords  []string `toml:"tool_keywords"`
+}
+
+// Normalized fills the directive defaults.
+func (c TurnDirectivesConfig) Normalized() TurnDirectivesConfig {
+	out := c
+	if len(out.Prefixes) == 0 {
+		out.Prefixes = []string{"@", "#"}
+	}
+	if len(out.ModelKeywords) == 0 {
+		out.ModelKeywords = []string{"model", "m", "模型", "用模型"}
+	}
+	if len(out.ImageKeywords) == 0 {
+		out.ImageKeywords = []string{"image", "img", "生图", "出图"}
+	}
+	if len(out.ToolKeywords) == 0 {
+		out.ToolKeywords = []string{"use", "工具", "用工具"}
+	}
+	return out
+}
+
+// ImageGenerationProfileConfig overrides the base [image_generation] settings.
+// Empty strings / nil pointers inherit the base value.
+type ImageGenerationProfileConfig struct {
+	Enabled           *bool             `toml:"enabled"`
+	BaseURL           string            `toml:"base_url"`
+	Endpoint          string            `toml:"endpoint"`
+	APIKey            string            `toml:"api_key"`
+	APIKeyEnv         string            `toml:"api_key_env"`
+	Model             string            `toml:"model"`
+	Size              string            `toml:"size"`
+	Quality           string            `toml:"quality"`
+	OutputFormat      string            `toml:"output_format"`
+	ResponseFormat    string            `toml:"response_format"`
+	TimeoutSeconds    int               `toml:"timeout_seconds"`
+	PresetPrompt      *string           `toml:"preset_prompt"`
+	NegativePrompt    *string           `toml:"negative_prompt"`
+	SuperadminOnly    *bool             `toml:"superadmin_only"`
+	SaveToCharacter   *bool             `toml:"save_to_character"`
+	SendByDefault     *bool             `toml:"send_by_default"`
+	SupportsReference *bool             `toml:"supports_reference"`
+	ReferenceField    string            `toml:"reference_field"`
+	ExtraPayload      map[string]any    `toml:"extra_payload"`
+	ExtraHeaders      map[string]string `toml:"extra_headers"`
+	Proxy             string            `toml:"proxy"`
+	Aliases           []string          `toml:"aliases"`
+}
+
+// ResolveProfile returns the effective config for a named profile. An empty
+// name returns the base config. ok is false when the profile does not exist.
+func (c ImageGenerationConfig) ResolveProfile(name string) (ImageGenerationConfig, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return c, true
+	}
+	profile, ok := c.Profiles[name]
+	if !ok {
+		return ImageGenerationConfig{}, false
+	}
+	out := c
+	out.Profiles = nil
+	if profile.Enabled != nil {
+		out.Enabled = *profile.Enabled
+	}
+	if profile.BaseURL != "" {
+		out.BaseURL = profile.BaseURL
+	}
+	if profile.Endpoint != "" {
+		out.Endpoint = profile.Endpoint
+	}
+	if profile.APIKey != "" {
+		out.APIKey = profile.APIKey
+	}
+	if profile.APIKeyEnv != "" {
+		out.APIKeyEnv = profile.APIKeyEnv
+	}
+	if profile.Model != "" {
+		out.Model = profile.Model
+	}
+	if profile.Size != "" {
+		out.Size = profile.Size
+	}
+	if profile.Quality != "" {
+		out.Quality = profile.Quality
+	}
+	if profile.OutputFormat != "" {
+		out.OutputFormat = profile.OutputFormat
+	}
+	if profile.ResponseFormat != "" {
+		out.ResponseFormat = profile.ResponseFormat
+	}
+	if profile.TimeoutSeconds > 0 {
+		out.TimeoutSeconds = profile.TimeoutSeconds
+	}
+	if profile.PresetPrompt != nil {
+		out.PresetPrompt = *profile.PresetPrompt
+	}
+	if profile.NegativePrompt != nil {
+		out.NegativePrompt = *profile.NegativePrompt
+	}
+	if profile.SuperadminOnly != nil {
+		out.SuperadminOnly = profile.SuperadminOnly
+	}
+	if profile.SaveToCharacter != nil {
+		out.SaveToCharacter = profile.SaveToCharacter
+	}
+	if profile.SendByDefault != nil {
+		out.SendByDefault = *profile.SendByDefault
+	}
+	if profile.SupportsReference != nil {
+		out.SupportsReference = *profile.SupportsReference
+	}
+	if profile.ReferenceField != "" {
+		out.ReferenceField = profile.ReferenceField
+	}
+	if profile.ExtraPayload != nil {
+		out.ExtraPayload = profile.ExtraPayload
+	}
+	if profile.ExtraHeaders != nil {
+		out.ExtraHeaders = profile.ExtraHeaders
+	}
+	if profile.Proxy != "" {
+		out.Proxy = profile.Proxy
+	}
+	return out, true
+}
+
+// DefaultProfileName returns the configured default image profile (empty = base).
+func (c ImageGenerationConfig) DefaultProfileName() string {
+	return strings.TrimSpace(c.DefaultProfile)
+}
+
+type ImageGenerationConfig struct {
+	Enabled                 bool                                    `toml:"enabled"`
+	DefaultProfile          string                                  `toml:"default_profile"`
+	Profiles                map[string]ImageGenerationProfileConfig `toml:"profiles"`
+	BaseURL                 string                                  `toml:"base_url"`
+	Endpoint                string                                  `toml:"endpoint"`
+	APIKey                  string                                  `toml:"api_key"`
+	APIKeyEnv               string                                  `toml:"api_key_env"`
+	Model                   string                                  `toml:"model"`
+	Size                    string                                  `toml:"size"`
+	Quality                 string                                  `toml:"quality"`
+	OutputFormat            string                                  `toml:"output_format"`
+	ResponseFormat          string                                  `toml:"response_format"`
+	TimeoutSeconds          int                                     `toml:"timeout_seconds"`
+	PresetPrompt            string                                  `toml:"preset_prompt"`
+	NegativePrompt          string                                  `toml:"negative_prompt"`
+	MaxPromptRunes          int                                     `toml:"max_prompt_runes"`
+	Optimize                string                                  `toml:"optimize"`
+	OptimizeTermMode        string                                  `toml:"optimize_term_mode"`
+	OptimizeMaxAnchors      int                                     `toml:"optimize_max_anchors"`
+	OptimizeMaxNegatives    int                                     `toml:"optimize_max_negatives"`
+	OptimizeMaxAddedRunes   int                                     `toml:"optimize_max_added_runes"`
+	OptimizeMaxTags         int                                     `toml:"optimize_max_tags"`
+	OptimizeRewrite         string                                  `toml:"optimize_rewrite"`
+	OptimizeRewriteModel    string                                  `toml:"optimize_rewrite_model"`
+	OptimizeRewriteMinRunes int                                     `toml:"optimize_rewrite_min_runes"`
+	AutoCharacter           *bool                                   `toml:"auto_character"`
+	AutoContext             *bool                                   `toml:"auto_context"`
+	ContextDefaultLimit     int                                     `toml:"context_default_limit"`
+	SuperadminOnly          *bool                                   `toml:"superadmin_only"`
+	SaveToCharacter         *bool                                   `toml:"save_to_character"`
+	SendByDefault           bool                                    `toml:"send_by_default"`
+	SupportsReference       bool                                    `toml:"supports_reference"`
+	ReferenceField          string                                  `toml:"reference_field"`
+	ExtraPayload            map[string]any                          `toml:"extra_payload"`
+	ExtraHeaders            map[string]string                       `toml:"extra_headers"`
+	Proxy                   string                                  `toml:"proxy"`
+}
+
+// IsSuperadminOnly reports whether only superadmins may call image_generate (default true).
+func (c ImageGenerationConfig) IsSuperadminOnly() bool {
+	return c.SuperadminOnly == nil || *c.SuperadminOnly
+}
+
+// IsAutoCharacter reports whether image_generate may pick a character by name
+// or alias found in the prompt (default true).
+func (c ImageGenerationConfig) IsAutoCharacter() bool {
+	return c.AutoCharacter == nil || *c.AutoCharacter
+}
+
+// IsAutoContext reports whether image_generate may pull group chat context
+// automatically (default true).
+func (c ImageGenerationConfig) IsAutoContext() bool {
+	return c.AutoContext == nil || *c.AutoContext
+}
+
+// IsSaveToCharacter reports whether generated images are written back to the
+// active character folder (default true).
+func (c ImageGenerationConfig) IsSaveToCharacter() bool {
+	return c.SaveToCharacter == nil || *c.SaveToCharacter
+}
+
 type ViewConfig struct {
 	SessionListPageSize int `toml:"session_list_page_size"`
 }
@@ -162,6 +393,41 @@ type MaintenanceConfig struct {
 	SessionCleanup     MaintenanceCleanupConfig `toml:"session_cleanup"`
 	SandboxCleanup     MaintenanceCleanupConfig `toml:"sandbox_cleanup"`
 	ChatHistoryCleanup ChatHistoryCleanupConfig `toml:"chat_history_cleanup"`
+	DailyReport        DailyReportConfig        `toml:"daily_report"`
+}
+
+// DailyReportConfig controls the scheduled resource/usage report.
+type DailyReportConfig struct {
+	Enabled            bool                        `toml:"enabled"`
+	Schedule           string                      `toml:"schedule"`
+	WindowHours        int                         `toml:"window_hours"`
+	Provider           string                      `toml:"provider"`
+	Platform           string                      `toml:"platform"`
+	Currency           string                      `toml:"currency"`
+	DataRoot           string                      `toml:"data_root"`
+	ImagePricePerImage float64                     `toml:"image_price_per_image"`
+	PeakPricing        *bool                       `toml:"peak_pricing"`
+	Holidays           []string                    `toml:"holidays"`
+	Prices             map[string]ModelPriceConfig `toml:"prices"`
+}
+
+// IsPeakPricing reports whether the peak/off-peak price tiers are applied
+// (default true; DeepSeek charges half price outside peak hours).
+func (c DailyReportConfig) IsPeakPricing() bool {
+	return c.PeakPricing == nil || *c.PeakPricing
+}
+
+// ModelPriceConfig is the per-million-token price for one model.
+// The base fields are the peak-hour (standard) prices; the offpeak fields are
+// optional and fall back to the base fields when unset.
+type ModelPriceConfig struct {
+	InputPerMillion      float64 `toml:"input_per_million"`
+	OutputPerMillion     float64 `toml:"output_per_million"`
+	CacheInputPerMillion float64 `toml:"cache_input_per_million"`
+
+	OffpeakInputPerMillion      float64 `toml:"offpeak_input_per_million"`
+	OffpeakOutputPerMillion     float64 `toml:"offpeak_output_per_million"`
+	OffpeakCacheInputPerMillion float64 `toml:"offpeak_cache_input_per_million"`
 }
 
 type SandboxConfig struct {
@@ -442,6 +708,7 @@ func Load(path string) (*Config, error) {
 	cfg.Storage.SessionsSQLitePath = resolveRelative(configPath, cfg.Storage.SessionsSQLitePath)
 	cfg.Storage.ChatHistorySQLitePath = resolveRelative(configPath, cfg.Storage.ChatHistorySQLitePath)
 	cfg.Soul.Path = resolveRelative(configPath, cfg.Soul.Path)
+	cfg.CharacterLibrary.Root = resolveRelative(configPath, cfg.CharacterLibrary.Root)
 	cfg.Sandbox.Root = resolveRelative(configPath, cfg.Sandbox.Root)
 	cfg.ConfigPath = configPath
 	cfg.ProvidersConfigPath = providersPath
@@ -570,6 +837,76 @@ func (c *Config) applyAppDefaults() {
 	if c.Soul.Path == "" {
 		c.Soul.Path = "SOUL.md"
 	}
+	if c.CharacterLibrary.Root == "" {
+		c.CharacterLibrary.Root = "characters"
+	}
+	if c.ImageGeneration.APIKeyEnv == "" {
+		c.ImageGeneration.APIKeyEnv = "IMAGE_API_KEY"
+	}
+	if c.ImageGeneration.Model == "" {
+		c.ImageGeneration.Model = "gpt-image-2.5"
+	}
+	if c.ImageGeneration.Size == "" {
+		c.ImageGeneration.Size = "1024x1024"
+	}
+	if c.ImageGeneration.Quality == "" {
+		c.ImageGeneration.Quality = "high"
+	}
+	if c.ImageGeneration.OutputFormat == "" {
+		c.ImageGeneration.OutputFormat = "png"
+	}
+	if c.ImageGeneration.TimeoutSeconds <= 0 {
+		c.ImageGeneration.TimeoutSeconds = 180
+	}
+	if c.ImageGeneration.MaxPromptRunes <= 0 {
+		c.ImageGeneration.MaxPromptRunes = 4000
+	}
+	if c.ImageGeneration.Optimize == "" {
+		c.ImageGeneration.Optimize = "rules"
+	}
+	if c.ImageGeneration.OptimizeMaxAnchors <= 0 {
+		c.ImageGeneration.OptimizeMaxAnchors = 4
+	}
+	if c.ImageGeneration.OptimizeMaxNegatives <= 0 {
+		c.ImageGeneration.OptimizeMaxNegatives = 10
+	}
+	if c.ImageGeneration.OptimizeMaxAddedRunes <= 0 {
+		c.ImageGeneration.OptimizeMaxAddedRunes = 400
+	}
+	if c.ImageGeneration.OptimizeTermMode == "" {
+		c.ImageGeneration.OptimizeTermMode = "phrase"
+	}
+	if c.ImageGeneration.OptimizeMaxTags <= 0 {
+		c.ImageGeneration.OptimizeMaxTags = 12
+	}
+	if c.ImageGeneration.OptimizeRewrite == "" {
+		c.ImageGeneration.OptimizeRewrite = "auto"
+	}
+	if c.ImageGeneration.OptimizeRewriteModel == "" {
+		c.ImageGeneration.OptimizeRewriteModel = "naming"
+	}
+	if c.ImageGeneration.OptimizeRewriteMinRunes <= 0 {
+		c.ImageGeneration.OptimizeRewriteMinRunes = 40
+	}
+	if c.ImageGeneration.ContextDefaultLimit <= 0 {
+		c.ImageGeneration.ContextDefaultLimit = 6
+	}
+	if c.ImageGeneration.ReferenceField == "" {
+		c.ImageGeneration.ReferenceField = "image"
+	}
+	if c.Maintenance.DailyReport.Schedule == "" {
+		c.Maintenance.DailyReport.Schedule = "0 9,21 * * *"
+	}
+	if c.Maintenance.DailyReport.WindowHours <= 0 {
+		c.Maintenance.DailyReport.WindowHours = 12
+	}
+	if c.Maintenance.DailyReport.Provider == "" {
+		c.Maintenance.DailyReport.Provider = "deepseek"
+	}
+	if c.Maintenance.DailyReport.Currency == "" {
+		c.Maintenance.DailyReport.Currency = "CNY"
+	}
+	c.TurnDirectives = c.TurnDirectives.Normalized()
 	if c.Runtime.LogLevel == "" {
 		c.Runtime.LogLevel = "info"
 	}
@@ -580,7 +917,7 @@ func (c *Config) applyAppDefaults() {
 		c.Context.CompactTriggerRatio = 0.8
 	}
 	if len(c.Commands.Prefixes) == 0 {
-		c.Commands.Prefixes = []string{"/"}
+		c.Commands.Prefixes = []string{"/*"}
 	}
 	if c.Tools.MaxRoundsPerTurn <= 0 {
 		c.Tools.MaxRoundsPerTurn = 2

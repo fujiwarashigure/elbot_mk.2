@@ -180,10 +180,11 @@ type DiscoveryError struct {
 }
 
 type PublicInfo struct {
-	Name           string `json:"name"`
-	Description    string `json:"description"`
-	Source         string `json:"source"`
-	ForegroundOnly bool   `json:"foreground_only,omitempty"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	Source         string   `json:"source"`
+	Tags           []string `json:"tags,omitempty"`
+	ForegroundOnly bool     `json:"foreground_only,omitempty"`
 }
 
 type DiscoveredTool struct {
@@ -577,7 +578,7 @@ func hasTag(tags []string, want string) bool {
 }
 
 func publicInfo(info Info) PublicInfo {
-	return PublicInfo{Name: info.Name, Description: info.Description, Source: string(info.Source), ForegroundOnly: info.ForegroundOnly}
+	return PublicInfo{Name: info.Name, Description: info.Description, Source: string(info.Source), Tags: normalizeTags(info.Tags), ForegroundOnly: info.ForegroundOnly}
 }
 
 func normalizeRisk(value, fallback RiskLevel) RiskLevel {
