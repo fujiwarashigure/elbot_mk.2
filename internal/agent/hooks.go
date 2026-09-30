@@ -114,6 +114,7 @@ func (a *Agent) observeHookRun(ctx context.Context, event hook.Event, info hook.
 		SessionID: sessionID,
 		Kind:      request.KindHook,
 		Label:     label,
+		Timeout:   a.hookTimeout,
 	})
 	if err != nil {
 		if a.logger != nil {

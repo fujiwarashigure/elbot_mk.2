@@ -113,9 +113,18 @@ func (m *Manager) importReader(ctx context.Context, input io.Reader, size int64,
 	if spec.MIMEType == "" {
 		spec.MIMEType = http.DetectContentType(data)
 	}
+	if m.Guard != nil {
+		level, critical, guardErr := m.Guard.Check(ctx)
+		if guardErr != nil && m.Logger != nil {
+			m.Logger.WarnContext(ctx, "disk guard check failed", "level", string(level), "error", guardErr.Error())
+		}
+		if critical {
+			return nil, m.Guard.Error(level)
+		}
+	}
 	if strings.HasPrefix(strings.ToLower(spec.MIMEType), "image/") || strings.HasPrefix(http.DetectContentType(data), "image/") {
 		if shouldCompressImage(data, m.Media) {
-			data, err = compressImage(data, m.Media.LLMImageCompressionThresholdBytes, m.Media.LLMImageMaxLength)
+			data, err = compressImageIsolated(ctx, data, m.Media.LLMImageCompressionThresholdBytes, m.Media.LLMImageMaxLength)
 			if err != nil {
 				return nil, fmt.Errorf("compress imported image: %w", err)
 			}

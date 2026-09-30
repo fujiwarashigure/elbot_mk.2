@@ -1,0 +1,12 @@
+[Unit]
+Description=Run ElBot watchdog every minute
+Documentation=https://github.com/fujiwarashigure/elbot_mk.2
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=elbot-watchdog.service
+
+[Install]
+WantedBy=timers.target

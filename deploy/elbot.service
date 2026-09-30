@@ -14,7 +14,7 @@
 
 [Unit]
 Description=ElBot Agent Service
-Documentation=https://github.com/Elflare/elbot
+Documentation=https://github.com/fujiwarashigure/elbot_mk.2
 After=network-online.target
 Wants=network-online.target
 

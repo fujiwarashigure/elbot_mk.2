@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"elbot/internal/imagegen"
 	"elbot/internal/llm"
 	"elbot/internal/media"
+	"elbot/internal/ops/concurrency"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
 )
@@ -38,9 +40,10 @@ type ImageGenerateTool struct {
 	history        storage.ChatHistoryRepository
 	rewriter       ImagePromptRewriter
 	cfg            imagegen.Config
+	limiter        *concurrency.Limiter
 }
 
-func NewImageGenerateTool(profiles map[string]ImageProfile, defaultProfile string, characters *character.Store, center *media.Manager, history storage.ChatHistoryRepository, rewriter ImagePromptRewriter) ImageGenerateTool {
+func NewImageGenerateTool(profiles map[string]ImageProfile, defaultProfile string, characters *character.Store, center *media.Manager, history storage.ChatHistoryRepository, rewriter ImagePromptRewriter, limiter *concurrency.Limiter) ImageGenerateTool {
 	instance := ImageGenerateTool{
 		profiles:       profiles,
 		defaultProfile: strings.TrimSpace(defaultProfile),
@@ -53,6 +56,7 @@ func NewImageGenerateTool(profiles map[string]ImageProfile, defaultProfile strin
 		instance.client = profile.Client
 		instance.cfg = profile.Config
 	}
+	instance.limiter = limiter
 	return instance
 }
 
@@ -236,6 +240,13 @@ func (t ImageGenerateTool) Call(ctx context.Context, req tool.CallRequest) (*too
 	}
 	request.Prompt = finalPrompt
 
+	if t.limiter != nil {
+		release, err := t.limiter.Acquire(ctx)
+		if err != nil {
+			return &tool.Result{Content: imageConcurrencyMessage(err)}, nil
+		}
+		defer release()
+	}
 	result, err := t.client.Generate(ctx, request)
 	if err != nil {
 		return &tool.Result{Content: "生图失败：" + err.Error()}, nil
@@ -282,6 +293,21 @@ func (t ImageGenerateTool) Call(ctx context.Context, req tool.CallRequest) (*too
 	}
 	summary += "\nmedia: " + stored.ID
 	return t.imageResult(result, stored, name, summary, args.Send)
+}
+
+func imageConcurrencyMessage(err error) string {
+	switch {
+	case errors.Is(err, concurrency.ErrFull):
+		return "生图服务繁忙，请稍后重试。"
+	case errors.Is(err, concurrency.ErrTimeout):
+		return "生图服务排队超时，请稍后重试。"
+	case errors.Is(err, context.Canceled):
+		return "生图已取消。"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "生图排队超时，请稍后重试。"
+	default:
+		return "生图服务暂时不可用，请稍后重试。"
+	}
 }
 
 func (t ImageGenerateTool) imageResult(result *imagegen.Result, stored *storage.Media, name, summary string, send *bool) (*tool.Result, error) {

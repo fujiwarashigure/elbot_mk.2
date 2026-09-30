@@ -22,7 +22,8 @@ type contextRuntimeState struct {
 	windowResolver *contextmgr.WindowResolver
 	compressor     contextmgr.Compressor
 
-	mu            sync.Mutex
+	mu              sync.Mutex
+	compressTimeout time.Duration
 	config        config.ContextConfig
 	modelMetadata config.ModelMetadataConfig
 	compactModel  config.ModelSelection

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agentcommands "elbot/internal/agent/commands"
@@ -18,6 +19,7 @@ import (
 	"elbot/internal/llm"
 	"elbot/internal/logging"
 	"elbot/internal/media"
+	"elbot/internal/ops/ratelimit"
 	"elbot/internal/memory/resident"
 	"elbot/internal/platform"
 	"elbot/internal/request"
@@ -80,6 +82,13 @@ type Agent struct {
 
 	visionFallbackNotified  map[string]bool
 	responseTimeout         time.Duration
+	toolTimeout             time.Duration
+	hookTimeout             time.Duration
+	compressTimeout         time.Duration
+	rateLimitUser           *ratelimit.Limiter
+	rateLimitGroup          *ratelimit.Limiter
+	rateLimitAllowed        atomic.Int64
+	rateLimitRejected       atomic.Int64
 	userConfirmationTimeout time.Duration
 	discoveredTools         map[string]map[string]llm.ToolSchema
 	actorID                 string
@@ -106,6 +115,7 @@ func NewWithPrefixes(p platform.PlatformAdapter, client llm.LLM, modeModels map[
 		CommandPrefixes:       prefixes,
 		SessionConfig:         session.Config{NamingConfig: session.NamingConfig{TriggerStep: 1}, DefaultMode: storage.SessionModeWork},
 		LLMRequestConfig:      defaults.LLMRequest,
+		Ops:                   defaults.Ops,
 		SecurityPolicy:        security.DefaultPolicy(),
 		ContextConfig:         defaults.Context,
 		SessionListPageSize:   defaults.View.SessionListPageSize,
@@ -126,6 +136,57 @@ func responseTimeout(cfg config.LLMRequestConfig) time.Duration {
 		return 0
 	}
 	return time.Duration(cfg.ResponseTimeoutSeconds) * time.Second
+}
+
+func durationFromSeconds(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func queueWaitKinds(values []string, defaultEnabled bool) map[request.Kind]bool {
+	out := map[request.Kind]bool{}
+	for _, value := range values {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case string(request.KindTool):
+			out[request.KindTool] = true
+		case string(request.KindHook):
+			out[request.KindHook] = true
+		case string(request.KindCompress):
+			out[request.KindCompress] = true
+		case string(request.KindTurn):
+			out[request.KindTurn] = true
+		case string(request.KindLLM):
+			out[request.KindLLM] = true
+		case string(request.KindSubAgent):
+			out[request.KindSubAgent] = true
+		}
+	}
+	if len(out) == 0 && defaultEnabled {
+		out[request.KindTool] = true
+		out[request.KindHook] = true
+		out[request.KindCompress] = true
+	}
+	return out
+}
+
+func newRateLimiter(messagesPerMinute, burst, idleTTLSeconds int) *ratelimit.Limiter {
+	if messagesPerMinute <= 0 {
+		return nil
+	}
+	if burst <= 0 {
+		burst = 1
+	}
+	idleTTL := durationFromSeconds(idleTTLSeconds)
+	if idleTTL <= 0 {
+		idleTTL = 10 * time.Minute
+	}
+	return ratelimit.New(ratelimit.Limit{
+		RatePerSecond: float64(messagesPerMinute) / 60,
+		Burst:         burst,
+		IdleTTL:       idleTTL,
+	})
 }
 
 func NewWithOptions(opts Options) (*Agent, error) {
@@ -157,7 +218,16 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		promptSoul = &FileSoulProvider{Path: soulPath}
 	}
 	stateModTime := initialStateModTime(statePath)
-	requests := request.NewManager(0)
+	requests := request.NewManagerWithLimitsAndQueue(0, request.Limits{
+		request.KindTurn:     opts.Ops.MaxConcurrentTurns,
+		request.KindTool:     opts.Ops.MaxConcurrentTools,
+		request.KindHook:     opts.Ops.MaxConcurrentHooks,
+		request.KindCompress: opts.Ops.MaxConcurrentTurns,
+	}, request.QueueConfig{
+		MaxQueue:    opts.Ops.QueueMaxSize,
+		WaitTimeout: durationFromSeconds(opts.Ops.QueueWaitTimeoutSeconds),
+		WaitKinds:   queueWaitKinds(opts.Ops.QueueWaitKinds, opts.Ops.QueueMaxSize > 0),
+	})
 	turns := turn.NewManager()
 	sessions := session.NewServiceWithConfig(store, sessionCfg, titleGen, namingNotifier)
 	sessionCommands := agentcommands.NewSessionCommandState(opts.SessionListPageSize, opts.CleanupRetentionDays)
@@ -204,6 +274,9 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		autoConfirmTools:        map[string]map[string]bool{},
 		visionFallbackNotified:  map[string]bool{},
 		responseTimeout:         responseTimeout(llmRequestConfig),
+		toolTimeout:             durationFromSeconds(opts.Ops.ToolTimeoutSeconds),
+		hookTimeout:             durationFromSeconds(opts.Ops.HookTimeoutSeconds),
+		compressTimeout:         durationFromSeconds(opts.Ops.CompressTimeoutSeconds),
 		userConfirmationTimeout: defaultUserConfirmationTimeout,
 
 		discoveredTools: map[string]map[string]llm.ToolSchema{},
@@ -213,6 +286,13 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		sandboxRoot:     filepath.Clean(strings.TrimSpace(opts.SandboxRoot)),
 		actorID:         "cli:local",
 		scopeID:         "local",
+	}
+	a.contextRuntime.compressTimeout = durationFromSeconds(opts.Ops.CompressTimeoutSeconds)
+	if opts.Ops.UserMessagesPerMinute > 0 {
+		a.rateLimitUser = newRateLimiter(opts.Ops.UserMessagesPerMinute, opts.Ops.UserBurst, opts.Ops.RateLimitIdleTTLSeconds)
+	}
+	if opts.Ops.GroupMessagesPerMinute > 0 {
+		a.rateLimitGroup = newRateLimiter(opts.Ops.GroupMessagesPerMinute, opts.Ops.GroupBurst, opts.Ops.RateLimitIdleTTLSeconds)
 	}
 	if opts.Logs != nil {
 		a.SetLogManager(opts.Logs)

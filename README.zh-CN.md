@@ -108,6 +108,154 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 开发计划和任务拆分： [devdocs](devdocs/)。
 
+## 本地定制版：部署与运维增强
+
+本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，同时增加了面向宝塔 / VPS 的 Docker 部署与运维能力。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
+
+### 独立健康接口
+
+ElBot 提供不依赖 Elnis 的独立运维 HTTP 接口：
+
+| 接口 | 含义 |
+| --- | --- |
+| `/live` | 关键调度循环是否仍在推进。 |
+| `/ready` | SQLite / 数据目录是否可写、必要组件是否初始化、已配置平台是否至少成功连接过一次。 |
+| `/healthz` | 汇总状态。外部模型故障显示为 `degraded`，不应触发本机自动重启。 |
+| `/tasks` | 当前活跃的 turn / tool / hook / 上下文压缩任务、阶段、开始时间和最近进展。 |
+| `/metrics` | 任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台连接次数、模型健康状态、限速计数和生图队列状态。 |
+
+```dotenv
+ELBOT_HEALTH_ADDR=0.0.0.0:32171
+ELBOT_HEALTH_LIVE_STALE_SECONDS=90
+```
+
+Compose 只映射到宿主机回环：`127.0.0.1:32171:32171`。标准 Dockerfile 的 `HEALTHCHECK` 已改为 `curl -fsS http://127.0.0.1:32171/live`，不再只看 PID。`32171` 不应加入 Nginx 公网路由。
+
+### 数据卷、首次启动与配置
+
+- Compose 把 `./data` 挂到 `/data`，并设置 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_RUNTIME_DIR`。
+- 容器以 UID/GID `10001` 运行，`deploy/data` 必须对该 UID 可写。
+- `deploy/init-host.sh` 会创建目录、设置属主，并打印首次启动检查清单。
+- 首次启动后检查 `providers.toml`（`api_key_env` 变量名）、`state.toml`（provider/model 是否匹配且真实可用）、`app.toml`（CLI / OneBot / Elnis / 生图 / 安全配置）。
+- 改 `.env` 必须执行 `docker compose up -d --force-recreate`；只改 TOML 可以用 `docker compose restart`。
+
+### 容器网络
+
+- QQ OneBot 的 `ws_url` 必须是容器内视角：同一 Compose 网络用服务名；OneBot 在宿主机时用 `host.docker.internal` + `extra_hosts`，或可访问的远程 IP。容器内不要写 `127.0.0.1`。
+- 不共享文件系统时保持 `send_file_mode = "base64"`。
+- 远程 CLI server 必须在容器内监听 `0.0.0.0:32172`；宿主机只绑定 `127.0.0.1`，通过 HTTPS/WSS 反向代理对外。
+- `32170` 是 Elnis 入口，默认关闭；只有启用 Elnis 后该端口的 `/healthz` 才有意义，且不能代表 ElBot / 模型 / OneBot 健康。
+
+### 安全
+
+- Compose `env_file` 会把变量注入 ElBot 进程环境，Shell / Hook 子进程可能继承。不要只依赖“容器不是 root”来保护 API Key。
+- 向群聊用户开放工具前，检查 `security.user_max_tool_risk`、`security.superadmins`、Shell 可用范围、外部 Skill 和 Hook 权限。
+- 生图建议保持 superadmin-only，或在上游中转站按 Key 设置额度、限速和每日上限。
+- CLI / Elnis 继续只绑定宿主机 `127.0.0.1`，对外走 HTTPS/WSS，并使用强随机 token。
+
+### 备份与恢复
+
+`deploy/backup.sh` 不再直接热 tar SQLite：
+
+- 有 `sqlite3`：执行 SQLite `.backup` 一致性备份，不中断服务。
+- 没有 `sqlite3` 但有 Docker Compose：短暂停止容器，打包后自动启动。
+- 两者都没有：回退热打包并明确警告。
+- `deploy/README.md` 包含恢复演练步骤：解压到临时目录、SQLite 完整性校验、停止服务、替换 `data`、恢复属主，并实际发消息验证。
+
+### 分级 watchdog 与自愈
+
+`deploy/elbot-watchdog.sh`、`elbot-watchdog.service`、`elbot-watchdog.timer` 提供外部 watchdog：
+
+- 只检查 `/live`，不会因为 CPU 高或模型 API 暂时失败就重启。
+- 连续失败达到 `WATCHDOG_FAILURE_THRESHOLD` 后，先收集诊断信息再处置：`/live`、`/ready`、`/healthz`、`/tasks`、`/metrics`、`docker ps/inspect/logs/stats`、磁盘和 `data` 大小。
+- 按 `WATCHDOG_COOLDOWN_SECONDS` 冷却，并在 `WATCHDOG_WINDOW_SECONDS` 内最多重启 `WATCHDOG_MAX_RESTARTS` 次。
+- 超限后写入 `watchdog-state/paused`，停止自动重启，等待人工恢复。
+- `WATCHDOG_WEBHOOK_URL` 可推送 `restarted`、`paused`、`restart_failed` 事件。
+- `WATCHDOG_DRY_RUN=1` 时只诊断、不重启。
+- 不要让宝塔 Docker 管理器和 `elbot-compose.service` 同时管理同一套 Compose。
+
+### P1：限速、有界队列、超时与实时指标
+
+```toml
+[ops]
+# 按用户 / 群聊限速；0 表示不限制。
+user_messages_per_minute = 0
+user_burst = 0
+group_messages_per_minute = 0
+group_burst = 0
+rate_limit_idle_ttl_seconds = 600
+
+# 并发满时的有界队列。
+queue_max_size = 0
+queue_wait_timeout_seconds = 0
+queue_wait_kinds = ["tool", "hook", "compress"]
+
+# 运行超时。
+tool_timeout_seconds = 600
+hook_timeout_seconds = 60
+compress_timeout_seconds = 300
+
+# 并发上限。
+max_concurrent_turns = 4
+max_concurrent_tools = 4
+max_concurrent_hooks = 4
+```
+
+- 限速按 `平台 + scope` 使用令牌桶；超级管理员不受限速影响。
+- `turn` 默认不排队；tool / hook / compress 可短暂排队；队列满或超时会明确拒绝。
+- `/tasks` 和 `/metrics` 暴露活跃任务与资源状态。
+
+### P1：模型熔断与备用 Provider
+
+```toml
+[ops]
+circuit_breaker_failure_threshold = 0
+circuit_breaker_open_cooldown_seconds = 60
+circuit_breaker_half_open_max = 1
+
+[providers.openai]
+fallback_provider = "deepseek"
+fallback_model = "deepseek-chat"
+```
+
+- 熔断统计连接失败、首包超时、上游 5xx 和 stream error。
+- `context.Canceled` 和整轮 response timeout 不计入。
+- 熔断打开时，有 fallback 就切备用；没有则返回明确错误，不再无限重试。
+- 外部模型异常只显示为 `degraded`，不会触发自动重启。
+
+### P1：生图并发与降级
+
+```toml
+[image_generation]
+max_concurrent = 0
+queue_size = 0
+queue_timeout_seconds = 0
+```
+
+- 生图独立于普通聊天限流。
+- 队列满或排队超时返回“生图繁忙 / 排队超时”，不拖垮聊天。
+- `/metrics` 暴露 `image_limit.active` 和 `image_limit.waiting`。
+
+### P2：磁盘保护与图片 worker 隔离
+
+```toml
+[storage]
+disk_warn_ratio = 0.85
+disk_critical_ratio = 0.95
+disk_min_free_bytes = 0
+```
+
+- `disk_warn_ratio` / `disk_critical_ratio` 是已用空间比例；`disk_min_free_bytes` 大于 0 时剩余空间过低直接 critical。
+- critical 时拒绝非必要媒体写入（图片、语音、视频、普通文件），保留 SQLite 会话和配置写入。
+- 图片解码 / 缩放 / JPEG 压缩现在运行在同一二进制的隐藏 worker 子进程中；超时或取消会终止整个 worker 进程树。
+- Shell、Hook、AgentSkill、Go Skill 也已经在超时 / 取消时终止各自进程树。
+
+### 更多细节
+
+- 部署与 watchdog 指南：[`deploy/README.md`](deploy/README.md)
+- 配置说明：[`docs/configuration.md`](docs/configuration.md)
+- 英文文档：[`README.md`](README.md)
+
 ## 开发状态
 
 ElBot 仍在快速开发中，接口、配置和内部实现可能继续调整。当前更适合作为个人 Agent/机器人框架探索使用。

@@ -144,6 +144,8 @@ POST /elvena/v3/events
 GET  /healthz
 ```
 
+> `/healthz` exists only after Elnis is enabled. ElBot disables Elnis by default, so when it is disabled `/healthz` cannot be used to judge whether ElBot, the model API, or OneBot is healthy.
+
 ## How events are processed
 
 After receiving an event, Elnis determines the processing method according to `mode`.

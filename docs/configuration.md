@@ -70,6 +70,8 @@ ElBot 使用以下环境来源：
 1. ElBot 进程环境。
 2. 配置根 `.env`。
 
+Docker Compose 的 `env_file`、`docker run -e`、systemd `EnvironmentFile` 注入的变量都属于 ElBot 进程环境，因此也可能被 Shell / Hook 子进程继承；如果向群聊用户开放工具，不能只依赖“容器不是 root”来保护其中的 API Key。
+
 推荐把真实密钥放在系统环境或配置根 `.env`，不要直接写入 TOML 或提交到仓库。例如：
 
 ```dotenv
@@ -121,6 +123,23 @@ systemd 用户服务没有显式设置 PATH 时，ElBot 使用服务管理器提
 ### 生效时机
 
 配置根 `.env` 或 systemd 环境在重启 ElBot 后生效。`plugins/.env` 和插件 `.env` 在启动及 `/*hooks reload` 时重新读取，reload 会按新环境重建 Worker；文件不存在时视为空配置。
+
+## 运维健康接口
+
+设置 `ELBOT_HEALTH_ADDR`（进程环境或配置根 `.env`）后，ElBot 会启动一个**不依赖 Elnis** 的独立 HTTP 健康接口：
+
+```dotenv
+ELBOT_HEALTH_ADDR=127.0.0.1:32171
+ELBOT_HEALTH_LIVE_STALE_SECONDS=90
+```
+
+`ELBOT_HEALTH_LIVE_STALE_SECONDS` 建议明显大于调度心跳间隔；当前实现约每 10 秒更新一次心跳。
+
+- `GET /live`：关键调度循环是否仍在推进；watchdog 应只据此判断是否需要重启。
+- `GET /ready`：SQLite / 数据目录是否可写、必要组件是否初始化、已配置平台是否已成功连接过。
+- `GET /healthz`：汇总状态；模型 API 故障显示为 `degraded`，HTTP 仍可能返回 200，不应自动重启本机服务。
+
+该接口只应监听容器内部或宿主机回环地址；不要在 Nginx 中暴露到公网。
 
 ## Workspace 工具
 
@@ -246,7 +265,7 @@ token_env = ["ELBOT_CLI_WINDOWS_TOKEN"]
 ```
 
 - `server.enabled=true` 时，`elbot service run` 会启动 CLI WebSocket 服务端。
-- `server.listen` 是服务端监听地址。
+- `server.listen` 是服务端监听地址。容器部署远程 CLI 时必须写 `0.0.0.0:32172`，只写 `127.0.0.1:32172` 会只监听容器自身回环，宿主机端口映射也无法访问；对外仍由宿主机只绑定 `127.0.0.1`，再走 HTTPS/WSS 反向代理。
 - `default_url` 是客户端默认连接地址；连接其他机器时在 `clients.<name>.url` 写远程 WebSocket 地址。
 - `server.tokens` 是服务端允许登录的 CLI client id 与 token 环境变量列表。
 - `clients.<name>` 是客户端 profile；`id` 可省略，默认等于 `<name>`；`url` 可省略，默认使用 `default_url`。
@@ -394,12 +413,17 @@ model = "deepseek-chat"
 [storage]
 sessions_sqlite_path = ""
 chat_history_sqlite_path = ""
+# 磁盘保护：比例为已用空间比例；critical 时拒绝非必要媒体写入。
+disk_warn_ratio = 0.85
+disk_critical_ratio = 0.95
+disk_min_free_bytes = 0
 ```
 
 留空时使用平台默认数据目录：
 
 - Windows：`%APPDATA%/ElBot/data`
 - Linux：`$XDG_DATA_HOME/elbot` 或 `~/.local/share/elbot`
+- `disk_warn_ratio` / `disk_critical_ratio` 按已用空间比例分级；`disk_min_free_bytes` 大于 0 时，剩余空间低于该值直接进入 critical。critical 时生图、图片、语音、视频和普通文件保存会被拒绝，SQLite 会话和配置写入保留。
 
 运行日志、SQLite、sandbox 等运行数据也会按配置或默认数据目录存放。
 
@@ -521,6 +545,7 @@ cli = ["local"]
 - 超级管理员的确认阈值由 `superadmin_confirm_risk` 配置。
 - CLI 默认本地用户 `local` 是超级管理员。
 - `tool_tags.toml` 用来配置 `@tool:<tag>` 可注入的工具组，以及 tag 激活后追加到 system prompt 的工具使用策略。
+- 如果向普通用户开放生图，建议保持 `[image_generation] superadmin_only = true`，或在中转站按 Key 设置额度、限速和每日上限；详见[生图服务](image-generation.md#权限与费用)。
 
 ### `tool_tags.toml`
 
@@ -571,6 +596,52 @@ MUST:
 - prompt 文本从 `tool_tags.toml` 动态读取；文件变更后影响后续请求，行为类似 `SOUL.md`。
 - 重复预载已经存在的工具时不会重复添加，平台会提示 `已存在工具：<name>`。
 - 建议把 `prompt` 写成具体工具使用策略，不要写“当前 tag 是 xxx”这类模型不需要知道的配置机制。
+
+## 运维超时与并发上限
+
+```toml
+[ops]
+# 单次工具 / Hook / 上下文压缩超时；0 表示不限时。
+tool_timeout_seconds = 600
+hook_timeout_seconds = 60
+compress_timeout_seconds = 300
+# 同时运行的 turn / tool / hook 上限；0 表示不限制。
+max_concurrent_turns = 4
+max_concurrent_tools = 4
+max_concurrent_hooks = 4
+# 可选：按用户 / 群聊限速；0 表示不限制。
+user_messages_per_minute = 12
+user_burst = 3
+group_messages_per_minute = 60
+group_burst = 10
+rate_limit_idle_ttl_seconds = 600
+# 可选：超过并发上限时允许短暂排队。turn 通常不建议排队。
+queue_max_size = 20
+queue_wait_timeout_seconds = 10
+queue_wait_kinds = ["tool", "hook", "compress"]
+# 可选：Provider 连续失败后的熔断；0 表示关闭。
+circuit_breaker_failure_threshold = 0
+circuit_breaker_open_cooldown_seconds = 60
+circuit_breaker_half_open_max = 1
+```
+
+- 工具、Hook 和上下文压缩的超时通过 `context` 取消；超时后请求会结束并记录错误，释放并发占用。
+- 用户 / 群聊限速按 `平台 + scope` 维度使用令牌桶；超限时直接提示重试，不进入 LLM 或工具链。超级管理员不受限速影响。
+- `queue_wait_kinds` 决定哪些请求类型在并发满时允许排队；`turn` 默认不允许排队，队列满或排队超时会明确拒绝。
+- 熔断按 Provider 统计连接失败、首包超时、5xx 和 stream error；连续失败达到阈值后打开，冷却后放少量半开探测。用户取消和整轮 response timeout 不计入熔断。
+
+Provider 可配置备用模型：
+
+```toml
+[providers.openai]
+fallback_provider = "deepseek"
+fallback_model = "deepseek-chat"
+```
+
+熔断打开时优先切备用 Provider；没有备用时返回明确错误，不再无限重试。外部模型异常只显示为 `degraded`，不会触发自动重启。
+- 并发上限按请求类型限制当前活跃任务数；达到上限后新请求会返回 `request concurrency limit reached`，不会无限排队。
+- 活跃任务、开始时间、阶段、最近进展和资源指标可通过独立健康接口的 `/tasks` 与 `/metrics` 查看。
+- Shell、Hook、AgentSkill / Go Skill 在支持平台上会在超时或取消时终止整个子进程树；图片处理等进程内任务只能依赖 `context` 取消，遇到不响应取消的第三方库仍可能延迟释放。
 
 ## 命名 profile 与单轮声明
 
@@ -686,6 +757,10 @@ superadmin_only = true
 save_to_character = true
 send_by_default = false
 supports_reference = false
+# 生图独立并发限制；0 表示不限制。queue_size > 0 时超限会短暂排队。
+max_concurrent = 0
+queue_size = 0
+queue_timeout_seconds = 0
 ```
 
 - 端点必须兼容 `POST {base_url}/images/generations`；端点不同时用 `endpoint` 写全路径。
@@ -693,6 +768,7 @@ supports_reference = false
 - `preset_prompt` 是全局预设；角色预设来自 `characters/<id>/image_prompt.md` 和 `character.toml` 的 `[image]`。
 - `extra_payload` / `extra_headers` 用来透传中转站特有字段。
 - 完整说明见 [生图服务](image-generation.md)。
+- `max_concurrent` / `queue_size` / `queue_timeout_seconds` 用于限制生图服务并发；队列满或排队超时返回“生图繁忙/排队超时”，不会拖垮普通聊天。
 
 ## 定时报告
 
@@ -770,6 +846,7 @@ disabled_targets = [
 - Elnis 投递默认允许；`[delivery_disabled].targets` 和单 Elwisp `disabled_targets` 用于显式禁止平台、私聊或群聊，配置中的 platform-only 表示禁用整个平台所有投递。
 - Elnis 日志只记录 token name，不记录 token 原文。
 - `token_env` 支持写成列表，按顺序尝试多个环境变量名；适合临时切换 token 或做多环境兼容。
+- 容器部署启用 Elnis 时，`[http].addr` 要写 `0.0.0.0:32170`，宿主机端口只映射 `127.0.0.1`；ElBot 默认不启用 Elnis，未启用时 `/healthz` 不能代表 ElBot / 模型 / OneBot 健康。
 - Elwisp 默认启用；只有显式配置 `enabled=false` 才会禁用对应 Elwisp。
 - 当前支持 `record`、`direct` 和 `llm` 模式；`llm` 模式使用后台 Session runner 执行。
 - `llm` 模式可在 Elvena 请求中指定 `model_slot` 为 `elwisp1`、`elwisp2` 或 `elwisp3`；未指定或对应槽位未配置时回退到 `work` 模型。
@@ -820,6 +897,8 @@ api_timeout_seconds = 15 # OneBot 写入和响应等待的基础超时
 trigger_keywords = ["bot"]
 send_file_mode = "base64" # 本地图片、文件、语音默认用 base64；共享文件系统可改为 file_uri
 ```
+
+> **容器部署注意**：`ws_url` 是 **ElBot 容器内**要访问的地址。`ws://127.0.0.1:6700/` 在容器内指向 ElBot 自身。OneBot 在同一个 Compose 项目（或同一 Docker 网络）的服务中用服务名，例如 `ws://onebot:6700/`；OneBot 在宿主机时，需要配置容器可访问的宿主机地址（Linux 可加 `extra_hosts: ["host.docker.internal:host-gateway"]` 后写 `ws://host.docker.internal:6700/`）；OneBot 在另一台机器时写其 IP / 域名。
 
 `access_token_env` 指向保存 Access Token 的环境变量名；原有 `access_token` 仍然兼容且优先于 `access_token_env`。OneBot 不要求鉴权时，两项都可省略。
 

@@ -26,6 +26,7 @@ type Config struct {
 	ModelMetadata       ModelMetadataConfig           `toml:"model_metadata"`
 	Storage             StorageConfig                 `toml:"storage"`
 	Runtime             RuntimeConfig                 `toml:"runtime"`
+	Ops                 OpsConfig                     `toml:"ops"`
 	Context             ContextConfig                 `toml:"context"`
 	Commands            CommandsConfig                `toml:"commands"`
 	Tools               ToolsConfig                   `toml:"tools"`
@@ -68,13 +69,15 @@ type ModelSelection struct {
 }
 
 type ProviderConfig struct {
-	BaseURL      string                 `toml:"base_url"`
-	APIKey       string                 `toml:"api_key"`
-	APIKeyEnv    string                 `toml:"api_key_env"`
-	Proxy        string                 `toml:"proxy"`
-	Models       []string               `toml:"models"`
-	ModelConfigs map[string]ModelConfig `toml:"model_configs"`
-	ExtraPayload map[string]any         `toml:"extra_payload"`
+	BaseURL          string                 `toml:"base_url"`
+	APIKey           string                 `toml:"api_key"`
+	APIKeyEnv        string                 `toml:"api_key_env"`
+	Proxy            string                 `toml:"proxy"`
+	Models           []string               `toml:"models"`
+	ModelConfigs     map[string]ModelConfig `toml:"model_configs"`
+	ExtraPayload     map[string]any         `toml:"extra_payload"`
+	FallbackProvider string                 `toml:"fallback_provider"`
+	FallbackModel    string                 `toml:"fallback_model"`
 }
 
 type ModelConfig struct {
@@ -99,8 +102,11 @@ type LLMRequestConfig struct {
 }
 
 type StorageConfig struct {
-	SessionsSQLitePath    string `toml:"sessions_sqlite_path"`
-	ChatHistorySQLitePath string `toml:"chat_history_sqlite_path"`
+	SessionsSQLitePath    string  `toml:"sessions_sqlite_path"`
+	ChatHistorySQLitePath string  `toml:"chat_history_sqlite_path"`
+	DiskWarnRatio         float64 `toml:"disk_warn_ratio"`
+	DiskCriticalRatio     float64 `toml:"disk_critical_ratio"`
+	DiskMinFreeBytes      int64   `toml:"disk_min_free_bytes"`
 }
 
 type SoulConfig struct {
@@ -119,6 +125,24 @@ type ToolTagConfig struct {
 type RuntimeConfig struct {
 	LogLevel         string `toml:"log_level"`
 	LogRetentionDays int    `toml:"log_retention_days"`
+}
+
+// OpsConfig controls operational timeouts and concurrency limits.
+type OpsConfig struct {
+	ToolTimeoutSeconds     int `toml:"tool_timeout_seconds"`
+	HookTimeoutSeconds     int `toml:"hook_timeout_seconds"`
+	CompressTimeoutSeconds int `toml:"compress_timeout_seconds"`
+	MaxConcurrentTurns     int `toml:"max_concurrent_turns"`
+	MaxConcurrentTools     int `toml:"max_concurrent_tools"`
+	MaxConcurrentHooks     int `toml:"max_concurrent_hooks"`
+	UserMessagesPerMinute  int      `toml:"user_messages_per_minute"`
+	UserBurst              int      `toml:"user_burst"`
+	GroupMessagesPerMinute int      `toml:"group_messages_per_minute"`
+	GroupBurst             int      `toml:"group_burst"`
+	RateLimitIdleTTLSeconds int      `toml:"rate_limit_idle_ttl_seconds"`
+	QueueMaxSize           int      `toml:"queue_max_size"`
+	QueueWaitTimeoutSeconds int     `toml:"queue_wait_timeout_seconds"`
+	QueueWaitKinds         []string `toml:"queue_wait_kinds"`
 }
 
 type ContextConfig struct {
@@ -340,6 +364,9 @@ type ImageGenerationConfig struct {
 	ExtraPayload            map[string]any                          `toml:"extra_payload"`
 	ExtraHeaders            map[string]string                       `toml:"extra_headers"`
 	Proxy                   string                                  `toml:"proxy"`
+	MaxConcurrent           int                                     `toml:"max_concurrent"`
+	QueueSize               int                                     `toml:"queue_size"`
+	QueueTimeoutSeconds     int                                     `toml:"queue_timeout_seconds"`
 }
 
 // IsSuperadminOnly reports whether only superadmins may call image_generate (default true).
@@ -834,6 +861,15 @@ func (c *Config) applyAppDefaults() {
 	if c.Storage.ChatHistorySQLitePath == "" {
 		c.Storage.ChatHistorySQLitePath = filepath.Join(platformDefaultDataDir(), "elbot_chat_history.db")
 	}
+	if c.Storage.DiskWarnRatio <= 0 || c.Storage.DiskWarnRatio >= 1 {
+		c.Storage.DiskWarnRatio = 0.85
+	}
+	if c.Storage.DiskCriticalRatio <= 0 || c.Storage.DiskCriticalRatio >= 1 {
+		c.Storage.DiskCriticalRatio = 0.95
+	}
+	if c.Storage.DiskMinFreeBytes < 0 {
+		c.Storage.DiskMinFreeBytes = 0
+	}
 	if c.Soul.Path == "" {
 		c.Soul.Path = "SOUL.md"
 	}
@@ -857,6 +893,15 @@ func (c *Config) applyAppDefaults() {
 	}
 	if c.ImageGeneration.TimeoutSeconds <= 0 {
 		c.ImageGeneration.TimeoutSeconds = 180
+	}
+	if c.ImageGeneration.MaxConcurrent < 0 {
+		c.ImageGeneration.MaxConcurrent = 0
+	}
+	if c.ImageGeneration.QueueSize < 0 {
+		c.ImageGeneration.QueueSize = 0
+	}
+	if c.ImageGeneration.QueueTimeoutSeconds < 0 {
+		c.ImageGeneration.QueueTimeoutSeconds = 0
 	}
 	if c.ImageGeneration.MaxPromptRunes <= 0 {
 		c.ImageGeneration.MaxPromptRunes = 4000
@@ -912,6 +957,39 @@ func (c *Config) applyAppDefaults() {
 	}
 	if c.Runtime.LogRetentionDays <= 0 {
 		c.Runtime.LogRetentionDays = 30
+	}
+	if c.Ops.ToolTimeoutSeconds < 0 {
+		c.Ops.ToolTimeoutSeconds = 0
+	}
+	if c.Ops.HookTimeoutSeconds < 0 {
+		c.Ops.HookTimeoutSeconds = 0
+	}
+	if c.Ops.CompressTimeoutSeconds < 0 {
+		c.Ops.CompressTimeoutSeconds = 0
+	}
+	if c.Ops.MaxConcurrentTurns < 0 {
+		c.Ops.MaxConcurrentTurns = 0
+	}
+	if c.Ops.MaxConcurrentTools < 0 {
+		c.Ops.MaxConcurrentTools = 0
+	}
+	if c.Ops.MaxConcurrentHooks < 0 {
+		c.Ops.MaxConcurrentHooks = 0
+	}
+	if c.Ops.QueueMaxSize < 0 {
+		c.Ops.QueueMaxSize = 0
+	}
+	if c.Ops.QueueWaitTimeoutSeconds < 0 {
+		c.Ops.QueueWaitTimeoutSeconds = 0
+	}
+	if c.Ops.CircuitBreakerFailureThreshold < 0 {
+		c.Ops.CircuitBreakerFailureThreshold = 0
+	}
+	if c.Ops.CircuitBreakerOpenCooldownSeconds < 0 {
+		c.Ops.CircuitBreakerOpenCooldownSeconds = 0
+	}
+	if c.Ops.CircuitBreakerHalfOpenMax <= 0 {
+		c.Ops.CircuitBreakerHalfOpenMax = 1
 	}
 	if c.Context.CompactTriggerRatio == 0 {
 		c.Context.CompactTriggerRatio = 0.8

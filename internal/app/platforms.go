@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"elbot/internal/agent"
 	"elbot/internal/command"
 	"elbot/internal/completion"
 	elcron "elbot/internal/cron"
 	"elbot/internal/delivery"
+	"elbot/internal/health"
 	"elbot/internal/hook"
 	"elbot/internal/platform"
 	platformbuiltin "elbot/internal/platform/builtin"
@@ -38,7 +40,7 @@ func (defaultPlatformFactory) Build(req PlatformRequest) (PlatformComponents, er
 type defaultPlatformExecutor struct{}
 
 func (defaultPlatformExecutor) Run(ctx context.Context, req PlatformRunRequest) error {
-	return runPlatforms(ctx, req.Handler, req.Logger, req.Runtimes, req.AfterStart)
+	return runPlatforms(ctx, req.Handler, req.Logger, req.Runtimes, req.AfterStart, req.Heartbeat)
 }
 
 type platformRuntime = platform.Runtime
@@ -105,7 +107,7 @@ func registerCommandCatalogs(agt *agent.Agent, adapters []platformRuntime) {
 	}
 }
 
-func registerPlatformHooks(agt platformHookAgent, adapters []platformRuntime) {
+func registerPlatformHooks(agt platformHookAgent, adapters []platformRuntime, healthState *health.State) {
 	if agt == nil {
 		return
 	}
@@ -113,13 +115,15 @@ func registerPlatformHooks(agt platformHookAgent, adapters []platformRuntime) {
 		if adapter == nil {
 			continue
 		}
-		agt.RegisterPlatformSender(adapter.Name(), adapter)
+		name := adapter.Name()
+		agt.RegisterPlatformSender(name, adapter)
 		if notifier, ok := adapter.(platform.ConnectNotifier); ok {
-			name := adapter.Name()
+			healthState.ExpectPlatform(name)
 			notifier.SetConnectNotifier(func(ctx context.Context, platformName string) {
 				if platformName == "" {
 					platformName = name
 				}
+				healthState.MarkPlatformConnected(platformName)
 				agt.NotifyPlatformConnected(ctx, platformName)
 			})
 		}
@@ -131,7 +135,7 @@ func platformStopsAppOnExit(adapter platformRuntime) bool {
 	return ok && lifecycle.StopAppOnExit()
 }
 
-func runPlatforms(ctx context.Context, handler platform.PlatformHandler, logger *slog.Logger, adapters []platformRuntime, afterStart func(context.Context)) error {
+func runPlatforms(ctx context.Context, handler platform.PlatformHandler, logger *slog.Logger, adapters []platformRuntime, afterStart func(context.Context), heartbeat func()) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -149,6 +153,9 @@ func runPlatforms(ctx context.Context, handler platform.PlatformHandler, logger 
 			}
 		}()
 	}
+	if heartbeat != nil {
+		heartbeat()
+	}
 	if afterStart != nil {
 		afterStart(runCtx)
 	}
@@ -157,13 +164,21 @@ func runPlatforms(ctx context.Context, handler platform.PlatformHandler, logger 
 		wg.Wait()
 		close(done)
 	}()
-	select {
-	case <-ctx.Done():
-		cancel()
-		<-done
-		return ctx.Err()
-	case <-done:
-		return nil
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cancel()
+			<-done
+			return ctx.Err()
+		case <-done:
+			return nil
+		case <-ticker.C:
+			if heartbeat != nil {
+				heartbeat()
+			}
+		}
 	}
 }
 

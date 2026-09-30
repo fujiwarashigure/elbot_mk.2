@@ -1,7 +1,11 @@
 # ElBot 离线 / 预编译部署包
 
-本目录是把 `elbot-0.5.0` 源码 + `deploy/` 部署封装**预先编译打包**后的产物，
-用于在**不安装 Go**的云服务器（阿里云 / 腾讯云轻量 VPS + 宝塔）上直接部署。
+本文档说明如何用 `prepare-offline.sh` 生成预编译 / 离线产物，并在**不安装 Go**的云服务器
+（阿里云 / 腾讯云轻量 VPS + 宝塔）上直接部署。
+
+> 仓库的 `deploy/pack/` 目录只包含脚本和文档，**不包含现成产物**；`deploy/dist/` 默认不存在，
+> 需要先在本地或 CI 运行 `prepare-offline.sh` 生成。生成后的 `offline-<arch>/README.md`
+> 就是本文件。
 
 ## 产物一览
 
@@ -15,6 +19,8 @@
 | `prepare-offline.sh` | 重新生成所有产物的脚本（需要 Go 1.26） |
 | `build-image-tar.py` / `verify-image-tar.py` | 构造 / 离线校验镜像 tar 的脚本 |
 | `README-BAOTA-CONFIG.md` | 宝塔面板改配置速查 + 可直接粘贴的配置片段 |
+
+> 上表中的 `elbot-*` / `offline-*` 都是 `prepare-offline.sh` 的**输出**，不是仓库里的现成文件。
 
 > 默认按 **amd64**（绝大多数云服务器）操作；ARM 实例请把 `amd64` 换成 `arm64`。
 
@@ -62,6 +68,8 @@ ELNIS_HOME_TOKEN=请换成随机长字符串
 
 该镜像是 `scratch` 基础，内部只有：elbot 静态二进制、CA 证书、`/etc/passwd`、时区数据。
 **没有 `/bin/sh`、`ls`、`curl` 等命令**，所以 ElBot 的 `shell` 工具会失败。
+> 该镜像的 Docker `HEALTHCHECK` 仍使用 `--version`；运行状态请从宿主机请求
+> `http://127.0.0.1:32171/live`、`/ready`、`/healthz`。
 需要 shell 功能请用方案 B。
 
 ```bash
@@ -78,8 +86,8 @@ docker inspect --format '{{.State.Health.Status}}' elbot
 docker compose logs -f --tail=100
 ```
 
-首次启动会在 `./data/config/elbot/` 生成默认配置，按 `deploy/README.md` 第 4 节修改，
-然后 `docker compose up -d` 生效。
+首次启动会在 `./data/config/elbot/` 生成默认配置，按 `deploy/README.md` 第 4 节修改：
+改 TOML 用 `docker compose restart`，改 `.env` 用 `docker compose up -d --force-recreate`。
 
 ---
 
@@ -110,10 +118,13 @@ docker compose build \
 
 ## 宝塔 Nginx 反代 / 开机自启 / 备份
 
-- 反代：把 `nginx-elbot.conf` 内容加到你域名的站点配置里（`/cli/v1/ws`、`/elvena/`、`/elbot/healthz`）。
+- 反代：把 `nginx-elbot.conf` 中的 CLI / Elnis 部分加入域名站点配置；`/elbot/healthz` **仅在 Elnis 启用时有意义**，不启用 Elnis 时应删除该 location。
+- 独立健康接口：Compose 默认映射 `127.0.0.1:32171`，用 `curl http://127.0.0.1:32171/live`、`/ready`、`/healthz`、`/tasks`、`/metrics` 分别验证；**不要**加入 Nginx 公网 location。
 - 开机自启：`cp elbot-compose.service /etc/systemd/system/`，改好里面的 `WorkingDirectory`
   为 `/opt/elbot/offline-amd64`，然后 `systemctl daemon-reload && systemctl enable --now elbot-compose`。
-- 备份：`bash backup.sh`，可加入宝塔【计划任务】每天执行。
+- 备份：`bash backup.sh`，默认使用 SQLite `.backup` 或短暂停机打包；可加入宝塔【计划任务】每天执行。
+- 自愈：`bash elbot-watchdog.sh` 只检查 `/live`，按冷却和次数上限受控重启；可安装 `elbot-watchdog.service` + `.timer`，配置见 `watchdog.env.example`。
+- 部署验收：实际发一条消息、重启后确认会话仍在、检查 `data` 属主为 10001、检查 `32171` 健康接口、做一次备份恢复演练。
 - 完整配置项、端口、防火墙、40G 磁盘维护、常见问题：见仓库 `deploy/README.md`。
 
 ---

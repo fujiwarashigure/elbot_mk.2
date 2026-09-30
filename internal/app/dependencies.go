@@ -11,9 +11,11 @@ import (
 	"elbot/internal/config"
 	elcron "elbot/internal/cron"
 	"elbot/internal/elvena"
+	"elbot/internal/health"
 	"elbot/internal/llm"
 	"elbot/internal/maintenance"
 	"elbot/internal/media"
+	"elbot/internal/ops/concurrency"
 	"elbot/internal/platform"
 	"elbot/internal/storage"
 )
@@ -73,6 +75,7 @@ type FoundationFactory interface {
 type ModelRequest struct {
 	Foundation *FoundationComponents
 	Profiler   StartupProfiler
+	Health     *health.State
 }
 
 type ModelClients struct {
@@ -111,6 +114,7 @@ type RuntimeComponents struct {
 	Handler     platform.PlatformHandler
 	CronService *elcron.Service
 	ElvenaBus   *elvena.Bus
+	ImageLimiter *concurrency.Limiter
 	Lifecycle   Lifecycle
 }
 
@@ -124,6 +128,7 @@ type IntegrationRequest struct {
 	Platforms  PlatformComponents
 	Mode       RunMode
 	Profiler   StartupProfiler
+	Health     *health.State
 }
 
 type IntegrationFactory interface {
@@ -135,6 +140,7 @@ type PlatformRunRequest struct {
 	Logger     *slog.Logger
 	Runtimes   []platform.Runtime
 	AfterStart func(context.Context)
+	Heartbeat  func()
 }
 
 type PlatformExecutor interface {

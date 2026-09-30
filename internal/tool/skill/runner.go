@@ -172,6 +172,12 @@ func runMediaCommand(ctx context.Context, label string, cmd *exec.Cmd, mediaCall
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	configureCommandProcess(cmd)
+	cmd.Cancel = func() error {
+		killCommandProcessTree(cmd)
+		return nil
+	}
+	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
 	out := truncateOutput(stdout.String())
 	errText := truncateOutput(stderr.String())

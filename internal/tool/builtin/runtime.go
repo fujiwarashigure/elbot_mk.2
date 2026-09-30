@@ -3,12 +3,14 @@ package builtin
 import (
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"elbot/internal/character"
 	"elbot/internal/config"
 	elcron "elbot/internal/cron"
 	"elbot/internal/imagegen"
 	"elbot/internal/media"
+	"elbot/internal/ops/concurrency"
 	"elbot/internal/memory/resident"
 	"elbot/internal/processenv"
 	"elbot/internal/storage"
@@ -23,6 +25,7 @@ type Runtime struct {
 	CharacterStore      *character.Store
 	ImageProfiles       map[string]ImageProfile
 	DefaultImageProfile string
+	ImageLimiter        *concurrency.Limiter
 	SkillManager        *skill.Manager
 	FileManager         *FileManager
 }
@@ -65,6 +68,11 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	if opts.CharacterEnabled {
 		characterStore = character.NewStore(opts.CharacterRoot)
 	}
+	imageLimiter := concurrency.New(concurrency.Config{
+		Max:         opts.ImageGeneration.MaxConcurrent,
+		QueueSize:   opts.ImageGeneration.QueueSize,
+		WaitTimeout: time.Duration(opts.ImageGeneration.QueueTimeoutSeconds) * time.Second,
+	})
 	imageProfiles := map[string]ImageProfile{}
 	imageDefaultProfile := ""
 	if opts.ImageGeneration.Enabled {
@@ -96,13 +104,14 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	if opts.Media != nil {
 		fileManager.Media = opts.Media
 	}
-	runtime := &Runtime{Registry: registry, ResidentMemoryStore: residentStore, CharacterStore: characterStore, ImageProfiles: imageProfiles, DefaultImageProfile: imageDefaultProfile, SkillManager: skillManager, FileManager: fileManager}
+	runtime := &Runtime{Registry: registry, ResidentMemoryStore: residentStore, CharacterStore: characterStore, ImageProfiles: imageProfiles, DefaultImageProfile: imageDefaultProfile, ImageLimiter: imageLimiter, SkillManager: skillManager, FileManager: fileManager}
 	if err := RegisterAll(registry, RegisterOptions{
 		RuntimeInfo:         info,
 		ResidentMemoryStore: residentStore,
 		CharacterStore:      characterStore,
 		ImageProfiles:       imageProfiles,
 		DefaultImageProfile: imageDefaultProfile,
+		ImageLimiter:        imageLimiter,
 		PromptRewriter:      opts.PromptRewriter,
 		SkillManager:        skillManager,
 		CronService:         opts.CronService,

@@ -110,6 +110,154 @@ For detailed instructions, see:
 
 Development plan and task decomposition: [devdocs](devdocs/).
 
+## Local Fork: Deployment & Operations Enhancements
+
+This fork keeps the upstream Agent/Chatbot core and adds a production-oriented Docker deployment and operations layer for VPS / BaoTa environments. The goal is to avoid the "container is healthy, but the bot is already stuck" failure mode, without ever implementing "kill the process whenever CPU is high".
+
+### Independent Health Endpoints
+
+ElBot exposes an operations HTTP server that does not depend on Elnis:
+
+| Endpoint | Meaning |
+| --- | --- |
+| `/live` | Whether the critical scheduling loop is still progressing. |
+| `/ready` | SQLite/data directories writable, required components initialized, configured platforms connected at least once. |
+| `/healthz` | Aggregate status. External model failures appear as `degraded` and must not trigger an automatic restart. |
+| `/tasks` | Active turn / tool / hook / context-compaction tasks, stage, start time, latest progress. |
+| `/metrics` | Task counts, oldest task age, goroutine / heap / RSS / disk, platform connect counts, model health, rate-limit counters, image-generation limiter state. |
+
+```dotenv
+ELBOT_HEALTH_ADDR=0.0.0.0:32171
+ELBOT_HEALTH_LIVE_STALE_SECONDS=90
+```
+
+Compose maps the port only to the host loopback: `127.0.0.1:32171:32171`. The standard Dockerfile `HEALTHCHECK` now calls `curl -fsS http://127.0.0.1:32171/live` instead of checking a PID file. Do not expose `32171` through Nginx.
+
+### Data Volume, First Start, and Config
+
+- Compose mounts `./data` to `/data` and sets `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`.
+- The container runs as UID/GID `10001`; `deploy/data` must be writable by that UID.
+- `deploy/init-host.sh` creates directories, applies ownership, and prints a first-start checklist.
+- After first start check `providers.toml` (`api_key_env` names), `state.toml` (provider/model match), and `app.toml` (CLI / OneBot / Elnis / image / security).
+- `.env` changes require `docker compose up -d --force-recreate`; TOML-only changes can use `docker compose restart`.
+
+### Container Networking
+
+- QQ OneBot `ws_url` must be resolved from inside the ElBot container: service name for the same Compose network, `host.docker.internal` plus `extra_hosts` for the host, or a reachable remote IP. Never use `127.0.0.1` inside the container.
+- Keep `send_file_mode = "base64"` unless ElBot and OneBot share a filesystem.
+- Remote CLI server must listen on `0.0.0.0:32172` inside the container; the host still binds only `127.0.0.1` and exposes it through HTTPS/WSS reverse proxy.
+- `32170` is the Elnis entry. Elnis is disabled by default; `/healthz` on that port is only meaningful when Elnis is enabled and does not prove ElBot / model / OneBot health.
+
+### Security
+
+- Compose `env_file` injects variables into the ElBot process environment; Shell and Hook subprocesses may inherit them. Do not rely only on "the container is not root" to protect API keys.
+- Review `security.user_max_tool_risk`, `security.superadmins`, Shell availability, external Skills, and Hook permissions before exposing tools to group-chat users.
+- Keep image generation superadmin-only by default, or set quotas / rate limits at the upstream relay.
+- Keep CLI/Elnis host bindings on `127.0.0.1`, put HTTPS/WSS in front, and use strong random tokens.
+
+### Backup and Restore
+
+`deploy/backup.sh` no longer hot-tars SQLite blindly:
+
+- With `sqlite3`: SQLite `.backup` snapshots plus archive, no service stop.
+- Without `sqlite3` but with Docker Compose: briefly stop the container, archive, then start it again.
+- Otherwise: hot tar fallback with an explicit warning.
+- `deploy/README.md` includes a restore drill: extract to a temporary directory, run SQLite integrity checks, stop the service, replace `data`, restore ownership, and verify by sending a real message.
+
+### Tiered Watchdog / Self-Healing
+
+`deploy/elbot-watchdog.sh`, `elbot-watchdog.service`, and `elbot-watchdog.timer` provide an external watchdog:
+
+- Only uses `/live`; CPU load or a temporarily degraded model API do not trigger restarts.
+- After `WATCHDOG_FAILURE_THRESHOLD` consecutive failures, captures diagnostics first: `/live`, `/ready`, `/healthz`, `/tasks`, `/metrics`, `docker ps/inspect/logs/stats`, disk and `data` size.
+- Restarts with `WATCHDOG_COOLDOWN_SECONDS` and at most `WATCHDOG_MAX_RESTARTS` inside `WATCHDOG_WINDOW_SECONDS`.
+- After the limit, writes `watchdog-state/paused` and stops automatic restarts until an operator removes it.
+- `WATCHDOG_WEBHOOK_URL` can send `restarted`, `paused`, and `restart_failed` events.
+- `WATCHDOG_DRY_RUN=1` performs diagnostics only.
+- Do not let the BaoTa Docker manager and `elbot-compose.service` manage the same Compose stack at the same time.
+
+### P1: Rate Limits, Bounded Queue, Timeouts, and Metrics
+
+```toml
+[ops]
+# Per-user / per-group message rate limits. 0 disables them.
+user_messages_per_minute = 0
+user_burst = 0
+group_messages_per_minute = 0
+group_burst = 0
+rate_limit_idle_ttl_seconds = 600
+
+# Bounded queue when concurrency is saturated.
+queue_max_size = 0
+queue_wait_timeout_seconds = 0
+queue_wait_kinds = ["tool", "hook", "compress"]
+
+# Operational timeouts.
+tool_timeout_seconds = 600
+hook_timeout_seconds = 60
+compress_timeout_seconds = 300
+
+# Concurrency caps.
+max_concurrent_turns = 4
+max_concurrent_tools = 4
+max_concurrent_hooks = 4
+```
+
+- Rate limits use a token bucket keyed by platform + scope; superadmins are exempt.
+- `turn` is not queued by default; tool / hook / compress may wait briefly; full or timed-out queues are explicitly rejected.
+- `/tasks` and `/metrics` expose the active task registry and resource state.
+
+### P1: Model Circuit Breaker and Fallback Provider
+
+```toml
+[ops]
+circuit_breaker_failure_threshold = 0
+circuit_breaker_open_cooldown_seconds = 60
+circuit_breaker_half_open_max = 1
+
+[providers.openai]
+fallback_provider = "deepseek"
+fallback_model = "deepseek-chat"
+```
+
+- Tracks provider connection failures, first-chunk timeouts, upstream 5xx responses, and stream errors.
+- `context.Canceled` and whole-turn response timeouts do not count.
+- When open, ElBot uses the fallback provider if configured; otherwise returns a clear error instead of retrying forever.
+- Model-side failures appear as `degraded` and never trigger an automatic restart.
+
+### P1: Image Generation Concurrency and Degradation
+
+```toml
+[image_generation]
+max_concurrent = 0
+queue_size = 0
+queue_timeout_seconds = 0
+```
+
+- Limits image generation independently from normal chat.
+- Queue full or wait timeout returns a clear "image generation is busy / timed out" message.
+- `/metrics` exposes `image_limit.active` and `image_limit.waiting`.
+
+### P2: Disk Protection and Image Worker Isolation
+
+```toml
+[storage]
+disk_warn_ratio = 0.85
+disk_critical_ratio = 0.95
+disk_min_free_bytes = 0
+```
+
+- `disk_warn_ratio` / `disk_critical_ratio` are used-space ratios; `disk_min_free_bytes` forces critical when free space is too low.
+- In `critical`, ElBot refuses non-essential media writes (images, voice, video, ordinary files) while preserving SQLite sessions and configuration writes.
+- Image decode / resize / JPEG compression now runs in a hidden worker subprocess of the same binary, with timeout and process-tree termination on cancellation.
+- Shell, Hooks, AgentSkill, and Go Skill already terminate their process trees on timeout / cancellation.
+
+### More Details
+
+- Deployment and watchdog guide: [`deploy/README.md`](deploy/README.md)
+- Operational config: [`docs.en/configuration.md`](docs.en/configuration.md)
+- Chinese docs: [`README.zh-CN.md`](README.zh-CN.md)
+
 ## Development Status
 
 ElBot is still under rapid development; interfaces, configurations, and internal implementations may continue to be adjusted. It is currently more suitable for exploration as a personal Agent/bot framework.

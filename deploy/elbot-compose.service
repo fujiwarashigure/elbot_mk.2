@@ -1,6 +1,8 @@
+# 注意：宝塔 Docker 管理器和本 systemd 单元不要同时管理同一套 Compose。
+# restart: unless-stopped 负责进程退出拉起；应用层卡死交给 elbot-watchdog。
 [Unit]
 Description=ElBot container stack (docker compose)
-Documentation=https://github.com/Elflare/elbot
+Documentation=https://github.com/fujiwarashigure/elbot_mk.2
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

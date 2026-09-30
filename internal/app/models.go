@@ -6,6 +6,7 @@ import (
 
 	"elbot/internal/config"
 	"elbot/internal/llm"
+	"elbot/internal/llm/breaker"
 	"elbot/internal/llm/openai"
 )
 
@@ -14,14 +15,37 @@ type defaultModelFactory struct{}
 func (defaultModelFactory) Build(req ModelRequest) (ModelClients, error) {
 	cfg := req.Foundation.Config
 	logger := req.Foundation.Logger
-	clients := make(map[string]llm.LLM, len(cfg.Providers))
+	rawClients := make(map[string]llm.LLM, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
 		client, err := openai.NewWithOptions(provider.BaseURL, provider.APIKey, provider.ExtraPayload, modelExtraPayloads(provider.ModelConfigs), appLLMRequestOptions(cfg.LLMRequest, provider.Proxy))
 		if err != nil {
 			return ModelClients{}, fmt.Errorf("create provider %q client: %w", name, err)
 		}
 		client.SetLogger(logger)
-		clients[name] = client
+		rawClients[name] = client
+	}
+
+	healthClients := make(map[string]llm.LLM, len(rawClients))
+	for name, client := range rawClients {
+		healthClients[name] = wrapHealthLLM(name, client, req.Health)
+	}
+
+	clients := make(map[string]llm.LLM, len(healthClients))
+	for name, provider := range cfg.Providers {
+		healthClient := healthClients[name]
+		if healthClient == nil {
+			continue
+		}
+		var fallback llm.LLM
+		if fallbackName := provider.FallbackProvider; fallbackName != "" && fallbackName != name {
+			fallback = healthClients[fallbackName]
+		}
+		br := breaker.New(breaker.Config{
+			FailureThreshold: cfg.Ops.CircuitBreakerFailureThreshold,
+			OpenCooldown:     time.Duration(cfg.Ops.CircuitBreakerOpenCooldownSeconds) * time.Second,
+			HalfOpenMax:      cfg.Ops.CircuitBreakerHalfOpenMax,
+		})
+		clients[name] = wrapBreakerLLM(name, healthClient, fallback, provider.FallbackProvider, provider.FallbackModel, br, req.Health)
 	}
 	req.Profiler.Mark("llm adapters")
 	return ModelClients{ByProvider: clients}, nil

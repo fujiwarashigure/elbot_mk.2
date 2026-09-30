@@ -184,6 +184,7 @@ def make_config(arch: str, version: str, diff_id: str):
                 "XDG_CONFIG_HOME=/data/config",
                 "XDG_DATA_HOME=/data",
                 "XDG_RUNTIME_DIR=/data/run",
+                "ELBOT_HEALTH_ADDR=0.0.0.0:32171",
                 "HOME=/home/elbot",
                 "LANG=C.UTF-8",
             ],
@@ -191,7 +192,7 @@ def make_config(arch: str, version: str, diff_id: str):
             "Cmd": ["service", "run"],
             "WorkingDir": "/home/elbot",
             "User": "10001:10001",
-            "ExposedPorts": {"32170/tcp": {}, "32172/tcp": {}},
+            "ExposedPorts": {"32170/tcp": {}, "32171/tcp": {}, "32172/tcp": {}},
             "Volumes": {"/data": {}},
             "Healthcheck": {
                 "Test": ["CMD", "/usr/local/bin/elbot", "--version"],

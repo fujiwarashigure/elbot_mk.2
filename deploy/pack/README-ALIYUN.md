@@ -12,7 +12,7 @@
 宝塔 Nginx（宿主机，443 + TLS）
         │  proxy_pass 127.0.0.1
         ▼
-Docker 容器 elbot（只映射 127.0.0.1:32172 / 32170）
+Docker 容器 elbot（只映射 127.0.0.1:32172 / 32171 / 32170）
         │
         └── 数据卷：宿主 ./data  ──►  /data（配置 / SQLite / 日志 / sandbox）
 ```
@@ -32,7 +32,7 @@ Docker 容器 elbot（只映射 127.0.0.1:32172 / 32170）
 阿里云轻量在控制台有独立的**防火墙**（不是 ECS 安全组）：
 
 - 放行：`22`（SSH，建议改端口）、`80`、`443`、`宝塔面板端口`（默认 `8888`，建议改并限制来源 IP）。
-- **不要放行** `32170`、`32172`。这两个端口只映射到宿主机 `127.0.0.1`，由 Nginx 反代出去。
+- **不要放行** `32170`、`32171`、`32172`。这些端口只映射到宿主机 `127.0.0.1`；其中 `32170`/`32172` 由 Nginx 反代，`32171` 仅给本机 watchdog / 监控使用。
 - 如果系统内还开了 `ufw` / `firewalld`，也要同步放行。
 
 > 大陆服务器绑域名走 80/443 需要 **ICP 备案**；没有备案可以先用「IP + 非 80/443 端口」自己访问面板。
@@ -61,7 +61,13 @@ systemctl restart docker
 
 ## 3. 上传部署产物
 
-把 `deploy/dist/` 里的对应文件传到服务器，例如 `/opt/elbot`：
+仓库默认**不包含** `deploy/dist/` 现成产物。请先在本地 / CI 运行：
+
+```bash
+bash deploy/pack/prepare-offline.sh
+```
+
+生成 `deploy/dist/` 后，再把对应文件传到服务器，例如 `/opt/elbot`：
 
 - **宝塔文件管理器**：直接上传 `elbot-0.5.0-offline-amd64.tar.gz` 到 `/opt/elbot`。
 - **SCP**（本地执行）：
@@ -128,12 +134,15 @@ offline-amd64/data/config/elbot/elnis.toml
   enabled = true
   listen = "0.0.0.0:32172"     # 容器内监听，宿主机只映射 127.0.0.1
   ```
-- `elnis.toml`：需要外部事件时 `enabled = true`，`[http] addr = "0.0.0.0:32170"`。
+- `elnis.toml`：需要外部事件时 `enabled = true`，`[http] addr = "0.0.0.0:32170"`；默认关闭，不用时删除 Compose 的 32170 映射。
+- QQ OneBot：`ws_url` 要写容器视角地址。同一 Compose 服务用 `ws://onebot:6700/`；宿主机用 `ws://host.docker.internal:6700/` + `extra_hosts`；不要写 `127.0.0.1`。不共享文件系统时保持 `send_file_mode = "base64"`。
+- 独立健康接口：Compose 默认开启 `ELBOT_HEALTH_ADDR=0.0.0.0:32171`，宿主机只映射 `127.0.0.1:32171`；用 `/live`、`/ready`、`/healthz` 判断进程/调度和依赖，用 `/tasks`、`/metrics` 查看任务和资源；不要放进 Nginx 公网路由。
 
 改完配置：
 
 ```bash
-docker compose up -d     # 改 .env 必须用 up -d；只改 toml 可以用 restart
+docker compose restart   # 只改 toml
+docker compose up -d --force-recreate   # 改 .env 必须用 up -d --force-recreate（restart 不会重新注入环境变量）
 ```
 
 ## 6. 宝塔 Nginx 反代 + HTTPS
@@ -141,10 +150,11 @@ docker compose up -d     # 改 .env 必须用 up -d；只改 toml 可以用 rest
 1. 宝塔 → 网站 → 添加站点（你的域名）。
 2. 站点设置 → SSL → Let's Encrypt，开启强制 HTTPS。
 3. 把 `nginx-elbot.conf` 的内容加入该站点配置（或宝塔“反向代理”手动添加）：
-   - `/cli/v1/ws` → `http://127.0.0.1:32172`（WebSocket）
-   - `/elvena/` → `http://127.0.0.1:32170`
-   - `/elbot/healthz` → `http://127.0.0.1:32170/healthz`
-4. `nginx -t && nginx -s reload`。
+   - `/cli/v1/ws` → `http://127.0.0.1:32172`（仅启用 CLI server 时）
+   - `/elvena/` → `http://127.0.0.1:32170`（仅启用 Elnis 时）
+   - `/elbot/healthz` → `http://127.0.0.1:32170/healthz`（仅启用 Elnis 时）
+4. 独立健康接口 `127.0.0.1:32171` 只给宿主机监控 / watchdog 用，**不要**加入 Nginx 公网路由。
+5. `nginx -t && nginx -s reload`。
 
 完成后：CLI 客户端连 `wss://你的域名/cli/v1/ws`；外部 Elwisp 投递 `https://你的域名/elvena/v3/events`。
 
@@ -164,10 +174,19 @@ systemctl status elbot-compose
 ```bash
 uname -m                                  # 确认架构
 docker compose ps                         # 容器 Up / healthy
-curl -sS http://127.0.0.1:32170/healthz   # Elnis 健康检查（若启用）
-curl -sS -o /dev/null -w '%{http_code}\n' https://你的域名/elbot/healthz
 docker compose logs --tail=100            # 无 TOML / Key 报错
+stat -c '%u:%g %a %n' data                # 期望 10001:10001
+curl -sS http://127.0.0.1:32171/live      # 关键调度心跳
+curl -sS http://127.0.0.1:32171/ready     # 数据/组件/平台就绪
+curl -sS http://127.0.0.1:32171/healthz   # 汇总；degraded 表示外部模型等异常
+curl -sS http://127.0.0.1:32171/tasks     # 活跃任务与阶段
+curl -sS http://127.0.0.1:32171/metrics   # 资源 / 任务 / 模型指标
+# 仅 Elnis 启用时：
+curl -sS http://127.0.0.1:32170/healthz
 ```
+
+> 标准 Dockerfile 的 `HEALTHCHECK` 已请求独立 `/live`，但**不代表模型 API、QQ OneBot、Telegram 或 CLI 已连通**。
+> 上线前请实际发一条消息，重启容器后确认会话仍在，并做一次备份恢复演练。
 
 ## 常见问题（阿里云轻量特有）
 

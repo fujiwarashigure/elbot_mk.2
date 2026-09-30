@@ -13,8 +13,8 @@ This document is used to get ElBot up and running and complete your first CLI co
 ## Get the Code
 
 ```bash
-git clone https://github.com/Elflare/elbot/
-cd elbot
+git clone https://github.com/fujiwarashigure/elbot_mk.2.git
+cd elbot_mk.2
 ```
 
 If you are already in this repository, you can proceed directly to the next step.

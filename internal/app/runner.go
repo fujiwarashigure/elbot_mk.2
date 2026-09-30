@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -64,7 +65,29 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 		return fmt.Errorf("app: foundation factory returned incomplete components")
 	}
 
-	models, err := r.deps.Models.Build(ModelRequest{Foundation: foundation, Profiler: profiler})
+	tasksProvider := &lazyJSONProvider{}
+	metricsProvider := &lazyJSONProvider{}
+	healthState, healthServer, err := startHealthServer(foundation.Config, foundation.Logger, opts.Version, map[string]http.Handler{
+		"/tasks":   tasksProvider,
+		"/metrics": metricsProvider,
+	})
+	if err != nil {
+		return err
+	}
+	if healthServer != nil {
+		cleanups = append(cleanups, cleanupStep{name: "health server", close: func(ctx context.Context) error {
+			return closeHealthServer(ctx, healthServer)
+		}})
+	}
+	if healthState != nil {
+		cleanups = append(cleanups, cleanupStep{name: "health state", close: func(context.Context) error {
+			healthState.SetShuttingDown(true)
+			healthState.SetReady(false)
+			return nil
+		}})
+	}
+
+	models, err := r.deps.Models.Build(ModelRequest{Foundation: foundation, Profiler: profiler, Health: healthState})
 	if err != nil {
 		return err
 	}
@@ -93,11 +116,18 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 		Platforms:  platforms,
 		Mode:       mode,
 		Profiler:   profiler,
+		Health:     healthState,
 	})
 	if err != nil {
 		return err
 	}
 
+	tasksProvider.Set(func() any { return runtime.Agent.ActiveRequests() })
+	metricsProvider.Set(func() any { return collectOpsMetrics(foundation.Config, healthState, runtime.Agent, runtime.ImageLimiter) })
+	if healthState != nil {
+		runtime.Handler = healthHandler{inner: runtime.Handler, state: healthState}
+		healthState.SetReady(true)
+	}
 	startupDuration := profiler.Flush()
 	foundation.Logger.Info("elbot startup completed", "startup_duration", startupDuration.String())
 	var afterStart func(context.Context)
@@ -106,10 +136,15 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 			foundation.StartCron(ctx, runtime.CronService)
 		}
 	}
+	var heartbeat func()
+	if healthState != nil {
+		heartbeat = healthState.Beat
+	}
 	return r.deps.Executor.Run(ctx, PlatformRunRequest{
 		Handler:    runtime.Handler,
 		Logger:     foundation.Logger,
 		Runtimes:   platforms.Runtimes,
 		AfterStart: afterStart,
+		Heartbeat:  heartbeat,
 	})
 }

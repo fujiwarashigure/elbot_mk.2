@@ -59,7 +59,7 @@ func (defaultIntegrationFactory) Attach(ctx context.Context, req IntegrationRequ
 
 	registerCompletionPlatforms(runtime.Agent, platforms.Runtimes)
 	registerCommandCatalogs(runtime.Agent, platforms.Runtimes)
-	registerPlatformHooks(runtime.Agent, platforms.Runtimes)
+	registerPlatformHooks(runtime.Agent, platforms.Runtimes, req.Health)
 	req.Profiler.Mark("platform hooks")
 	return platforms, nil
 }

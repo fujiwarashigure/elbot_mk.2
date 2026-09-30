@@ -4,7 +4,7 @@
 # 构建上下文需要包含名为 `elbot` 的 Linux 静态二进制。
 #
 #   docker build -t elbot:0.5.0 .
-#   docker run -d --name elbot -v $PWD/data:/data -p 127.0.0.1:32172:32172 elbot:0.5.0
+#   docker run -d --name elbot -v $PWD/data:/data -p 127.0.0.1:32172:32172 -p 127.0.0.1:32171:32171 elbot:0.5.0
 #
 # 国内服务器拉 debian 慢时，可换镜像源：
 #   docker build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim -t elbot:0.5.0 .
@@ -19,7 +19,8 @@ ENV TZ=Asia/Shanghai \
     XDG_DATA_HOME=/data \
     XDG_RUNTIME_DIR=/data/run \
     HOME=/home/elbot \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    ELBOT_HEALTH_ADDR=0.0.0.0:32171
 
 # 保留常用 CLI 工具，保证 ElBot 的 shell 工具可用
 RUN apt-get update \
@@ -46,10 +47,13 @@ USER elbot:elbot
 WORKDIR /home/elbot
 
 VOLUME ["/data"]
-EXPOSE 32170 32172
+EXPOSE 32170 32171 32172
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["sh", "-c", "test -f /data/run/elbot/elbot.pid && kill -0 \"$(cat /data/run/elbot/elbot.pid)\""]
+# 使用独立 /live 心跳判断关键调度循环是否推进；不再只看 PID。
+# /live 不判断模型 API、QQ OneBot / Telegram 或 CLI / Elnis 的完整连通性，
+# 部署验收仍需实际发一条消息并按 deploy/README.md 第 12 节检查。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD ["curl", "-fsS", "--max-time", "3", "http://127.0.0.1:32171/live"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/elbot"]
 CMD ["service", "run"]

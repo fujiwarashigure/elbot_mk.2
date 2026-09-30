@@ -1,0 +1,13 @@
+[Unit]
+Description=ElBot external watchdog (live check + controlled restart)
+Documentation=https://github.com/fujiwarashigure/elbot_mk.2
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/elbot/deploy
+EnvironmentFile=-/opt/elbot/deploy/watchdog.env
+ExecStart=/opt/elbot/deploy/elbot-watchdog.sh
+TimeoutStartSec=120
+Nice=10

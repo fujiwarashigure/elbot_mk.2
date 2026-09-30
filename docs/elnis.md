@@ -142,6 +142,8 @@ POST /elvena/v3/events
 GET  /healthz
 ```
 
+> `/healthz` 只在 Elnis 启用后存在。ElBot 默认不启用 Elnis，因此未启用时不能用 `/healthz` 判断 ElBot、模型 API 或 OneBot 是否正常。
+
 ## 事件会怎样被处理
 
 Elnis 收到事件后，会按 `mode` 决定处理方式。

@@ -84,6 +84,10 @@ func (e *commandExecutor) activeTurnCommandBlockedText() string {
 }
 
 func (a *Agent) handleInput(ctx context.Context, text string) error {
+	if allowed, retryAfter := a.allowInbound(ctx); !allowed {
+		a.sendChat(ctx, rateLimitRetryText(retryAfter))
+		return nil
+	}
 	session, err := a.sessionForInput(ctx, text)
 	if err != nil {
 		return err

@@ -97,5 +97,9 @@ log "docker compose up -d"
 sleep 2
 "${COMPOSE[@]}" ps || true
 echo
-log "首次启动会在 ./data/config/elbot/ 生成默认配置，按需修改后：cd ${BUNDLE_DIR} && ${COMPOSE[*]} up -d"
+log "首次启动会在 ./data/config/elbot/ 生成默认配置；改 TOML 后 restart，改 .env 后必须 up -d --force-recreate："
+log "  cd ${BUNDLE_DIR} && ${COMPOSE[*]} restart      # 只改 TOML"
+log "  cd ${BUNDLE_DIR} && ${COMPOSE[*]} up -d --force-recreate  # 改 .env"
 log "查看日志：cd ${BUNDLE_DIR} && ${COMPOSE[*]} logs -f --tail=200"
+log "健康检查：curl -sS http://127.0.0.1:32171/live  # 另有 /ready /healthz"
+log "上线前请实际发消息、重启后确认会话仍在，并做一次备份恢复演练。"

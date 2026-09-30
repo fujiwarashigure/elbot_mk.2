@@ -46,7 +46,8 @@ ENV TZ=Asia/Shanghai \
     XDG_DATA_HOME=/data \
     XDG_RUNTIME_DIR=/data/run \
     HOME=/home/elbot \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    ELBOT_HEALTH_ADDR=0.0.0.0:32171
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -72,13 +73,15 @@ WORKDIR /home/elbot
 
 VOLUME ["/data"]
 
-# 32170 = Elnis HTTP 入口；32172 = CLI 远程 WebSocket 服务端
+# 32170 = Elnis HTTP 入口；32171 = 独立健康接口；32172 = CLI 远程 WebSocket 服务端
 # docker-compose 中只映射到宿主机 127.0.0.1，公网访问请走宝塔 Nginx 反向代理。
-EXPOSE 32170 32172
+EXPOSE 32170 32171 32172
 
-# 仅 service 模式会写 /data/run/elbot/elbot.pid；如果覆盖 CMD 为 run，请删除此健康检查
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["sh", "-c", "test -f /data/run/elbot/elbot.pid && kill -0 \"$(cat /data/run/elbot/elbot.pid)\""]
+# 使用独立 /live 心跳判断关键调度循环是否推进；不再只看 PID。
+# /live 不判断模型 API、QQ OneBot / Telegram 或 CLI / Elnis 的完整连通性，
+# 部署验收仍需实际发一条消息并按 deploy/README.md 第 12 节检查。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD ["curl", "-fsS", "--max-time", "3", "http://127.0.0.1:32171/live"]
 
 # 用 tini 作为 PID 1，保证 docker stop / systemd 的 SIGTERM 能转发给 ElBot，
 # ElBot 自身会在 30s 内优雅关闭。
@@ -99,13 +102,15 @@ ENV TZ=Asia/Shanghai \
     XDG_RUNTIME_DIR=/data/run \
     HOME=/home/elbot \
     LANG=C.UTF-8 \
-    ELBOT_GO_BINARY=/usr/local/go/bin/go
+    ELBOT_GO_BINARY=/usr/local/go/bin/go \
+    ELBOT_HEALTH_ADDR=0.0.0.0:32171
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
         tini \
+        curl \
         git \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 10001 elbot \
@@ -120,7 +125,10 @@ USER elbot:elbot
 WORKDIR /home/elbot
 
 VOLUME ["/data"]
-EXPOSE 32170 32172
+EXPOSE 32170 32171 32172
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD ["curl", "-fsS", "--max-time", "3", "http://127.0.0.1:32171/live"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/elbot"]
 CMD ["service", "run"]

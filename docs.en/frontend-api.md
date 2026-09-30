@@ -214,6 +214,8 @@ my-client = ["ELBOT_CLI_TOKEN"]
 
 `tokens` is a mapping from client_id to a list of environment variable names. The server attempts to read token values from these environment variables in order and compares them with the token sent by the client. Environment variables can be read from the system environment or the configuration directory `.env`.
 
+> In a container deployment, `[platform.cli.server].listen` must be `0.0.0.0:32172`; otherwise it only listens on the container loopback and the host port mapping cannot reach it. The host should still bind only `127.0.0.1`, and public access should go through an HTTPS/WSS reverse proxy.
+
 ## Typical Interaction Flow
 
 ```

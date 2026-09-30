@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"elbot/internal/config"
+	"elbot/internal/ops/diskguard"
 	"elbot/internal/storage"
 )
 
@@ -56,6 +57,7 @@ type Manager struct {
 	MaxImportBytes  int64
 	DownloadTimeout time.Duration
 	Root            string
+	Guard           *diskguard.Guard
 	FileDelivery    config.FileDeliveryConfig
 	Media           config.MediaConfig
 	Logger          *slog.Logger

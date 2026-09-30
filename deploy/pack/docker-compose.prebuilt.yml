@@ -19,6 +19,8 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-debian:bookworm-slim}
     container_name: elbot
     hostname: elbot
+    # 镜像内已以 10001:10001 运行；显式写死，避免数据卷属主和容器 UID 不一致
+    user: "10001:10001"
 
     restart: unless-stopped
     stop_grace_period: 40s
@@ -31,12 +33,26 @@ services:
       XDG_CONFIG_HOME: /data/config
       XDG_DATA_HOME: /data
       XDG_RUNTIME_DIR: /data/run
+      # 独立运维健康接口：仅监听容器内部，宿主机只映射到 127.0.0.1
+      ELBOT_HEALTH_ADDR: ${ELBOT_HEALTH_ADDR:-0.0.0.0:32171}
+      ELBOT_HEALTH_LIVE_STALE_SECONDS: ${ELBOT_HEALTH_LIVE_STALE_SECONDS:-90}
 
     volumes:
       - ./data:/data
 
+    # QQ OneBot 跑在宿主机时，取消下面两行注释，并把 app.toml 的 ws_url 写成
+    # ws://host.docker.internal:6700/；OneBot 在同一 Compose 项目时直接用服务名即可。
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+    # 32172: CLI 远程 WebSocket 服务端（app.toml 中 platform.cli.server.enabled=true 时生效）
+    # 32171: 独立应用健康接口，不依赖 Elnis。
+    # 32170: Elnis 事件 HTTP 入口（elnis.toml enabled=true 时生效）。ElBot 默认不启用 Elnis，
+    #        不使用 Elnis 时映射没有意义，且 /healthz 不能代表 ElBot / 模型 / OneBot 健康；
+    #        请删除或注释这一行。
     ports:
       - "127.0.0.1:32172:32172"
+      - "127.0.0.1:32171:32171"   # 独立健康接口 /live /ready /healthz
       - "127.0.0.1:32170:32170"
 
     mem_limit: 1536m

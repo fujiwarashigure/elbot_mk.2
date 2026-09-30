@@ -165,7 +165,7 @@ func imageToolForTest(client *imagegen.Client, characters *character.Store, hist
 	if client != nil {
 		profiles[""] = ImageProfile{Name: "", Client: client, Config: client.Config()}
 	}
-	return NewImageGenerateTool(profiles, "", characters, nil, history, rewriter)
+	return NewImageGenerateTool(profiles, "", characters, nil, history, rewriter, nil)
 }
 
 type fakeHistoryRepo struct {
@@ -338,7 +338,7 @@ func TestImageGenerateProfileSelection(t *testing.T) {
 		"":     {Name: "", Client: baseClient, Config: baseClient.Config()},
 		"fast": {Name: "fast", Client: fastClient, Config: fastClient.Config()},
 	}
-	generate := NewImageGenerateTool(profiles, "", character.NewStore(t.TempDir()), nil, nil, nil)
+	generate := NewImageGenerateTool(profiles, "", character.NewStore(t.TempDir()), nil, nil, nil, nil)
 
 	// @image:fast for this turn only
 	ctx := imagegen.WithProfile(context.Background(), "fast")

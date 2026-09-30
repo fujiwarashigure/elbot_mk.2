@@ -6,6 +6,7 @@ import (
 	"elbot/internal/character"
 	elcron "elbot/internal/cron"
 	"elbot/internal/media"
+	"elbot/internal/ops/concurrency"
 	"elbot/internal/memory/resident"
 	"elbot/internal/processenv"
 	"elbot/internal/storage"
@@ -20,6 +21,7 @@ type RegisterOptions struct {
 	CharacterStore      *character.Store
 	ImageProfiles       map[string]ImageProfile
 	DefaultImageProfile string
+	ImageLimiter        *concurrency.Limiter
 	PromptRewriter      ImagePromptRewriter
 	SkillManager        *skill.Manager
 	CronService         *elcron.Service
@@ -117,7 +119,7 @@ func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
 		if opts.FileManager != nil {
 			center = opts.FileManager.Media
 		}
-		if err := registry.Register(NewImageGenerateTool(opts.ImageProfiles, opts.DefaultImageProfile, opts.CharacterStore, center, opts.ChatHistory, opts.PromptRewriter)); err != nil {
+		if err := registry.Register(NewImageGenerateTool(opts.ImageProfiles, opts.DefaultImageProfile, opts.CharacterStore, center, opts.ChatHistory, opts.PromptRewriter, opts.ImageLimiter)); err != nil {
 			return err
 		}
 	}

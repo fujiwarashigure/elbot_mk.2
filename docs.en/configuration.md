@@ -72,6 +72,8 @@ Fields such as `api_key_env`, `token_env`, `client_secret_env`, `access_token_en
 1. ElBot process environment.
 2. Configuration root `.env`.
 
+Variables injected by Docker Compose `env_file`, `docker run -e`, or systemd `EnvironmentFile` all belong to the ElBot process environment and may therefore be inherited by Shell / Hook subprocesses. If tools are opened to group-chat users, do not rely only on "the container is not root" to protect the API Keys in that environment.
+
 It is recommended to place actual secrets in the system environment or the configuration root `.env`, rather than writing them directly into TOML or committing them to the repository. For example:
 
 ```dotenv
@@ -123,6 +125,23 @@ After loading via `EnvironmentFile`, all variables in the file belong to the ElB
 ### Effective Timing
 
 The configuration root `.env` or systemd environment takes effect after restarting ElBot. `plugins/.env` and plugin `.env` are re-read during startup and `/hooks reload`; a reload will rebuild the Worker based on the new environment; If the file does not exist, it is treated as an empty configuration.
+
+## Operations Health Endpoints
+
+When `ELBOT_HEALTH_ADDR` is set (process environment or configuration root `.env`), ElBot starts an independent HTTP health interface that does not depend on Elnis:
+
+```dotenv
+ELBOT_HEALTH_ADDR=127.0.0.1:32171
+ELBOT_HEALTH_LIVE_STALE_SECONDS=90
+```
+
+`ELBOT_HEALTH_LIVE_STALE_SECONDS` should be clearly larger than the scheduling heartbeat interval; the current implementation updates the heartbeat about every 10 seconds.
+
+- `GET /live`: whether critical scheduling loops are still progressing; a watchdog should use only this endpoint to decide whether a restart is needed.
+- `GET /ready`: whether the SQLite / data directories are writable, required components are initialized, and configured platforms have connected successfully at least once.
+- `GET /healthz`: aggregate status; model API failures are reported as `degraded`, and HTTP may still return 200, so they must not trigger an automatic restart of the local service.
+
+This interface should bind only to the container internal or host loopback address; do not expose it publicly through Nginx.
 
 ## Workspace Tools
 
@@ -248,7 +267,7 @@ token_env = ["ELBOT_CLI_WINDOWS_TOKEN"]
 ```
 
 - When `server.enabled=true`, `elbot service run` will start the CLI WebSocket server.
-- `server.listen` is the server listening address.
+- `server.listen` is the server listening address. For remote CLI in containers it must be `0.0.0.0:32172`; `127.0.0.1:32172` only listens on the container loopback and is unreachable through the host port mapping. The host should still bind only `127.0.0.1` and expose HTTPS/WSS through a reverse proxy.
 - `default_url` is the default client connection address; when connecting to other machines, enter the remote WebSocket address in `clients.<name>.url`.
 - `server.tokens` is the list of CLI client ID and token environment variables allowed to log in to the server.
 - `clients.<name>` is the client profile; `id` can be omitted, defaulting to `<name>`; `url` can be omitted, defaulting to `default_url`.
@@ -396,12 +415,17 @@ Storage-related configurations in `app.toml`:
 [storage]
 sessions_sqlite_path = ""
 chat_history_sqlite_path = ""
+# Disk protection: ratios are used-space ratios; critical refuses non-essential media writes.
+disk_warn_ratio = 0.85
+disk_critical_ratio = 0.95
+disk_min_free_bytes = 0
 ```
 
 When left blank, the platform's default data directory is used:
 
 - Windows：`%APPDATA%/ElBot/data`
 - Linux: `$XDG_DATA_HOME/elbot` or `~/.local/share/elbot`
+- `disk_warn_ratio` / `disk_critical_ratio` classify used-space ratios; when `disk_min_free_bytes` is positive, free space below it is immediately critical. In critical state, image generation, images, voice, video, and ordinary file saves are rejected, while SQLite sessions and configuration writes remain allowed.
 
 Runtime logs, SQLite, sandbox, and other runtime data will also be stored according to the configuration or the default data directory.
 
@@ -522,6 +546,7 @@ cli = ["local"]
 - ``OwnerScoped`` tools can only access the caller's own data, so ordinary users can call them; among these, ``high``/``critical`` risk operations still require confirmation by the user themselves.
 - The confirmation threshold for the superadmin is configured by ``superadmin_confirm_risk``.
 - The default local CLI user `local` is a superadmin.
+- If image generation is opened to regular users, keep `[image_generation] superadmin_only = true`, or set quota, rate limits, and daily caps per Key at the relay.
 - `tool_tags.toml` is used to configure the tool groups that can be injected into `@tool:<tag>`, as well as the tool usage strategies appended to the system prompt after a tag is activated.
 
 ### `tool_tags.toml`
@@ -574,6 +599,52 @@ Notes:
 - When preloading tools that already exist, they will not be added again, and the platform will prompt `已存在工具：<name>`.
 - It is recommended to write `prompt` as a specific tool usage strategy, rather than configuration mechanisms that the model does not need to know, such as "the current tag is xxx".
 
+## Operational Timeouts and Concurrency Limits
+
+```toml
+[ops]
+# Per-tool / Hook / context-compaction timeout; 0 means unlimited.
+tool_timeout_seconds = 600
+hook_timeout_seconds = 60
+compress_timeout_seconds = 300
+# Maximum concurrently running turns / tools / hooks; 0 means unlimited.
+max_concurrent_turns = 4
+max_concurrent_tools = 4
+max_concurrent_hooks = 4
+# Optional per-user / per-group rate limits; 0 disables the limiter.
+user_messages_per_minute = 12
+user_burst = 3
+group_messages_per_minute = 60
+group_burst = 10
+rate_limit_idle_ttl_seconds = 600
+# Optional bounded queue when concurrency is saturated. turn usually should not wait.
+queue_max_size = 20
+queue_wait_timeout_seconds = 10
+queue_wait_kinds = ["tool", "hook", "compress"]
+# Optional provider circuit breaker; 0 disables it.
+circuit_breaker_failure_threshold = 0
+circuit_breaker_open_cooldown_seconds = 60
+circuit_breaker_half_open_max = 1
+```
+
+- Tool, Hook, and context-compaction timeouts cancel the work through `context`; timed-out requests finish with an error and release their concurrency slot.
+- Per-user / per-group rate limits use a token bucket keyed by platform + scope; over-limit messages receive a retry notice and do not enter the LLM or tool chain. Superadmins are exempt.
+- `queue_wait_kinds` controls which request kinds may wait when concurrency is saturated; `turn` is rejected by default to avoid user-visible stalls, and a full queue or queue timeout is also rejected explicitly.
+- The breaker tracks provider connection failures, first-chunk timeouts, 5xx responses, and stream errors. It opens after the configured failure threshold, then allows a small half-open probe after cooldown. User cancellation and whole-turn response timeouts do not count.
+
+Providers can configure a fallback:
+
+```toml
+[providers.openai]
+fallback_provider = "deepseek"
+fallback_model = "deepseek-chat"
+```
+
+When the primary breaker is open, ElBot uses the fallback provider; without one it returns a clear error instead of retrying forever. External model failures appear as `degraded` and do not trigger an automatic restart.
+- Concurrency limits cap the number of active requests per kind; over-limit requests return `request concurrency limit reached` instead of accumulating without bound.
+- Active tasks, start time, stage, latest progress, and resource metrics can be viewed through the independent health endpoints `/tasks` and `/metrics`.
+- On supported platforms, Shell, Hooks, AgentSkill, and Go Skill processes are terminated as a process tree on timeout or cancellation; in-process work such as image handling can only rely on `context` cancellation, and third-party libraries that ignore cancellation may still release late.
+
 ## Elnis listening hub
 
 Elnis is disabled by default. Once enabled, ElBot will start a local HTTP ingress to receive events delivered by Elwisp according to the Elvena protocol. It is recommended to split the Elnis configuration into a separate `elnis.toml`, while `app.toml` only retains the entry path.
@@ -619,6 +690,7 @@ Note:
 - Elnis delivery is allowed by default; `[delivery_disabled].targets` and single Elwisp `disabled_targets` are used to explicitly prohibit platforms, private chats, or group chats; `platform-only` in the configuration indicates that all deliveries for the entire platform are disabled.
 - Elnis logs only record the token name, not the original token text.
 - `token_env` can be written as a list to try multiple environment variable names in order; this is suitable for temporarily switching tokens or achieving multi-environment compatibility.
+- When Elnis is enabled in a container, `[http].addr` must be `0.0.0.0:32170`, while the host port maps only to `127.0.0.1`; ElBot disables Elnis by default, and `/healthz` cannot represent the health of ElBot / the model / OneBot when Elnis is disabled.
 - Elwisp is enabled by default; the corresponding Elwisp will only be disabled if `enabled=false` is explicitly configured.
 - Currently, `record`, `direct`, and `llm` modes are supported; `llm` mode is executed using a background Session runner.
 - In `llm` mode, `model_slot` can be specified as `elwisp1`, `elwisp2`, or `elwisp3` in Elvena requests; If not specified or if the corresponding slot is not configured, it will fall back to the `work` model.
@@ -669,6 +741,8 @@ api_timeout_seconds = 15 # Base timeout for OneBot write and response wait
 trigger_keywords = ["bot"]
 send_file_mode = "base64" # Local images, files, and voice messages use base64 by default; for shared file systems, this can be changed to file_uri
 ```
+
+> **Container deployment note**: `ws_url` is the address reached **from inside the ElBot container**. `ws://127.0.0.1:6700/` points to ElBot itself. If OneBot is another service in the same Compose project (or on the same Docker network), use the service name, for example `ws://onebot:6700/`; if OneBot runs on the host, configure an address reachable from the container (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` and use `ws://host.docker.internal:6700/`); if it runs on another machine, use that machine's IP/domain.
 
 `access_token_env` points to the environment variable name that stores the Access Token; The original `access_token` remains compatible and takes priority over `access_token_env`. When OneBot does not require authentication, both items can be omitted.
 

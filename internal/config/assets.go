@@ -84,6 +84,10 @@ tool_tags = "tool_tags.toml"
 # Leave empty to use the platform default data directory.
 sessions_sqlite_path = ""
 chat_history_sqlite_path = ""
+# Disk protection: ratios are used-space ratios; critical rejects non-essential media writes.
+disk_warn_ratio = 0.85
+disk_critical_ratio = 0.95
+disk_min_free_bytes = 0
 
 [runtime]
 log_level = "info"
@@ -281,6 +285,11 @@ reference_field = "image"
 # extra_headers = { }
 # proxy = ""
 
+# 生图独立并发限制；0 表示不限制。queue_size > 0 时超限会短暂排队。
+max_concurrent = 0
+queue_size = 0
+queue_timeout_seconds = 0
+
 [view]
 session_list_page_size = 10
 
@@ -289,6 +298,30 @@ prefixes = ["/*"]
 
 [tools]
 max_rounds_per_turn = 10
+
+[ops]
+# 单次工具 / Hook / 上下文压缩的超时。0 表示不限时；生产建议设置明确上限。
+tool_timeout_seconds = 600
+hook_timeout_seconds = 60
+compress_timeout_seconds = 300
+# 同时运行的 turn / tool / hook 上限。0 表示不限制；超出上限的请求会明确拒绝。
+max_concurrent_turns = 4
+max_concurrent_tools = 4
+max_concurrent_hooks = 4
+# 可选：按用户 / 群聊限速；0 表示不限制。
+user_messages_per_minute = 0
+user_burst = 0
+group_messages_per_minute = 0
+group_burst = 0
+rate_limit_idle_ttl_seconds = 600
+# 可选：超过并发上限时允许短暂排队。turn 通常不建议排队，避免用户侧卡住。
+queue_max_size = 0
+queue_wait_timeout_seconds = 0
+queue_wait_kinds = ["tool", "hook", "compress"]
+# 可选：Provider 连续失败后的熔断；0 表示关闭。
+circuit_breaker_failure_threshold = 0
+circuit_breaker_open_cooldown_seconds = 60
+circuit_breaker_half_open_max = 1
 
 [resident_memory]
 # Memory length units: CJK characters count as one each; English/digits count by word.
@@ -322,6 +355,7 @@ default_client = "local"
 default_url = "ws://127.0.0.1:32172/cli/v1/ws"
 
 # Used only when this ElBot runs as a CLI server. It listens here; clients connect via their url.
+# Container deployment: use "0.0.0.0:32172" so the host port mapping can reach it; keep the host bind on 127.0.0.1.
 [platform.cli.server]
 enabled = false
 listen = "127.0.0.1:32172"
@@ -336,7 +370,7 @@ token_env = ["ELBOT_CLI_LOCAL_TOKEN"]
 
 # [platform.qqonebot]
 # enabled = false
-# ws_url = "ws://127.0.0.1:6700/"
+# ws_url = "ws://127.0.0.1:6700/" # native/local OneBot. Inside a container 127.0.0.1 points to ElBot itself; use a Compose service name or reachable host address.
 # access_token = "" # legacy direct value; optional
 # access_token_env = "QQONEBOT_ACCESS_TOKEN" # optional; reads process env, then config .env
 # api_timeout_seconds = 15 # base timeout for OneBot writes and API responses
@@ -367,6 +401,8 @@ api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 models = ["gpt-4o-mini"]
+# fallback_provider = "deepseek"
+# fallback_model = "deepseek-chat"
 
 # [providers.openai.model_configs."gpt-4o-mini"]
 # context_window = 128000
@@ -401,7 +437,7 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 `
 
-const defaultSoulMD = `You are ElBot, a helpful assistant. ElBot's repo is https://github.com/Elflare/elbot.
+const defaultSoulMD = `You are ElBot, a helpful assistant. ElBot's repo is https://github.com/fujiwarashigure/elbot_mk.2.
 Keep responses concise, accurate, and friendly. Follow the user's language unless they ask otherwise.
 `
 
@@ -412,6 +448,8 @@ enabled = false
 allowed_tools = ["web_search", "web_extract"]
 
 [http]
+# Container deployment: enable Elnis and use "0.0.0.0:32170"; host port should bind 127.0.0.1.
+# /healthz only exists when Elnis is enabled and does not prove model/OneBot/CLI health.
 addr = "127.0.0.1:32170"
 max_body_bytes = 1048576
 queue_size = 128
@@ -540,7 +578,7 @@ windows：%AppData%/ElBot/plugins/hooks.toml
 Linux：= $XDG_CONFIG_HOME/elbot/plugins/hooks.toml
 若 XDG_CONFIG_HOME 未设置，按 XDG 规范使用 $HOME/.config
 
-简单hook直接参考hooks.toml中的注释写，复杂hook看https://raw.githubusercontent.com/Elflare/elbot/main/docs/hooks.md
+简单hook直接参考hooks.toml中的注释写，复杂hook看https://raw.githubusercontent.com/fujiwarashigure/elbot_mk.2/main/docs/hooks.md
 修改完hooks.md后提醒用户使用 /hooks reload 重新加载
 `
 
@@ -598,7 +636,7 @@ const defaultHookEnv = `# Shared environment for Hook processes.
 
 const defaultHooksTOML = `# Declarative Hook rules. Loaded at ElBot startup.
 # Complex logic should be implemented as a code plugin instead.
-# Full docs and examples: https://github.com/Elflare/elbot/blob/main/docs/hooks.md
+# Full docs and examples: https://github.com/fujiwarashigure/elbot_mk.2/blob/main/docs/hooks.md
 #
 # Optional plugin configs:
 # [[plugins]]

@@ -11,8 +11,8 @@
 ## 获取代码
 
 ```bash
-git clone https://github.com/Elflare/elbot/
-cd elbot
+git clone https://github.com/fujiwarashigure/elbot_mk.2.git
+cd elbot_mk.2
 ```
 
 如果已经在本仓库内，可以直接继续下一步。

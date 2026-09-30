@@ -35,7 +35,7 @@ func (r *contextRuntimeState) compactSession(ctx context.Context, current *stora
 	if len(r.requests.ListBySession(current.ID)) > 0 {
 		return nil, fmt.Errorf("当前会话有正在运行的请求，无法压缩")
 	}
-	_, reqCtx, done, err := r.requests.Start(ctx, request.StartRequest{SessionID: current.ID, Kind: request.KindCompress, Label: "compact"})
+	_, reqCtx, done, err := r.requests.Start(ctx, request.StartRequest{SessionID: current.ID, Kind: request.KindCompress, Label: "compact", Timeout: r.compressTimeout})
 	if err != nil {
 		return nil, err
 	}

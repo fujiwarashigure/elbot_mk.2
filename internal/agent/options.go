@@ -37,6 +37,7 @@ type Options struct {
 	ResidentMemoryStore   *resident.Store
 	CharacterStore        *character.Store
 	LLMRequestConfig      config.LLMRequestConfig
+	Ops                    config.OpsConfig
 	HookService           agentcommands.HookService
 	HookManager           hook.Manager
 	HookRuntime           HookRouter
