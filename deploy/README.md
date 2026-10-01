@@ -503,7 +503,7 @@ systemctl daemon-reload
 systemctl enable --now elbot-watchdog.timer
 ```
 
-watchdog 的重启决策只看 `/live`：调度心跳过期、平台掉线、模型 `degraded` 都不会触发重启（否则模型 API 抖动就会变成重启风暴）。这类"进程活着但不可用"的情况靠告警和 `/diagnostics` 人工判断：配置 `WATCHDOG_WEBHOOK_URL` 后，`/ready` 连续失败达到 `WATCHDOG_READY_ALERT_THRESHOLD`（默认 3）会推送一次 `not_ready` 告警，`WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`（默认 3600 秒）内不重复推送，并且**永远不会**因此重启。若启用了 `ELBOT_OPS_TOKEN`，在 `watchdog.env` 中把同一个值写入 `WATCHDOG_OPS_TOKEN`，否则 `/tasks`、`/metrics` 诊断会收到 401。需要临时暂停自动重启时：
+watchdog 的重启决策只看 `/live`：调度心跳过期、平台掉线、模型 `degraded` 都不会触发重启（否则模型 API 抖动就会变成重启风暴）。这类“进程活着但不可用”的情况靠告警和 `/diagnostics` 人工判断：配置 `WATCHDOG_WEBHOOK_URL` 后，`/ready` 连续失败达到 `WATCHDOG_READY_ALERT_THRESHOLD`（默认 3）会推送一次 `not_ready` 告警，`WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`（默认 3600 秒）内不重复推送，并且**永远不会**因此重启。若启用了 `ELBOT_OPS_TOKEN`，在 `watchdog.env` 中把同一个值写入 `WATCHDOG_OPS_TOKEN`，否则 `/tasks`、`/metrics` 诊断会收到 401。需要临时暂停自动重启时：
 
 ```bash
 touch /opt/elbot/deploy/watchdog-state/paused
@@ -539,7 +539,7 @@ bash /opt/elbot/deploy/tests/watchdog_redaction_test.sh
 
 `deploy/backup.sh` 默认执行**一致性备份**，备份到 `deploy/backups/`，默认保留 14 份；备份完成后会生成 `*.manifest` 文件级 sha256 清单，并在隔离临时目录执行恢复验证，确认 SQLite、配置、角色素材和本地媒体可一起读取。
 
-清单是从**打包好的归档内容**里解压出来算的（不是从仍在变化的 `data/`），并且覆盖归档内所有 `data/` 文件；清单生成失败会直接判定这次备份失败，不会打印"完成"。所有 `docker compose` 调用都显式带 `-f <compose 文件>` 并在 `deploy/` 下执行，所以从 cron 或任意目录调用都不会命中别的 Compose 项目；Compose 文件路径可用 `ELBOT_COMPOSE_FILE` 覆盖。
+清单是从**打包好的归档内容**里解压出来算的（不是从仍在变化的 `data/`），并且覆盖归档内所有 `data/` 文件；清单生成失败会直接判定这次备份失败，不会打印“完成”。所有 `docker compose` 调用都显式带 `-f <compose 文件>` 并在 `deploy/` 下执行，所以从 cron 或任意目录调用都不会命中别的 Compose 项目；Compose 文件路径可用 `ELBOT_COMPOSE_FILE` 覆盖。
 
 - 宿主机有 `sqlite3`：对 SQLite 数据库（`*.db` / `*.sqlite` / `*.sqlite3`）执行 `.backup`，其余文件归档，不中断服务；
 - 没有 `sqlite3`：短暂停止 Compose 容器，打包完成后自动 `up -d`；
@@ -650,7 +650,7 @@ bash rollback.sh
 
 `upgrade.sh` 只从**当前工作区**构建镜像，不会自动切换代码，所以它有两条硬性保护：
 
-- `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免"只给旧代码贴新版本号"；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
+- `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免“只给旧代码贴新版本号”；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
 - 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.2 bash upgrade.sh`），脚本会 `git fetch --tags` + `checkout --detach` 后再校验一次版本。
 
 重建之后 `upgrade.sh` 会等待容器 healthcheck 变成 `healthy`，再在容器内执行 `elbot doctor --no-model` 作为验收；任一步失败都会提示回滚命令并以非 0 退出。需要跳过或加严：

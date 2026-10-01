@@ -17,6 +17,14 @@ ElBot 是一个使用 Go 编写的轻量级 Agent/Chatbot 框架，目标是在�
 | 常驻内存       | ~30MB                           |
 | 二进制文件大小 | <30MB                           |
 
+> 上表是原版 v0.5.0 的参考数据（N5105 + SATA SSD），用来说明设计目标，不是本仓库的实测承诺：0.6.x 增加了独立健康接口、诊断、素材清单与 `doctor` 等组件，尚未重新做基准测试。生图、工具子进程和并发 turn 的峰值内存更要看实际配置，请以自己机器上的测量为准：
+>
+> ```bash
+> ls -lh elbot                                   # 二进制大小
+> /usr/bin/time -v ./elbot config check 2>&1 | grep -E 'Elapsed|Maximum resident'
+> docker stats --no-stream elbot                 # 容器常驻内存
+> ```
+
 **极致节省 Token 的工具发现**： 研究表明，许多普通用户仍主要将 LLM 类产品用作更高级的搜索引擎、写作助手和倾听对象，频繁工具调用并不是所有对话的常态。
 参考：Chatterji et al., _How People Use ChatGPT_, NBER, 2025；Yan et al., _ShareChat: A Dataset of Chatbot Conversations in the Wild_, arXiv:2512.17843, 2025。
 
@@ -224,6 +232,7 @@ max_concurrent_hooks = 4
 ```
 
 - 群聊限速会先检查用户级额度，再检查群级总额度；用户级防止单个成员刷屏，群级保护全群资源。超级管理员不受限速影响。
+- 限速只是自我保护，不是公平调度：用户级额度按 `平台 + 用户` 统计，同一用户在多个群共享同一份额度；群级拒绝时，本次请求此前消耗的用户额度不会退回。因此“单个成员能否耗尽全群额度”取决于两组阈值怎么配，建议按群规模调整 `[ops]` 的 `rate_limit_*`。
 - `turn` 默认不排队；tool / hook / compress 可短暂排队；队列满或超时会明确拒绝。
 - `/tasks` 和 `/metrics` 暴露活跃任务与资源状态。
 
