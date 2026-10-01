@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 
+## [v0.6.0 - 2026-10-01]
+
+### Fixed
+
+- Fixed missing `[ops]` circuit-breaker fields (`circuit_breaker_failure_threshold`, `circuit_breaker_open_cooldown_seconds`, `circuit_breaker_half_open_max`) that prevented `internal/config` from compiling.
+- Fixed the missing `time` import in `internal/agent/context_runtime.go` and the missing rate-limit / image-generation metric types in `internal/app/ops_health.go`, which broke the whole build.
+- Fixed `elbot service run` exiting immediately with code 0 when no platform is enabled: under Docker / systemd the container was restarted endlessly by `restart: unless-stopped` and the health endpoints disappeared with the process; it now stays alive and logs a warning.
+- Fixed wrong assertions in the `diskguard` / `ratelimit` unit tests; `go test ./...` is green again.
+
+### Changed
+
+- The runtime image now ships more of the CLI tools agents commonly need (bash, procps, iputils-ping, dnsutils, netcat-openbsd, iproute2, less, file, tree, tar, gzip, xz-utils, rsync, zip, python3), and the list is additive by default.
+- `XDG_CACHE_HOME` now points at `/data/cache`, so Go Skill build caches and media temp files live on the data volume and survive container recreation.
+- Inside the `go-runtime` image, building Go Skills no longer fails with permission errors on `/go`: GOPATH / GOMODCACHE / GOCACHE now point to directories writable by UID 10001.
+- The version number now comes from a single source (`deploy/VERSION`); images, offline bundles and docs no longer duplicate it.
+
+### Added
+
+- Multi-architecture Docker builds: the build stage is pinned to `$BUILDPLATFORM` and cross-compiles natively, so arm64 builds no longer run the whole Go build under QEMU.
+- Docker builds now support restricted networks: new `GOPROXY` and `APT_MIRROR` build arguments (the latter also forces https), plus `GO_BASE_IMAGE` / `RUNTIME_BASE_IMAGE` overrides to use faster mirrors or to pin digests.
+- New offline / prebuilt deployment artifacts: `prepare-offline.sh` produces amd64/arm64 static binaries, a `docker load`-ready scratch image and a full offline bundle, with `SHA256SUMS` checksums.
+
+
 ## [v0.5.0 - 2026-09-28]
 
 ### Added
