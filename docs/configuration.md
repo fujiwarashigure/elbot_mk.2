@@ -148,6 +148,8 @@ ELBOT_HEALTH_LIVE_STALE_SECONDS=90
 
 `/tasks` 和 `/metrics` 是运维接口。设置 `ELBOT_OPS_TOKEN` 后，请求必须带 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`。该接口只应监听容器内部或宿主机回环地址；不要在 Nginx 中无鉴权暴露到公网。
 
+平台和模型的 `last_error` 在写入健康快照前会先做凭据脱敏（`sk-` / `Bearer` / `api_key=` / JSON 凭据 / Telegram bot token / URL userinfo 等），以免上游错误里的 token 通过 `/healthz`、`/metrics`、`/diagnostics` 泄露。这是第二道防线，不改变"这些接口必须限制在回环或可信内网"的前提。
+
 ## Workspace 工具
 
 在 work 模式中，超级管理员可以让 LLM 调用 `workspace` 工具切换当前 Session 的共享工作目录。切换后，`read_file`、`edit_file`、`send_file` 和前台 `shell` 等路径类工具会基于该目录解析相对路径，避免每次都传完整路径。

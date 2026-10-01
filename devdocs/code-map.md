@@ -65,7 +65,8 @@ rg -n "ELBOT_CONFIG_FILE|providers.toml|state.toml|tool_tags.toml|TextHandler|au
 - `internal/agent/ratelimit.go`、`internal/ops/ratelimit/ratelimit.go`：用户级/群级令牌桶叠加；阈值和拒绝原因进入 `/metrics.rate_limit`。
 - `internal/processenv/environment.go`：Shell / Go Skill 子进程凭据变量过滤。
 - `deploy/elbot-watchdog.sh`、`deploy/restore-verify.sh`、`deploy/backup.sh`：阈值/冷却/诊断脱敏、重启原因文件、sha256 备份清单和隔离恢复验证。
-- `deploy/upgrade.sh`、`deploy/rollback.sh`：配置兼容性检查、上一版镜像/数据快照与回滚。
+- `deploy/upgrade.sh`、`deploy/rollback.sh`：配置兼容性检查、源码版本守卫、上一版镜像/数据快照、重建后健康检查与 `doctor` 验收、回滚。
+- `internal/health/redact.go`、`deploy/tests/watchdog_redaction_test.sh`：健康快照错误文本的凭据脱敏，以及诊断包脱敏的 fixture 自测。
 
 常用搜索：
 

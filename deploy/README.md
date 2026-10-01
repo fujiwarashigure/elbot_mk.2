@@ -487,7 +487,7 @@ systemctl reload elbot-compose      # 重新 up -d
 `deploy/elbot-watchdog.sh` 只依据独立 `/live` 判断进程是否还能响应，不会因为 CPU 高、模型 API 暂时失败、平台重连或队列瞬时堆积就杀进程：
 
 1. `curl /live` 连续失败达到 `WATCHDOG_FAILURE_THRESHOLD` 次才开始处置；
-2. 重启前收集容器 State/Ports、logs/stats、`/live`、`/ready`、`/healthz`、磁盘和 data 大小到 `diagnostics/`；诊断输出会过滤 `docker inspect` 的完整环境变量并做通用凭据脱敏；
+2. 重启前收集容器 State/Ports、logs/stats、`/live`、`/ready`、`/healthz`、磁盘和 data 大小到 `diagnostics/`；诊断输出会过滤 `docker inspect` 的完整环境变量，并用一组规则（`sk-` / `Bearer` / `api_key=` / JSON 凭据 / Telegram bot token / URL userinfo）逐文件脱敏，然后再复检一遍；脱敏或复检失败会写 `REDACTION-FAILED` 标记、打日志并推送 `diagnostics_unredacted` 告警，该诊断包在确认前不要外发；
 3. 启用 `WATCHDOG_COOLDOWN_SECONDS` 冷却时间；
 4. 在 `WATCHDOG_WINDOW_SECONDS` 内最多自动重启 `WATCHDOG_MAX_RESTARTS` 次；
 5. 超过上限后写入 `watchdog-state/paused` 并停止自动重启，保留现场，等待人工处理。
@@ -503,7 +503,7 @@ systemctl daemon-reload
 systemctl enable --now elbot-watchdog.timer
 ```
 
-配置 `/ready` 长期失败、模型 API `degraded` 等状态不会触发 watchdog 重启；它们只用于告警和排障。若启用了 `ELBOT_OPS_TOKEN`，在 `watchdog.env` 中把同一个值写入 `WATCHDOG_OPS_TOKEN`，否则 `/tasks`、`/metrics` 诊断会收到 401。需要临时暂停自动重启时：
+watchdog 的重启决策只看 `/live`：调度心跳过期、平台掉线、模型 `degraded` 都不会触发重启（否则模型 API 抖动就会变成重启风暴）。这类"进程活着但不可用"的情况靠告警和 `/diagnostics` 人工判断：配置 `WATCHDOG_WEBHOOK_URL` 后，`/ready` 连续失败达到 `WATCHDOG_READY_ALERT_THRESHOLD`（默认 3）会推送一次 `not_ready` 告警，`WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`（默认 3600 秒）内不重复推送，并且**永远不会**因此重启。若启用了 `ELBOT_OPS_TOKEN`，在 `watchdog.env` 中把同一个值写入 `WATCHDOG_OPS_TOKEN`，否则 `/tasks`、`/metrics` 诊断会收到 401。需要临时暂停自动重启时：
 
 ```bash
 touch /opt/elbot/deploy/watchdog-state/paused
@@ -511,7 +511,17 @@ touch /opt/elbot/deploy/watchdog-state/paused
 rm -f /opt/elbot/deploy/watchdog-state/paused
 ```
 
-`WATCHDOG_WEBHOOK_URL` 可用于把 `restarted` / `paused` / `restart_failed` 事件推送到现有告警系统。
+`WATCHDOG_WEBHOOK_URL` 可用于把 `restarted` / `paused` / `restart_failed` / `not_ready` / `diagnostics_unredacted` 事件推送到现有告警系统。
+
+诊断包脱敏可以单独执行，也可以自测：
+
+```bash
+# 对已有诊断目录重新脱敏 + 复检（返回非 0 表示仍可能含凭据）
+bash /opt/elbot/deploy/elbot-watchdog.sh --redact-dir /opt/elbot/deploy/diagnostics/20261001-120000
+
+# fixture 自测：假 API Key / Bearer / JSON 凭据 / Telegram token 必须全部被替换
+bash /opt/elbot/deploy/tests/watchdog_redaction_test.sh
+```
 
 ### 6.2 任务超时、并发上限与实时指标
 
@@ -527,7 +537,9 @@ rm -f /opt/elbot/deploy/watchdog-state/paused
 
 ## 7. 备份与恢复
 
-`deploy/backup.sh` 默认执行**一致性备份**，备份到 `deploy/backups/`，默认保留 14 份；备份完成后会生成 `*.manifest` 文件级 sha256 清单，并在隔离临时目录执行恢复验证，确认 SQLite、配置、角色素材和本地媒体可一起读取：
+`deploy/backup.sh` 默认执行**一致性备份**，备份到 `deploy/backups/`，默认保留 14 份；备份完成后会生成 `*.manifest` 文件级 sha256 清单，并在隔离临时目录执行恢复验证，确认 SQLite、配置、角色素材和本地媒体可一起读取。
+
+清单是从**打包好的归档内容**里解压出来算的（不是从仍在变化的 `data/`），并且覆盖归档内所有 `data/` 文件；清单生成失败会直接判定这次备份失败，不会打印"完成"。所有 `docker compose` 调用都显式带 `-f <compose 文件>` 并在 `deploy/` 下执行，所以从 cron 或任意目录调用都不会命中别的 Compose 项目；Compose 文件路径可用 `ELBOT_COMPOSE_FILE` 覆盖。
 
 - 宿主机有 `sqlite3`：对 SQLite 数据库（`*.db` / `*.sqlite` / `*.sqlite3`）执行 `.backup`，其余文件归档，不中断服务；
 - 没有 `sqlite3`：短暂停止 Compose 容器，打包完成后自动 `up -d`；
@@ -560,10 +572,24 @@ bash /opt/elbot/deploy/backup.sh >/dev/null 2>&1
 
 ### 7.1 恢复演练（建议至少做一次）
 
-`deploy/restore-verify.sh` 会自动完成解压、SQLite 完整性、配置、角色素材和本地媒体引用检查；也可以手动执行：
+`deploy/restore-verify.sh` 默认是**严格模式**，只有全部检查通过才会输出 `restore_verify: passed`；任何一项缺失或失败都会直接失败（`backup.sh` 因此把备份判定为失败）。严格模式要求：
+
+- 存在非空的 `*.manifest`，且宿主机有 `sha256sum`，对归档内所有文件做 `sha256sum -c`；
+- 宿主机有 `sqlite3`，对每个数据库执行 `PRAGMA integrity_check` 并确认表结构存在；
+- `app.toml`、`providers.toml` 存在且非空（`state.toml` 可选）；若 `python3` 带 `tomllib`，还会真正解析所有 `*.toml`；
+- SQLite 中 `backend='local'` 的媒体按 `/data/... -> data/...` 精确路径核对文件是否存在。
+
+缺依赖或只想看归档内容时，可以显式降级（会打印 warning，输出改为 `manifest=skipped`）：
 
 ```bash
+RESTORE_VERIFY_STRICT=0 bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.tar.gz
 bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.tar.gz
+```
+
+备份链路可以用 fixture 自测（需要 `sqlite3`；会覆盖 manifest 一致性、缺 manifest、manifest 被篡改、媒体丢失、缺必需配置、TOML 语法错误这些情况）：
+
+```bash
+bash /opt/elbot/deploy/tests/backup_restore_test.sh
 ```
 
 手工恢复步骤如下：
@@ -620,6 +646,18 @@ bash upgrade.sh
 
 # 回滚：校验数据快照 -> 载入上一版镜像 -> 恢复 data -> 重建
 bash rollback.sh
+```
+
+`upgrade.sh` 只从**当前工作区**构建镜像，不会自动切换代码，所以它有两条硬性保护：
+
+- `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免"只给旧代码贴新版本号"；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
+- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.2 bash upgrade.sh`），脚本会 `git fetch --tags` + `checkout --detach` 后再校验一次版本。
+
+重建之后 `upgrade.sh` 会等待容器 healthcheck 变成 `healthy`，再在容器内执行 `elbot doctor --no-model` 作为验收；任一步失败都会提示回滚命令并以非 0 退出。需要跳过或加严：
+
+```bash
+ELBOT_UPGRADE_SKIP_DOCTOR=1 bash upgrade.sh   # 跳过 doctor，仅等健康检查
+ELBOT_UPGRADE_E2E=1 bash upgrade.sh           # 额外做一次真实消息往返（需要 CLI 远程服务端）
 ```
 
 `upgrade.sh` 会把回滚所需信息写入 `deploy/rollback/rollback.env`，包括上一版镜像 tar、数据快照路径和版本信息。回滚前仍会调用 `restore-verify.sh` 校验数据快照；如果要跳过交互确认可使用 `ROLLBACK_CONFIRM=1 bash rollback.sh`。

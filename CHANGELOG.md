@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- 修复 `deploy/elbot-watchdog.sh` 的 `redact_diagnostics()`：原先 sed 参数里混入了字面量 `\n` 和控制字节，导致 sed 每次都以 `can't read n` 失败（又被 `|| true` 吞掉），而 `Bearer` / `api_key=` 规则本该写反向引用 `\1` 的地方写成了 0x01 控制字符（脱敏输出会被污染）。现在改为逐文件执行同一组规则，并把 JSON 形式凭据、Telegram bot token、URL userinfo 一并纳入脱敏；新增第二遍复检，脱敏失败会写 `REDACTION-FAILED`、告警并返回非 0，同时提供 `--redact-dir` 手动重脱敏入口和 `deploy/tests/watchdog_redaction_test.sh` 自测。
+- 修复 `deploy/backup.sh` 的 `write_manifest()`：同样的字面量 `\n` 会破坏 `find | xargs sha256sum` 流水线且错误被吞；清单现在从**打包好的归档**解压后生成、覆盖归档内全部 `data/` 文件，生成失败直接判定本次备份失败。
+- `deploy/backup.sh` 的 `docker compose ps/stop/up` 现在显式带 `-f <compose 文件>` 并在 `deploy/` 下执行（可用 `ELBOT_COMPOSE_FILE` 覆盖）；从 cron 或任意目录调用不会再命中别的 Compose 项目，也不会把运行中的数据当成冷数据打包。
+- `deploy/restore-verify.sh` 默认改为严格模式：manifest + sha256sum、SQLite integrity_check 与表结构、`app.toml` / `providers.toml`、TOML 解析（宿主有带 tomllib 的 python3 时）、本地媒体精确路径必须逐项通过，缺依赖或任一失败都不再输出 `passed`；需要降级时用 `RESTORE_VERIFY_STRICT=0`。本地媒体校验从"按文件名查找"改为 `/data/... -> data/...` 精确路径，SQL 查询失败不再回退成 0。
+- `deploy/upgrade.sh` 增加版本守卫：目标版本与 `deploy/VERSION` 不一致时拒绝执行，避免"只给当前代码贴新版本号"；需要自动切源码时可用 `ELBOT_GIT_REF=vX.Y.Z`。重建后新增健康检查等待与 `elbot doctor --no-model` 验收，失败即提示回滚命令并以非 0 退出。
+- 平台 / 模型的 `last_error` 与最近重启原因在写入健康快照前先做凭据脱敏，避免上游错误里的 token（例如 Telegram bot token 直接出现在请求 URL 中）通过 `/healthz`、`/metrics`、`/diagnostics` 泄露。
+
+### Changed
+
+- `deploy/watchdog.env.example` 新增 `WATCHDOG_READY_ALERT_THRESHOLD` / `WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`：`/live` 正常但 `/ready` 连续失败时只推送一次 `not_ready` 告警（需要配置 webhook），仍然不作为重启条件；watchdog 的重启决策继续只依据 `/live`。
+
 
 ## [v0.6.1 - 2026-10-01]
 

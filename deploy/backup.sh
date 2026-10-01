@@ -25,6 +25,7 @@ TARGET=""
 STAGE=""
 STOPPED=0
 COMPOSE=()
+COMPOSE_FILE="${ELBOT_COMPOSE_FILE:-${DEPLOY_DIR}/docker-compose.yml}"
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -34,8 +35,8 @@ cleanup() {
     local status=$?
     if [ "${STOPPED}" -eq 1 ]; then
         log "恢复 ElBot 容器"
-        if ! "${COMPOSE[@]}" up -d --remove-orphans >/dev/null 2>&1; then
-            warn "容器恢复失败，请手动执行：cd ${DEPLOY_DIR} && ${COMPOSE[*]} up -d --remove-orphans"
+        if ! compose up -d --remove-orphans >/dev/null 2>&1; then
+            warn "容器恢复失败，请手动执行：cd ${DEPLOY_DIR} && ${COMPOSE[*]} -f ${COMPOSE_FILE} up -d --remove-orphans"
         fi
     fi
     if [ -n "${STAGE}" ] && [ -d "${STAGE}" ]; then
@@ -57,20 +58,41 @@ detect_compose() {
     return 1
 }
 
+# 始终用显式 compose 文件、并在部署目录下执行，避免脚本从 cron 或
+# 其他目录被调用时命中另一个 Compose 项目或丢失 .env。
+compose() {
+    ( cd "${DEPLOY_DIR}" && "${COMPOSE[@]}" -f "${COMPOSE_FILE}" "$@" )
+}
+
 write_manifest() {
-    local target="$1" manifest="$2"
-    [ -f "${target}" ] || return 0
-    : >"${manifest}"
+    local archive="$1" manifest="$2"
+    [ -f "${archive}" ] || return 0
     if ! command -v sha256sum >/dev/null 2>&1; then
-        warn "未找到 sha256sum，跳过备份清单生成"
-        return 0
+        warn "未找到 sha256sum，无法生成备份清单"
+        return 1
     fi
-    if [ -d "${DATA_DIR}" ]; then
-        (
-            cd "${DATA_DIR}" || exit 1
-            find config/elbot/characters elbot/media -type f -print0 2>/dev/null \n                | xargs -0 -r sha256sum 2>/dev/null \n                | sed 's#  #  data/#'
-        ) >>"${manifest}" || true
+    # 清单必须从归档内容本身生成，而不是从仍在变化的生产 data 目录生成，
+    # 否则清单和归档可能对不上。这里解压到临时目录后再计算 sha256。
+    local stage tmp count
+    stage="$(mktemp -d "${BACKUP_DIR}/.elbot-manifest-XXXXXX")" || return 1
+    if ! tar -xzf "${archive}" -C "${stage}" 2>/dev/null; then
+        warn "无法解压备份以生成清单：${archive}"
+        rm -rf "${stage}"
+        return 1
     fi
+    tmp="${manifest}.tmp"
+    if ! ( cd "${stage}" && find data -type f -print0 | xargs -0 -r sha256sum ) >"${tmp}" 2>/dev/null; then
+        warn "生成备份清单失败：${archive}"
+        rm -rf "${stage}" "${tmp}"
+        return 1
+    fi
+    mv -f "${tmp}" "${manifest}"
+    count="$(wc -l <"${manifest}" | tr -d ' ')"
+    rm -rf "${stage}"
+    if [ "${count}" -eq 0 ]; then
+        warn "备份清单为空，归档里没有任何数据文件：${archive}"
+    fi
+    log "备份清单：${manifest}（${count} 个文件）"
 }
 
 prune_old_backups() {
@@ -133,11 +155,11 @@ if [ "${MODE}" = "sqlite" ]; then
     log "打包 ${TARGET}"
     tar -czf "${TARGET}" -C "${STAGE}" data
 elif [ "${MODE}" = "stop" ]; then
-    if detect_compose && [ -f "${DEPLOY_DIR}/docker-compose.yml" ]; then
-        container_id="$("${COMPOSE[@]}" ps -q elbot 2>/dev/null || true)"
+    if detect_compose && [ -f "${COMPOSE_FILE}" ]; then
+        container_id="$(compose ps -q elbot 2>/dev/null || true)"
         if [ -n "${container_id}" ]; then
             log "短暂停止 ElBot 容器，确保 SQLite WAL 一致"
-            if "${COMPOSE[@]}" stop elbot; then
+            if compose stop elbot; then
                 STOPPED=1
             else
                 warn "停止容器失败，改用热打包"
@@ -167,8 +189,9 @@ if [ -z "${TARGET}" ] || [ ! -f "${TARGET}" ]; then
     die "未生成备份文件"
 fi
 MANIFEST="${TARGET}.manifest"
-write_manifest "${TARGET}" "${MANIFEST}"
-log "备份清单：${MANIFEST}"
+if ! write_manifest "${TARGET}" "${MANIFEST}"; then
+    die "备份清单生成失败，已中止：${TARGET}"
+fi
 
 if [ "${VERIFY}" = "1" ]; then
     if [ -f "${DEPLOY_DIR}/restore-verify.sh" ]; then

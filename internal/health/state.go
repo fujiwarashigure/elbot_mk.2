@@ -267,7 +267,7 @@ func (s *State) MarkPlatformDisconnected(name string, err error) {
 	status.Connected = false
 	status.LastDisconnectedAt = &now
 	if err != nil {
-		status.LastError = err.Error()
+		status.LastError = RedactSecrets(err.Error())
 	}
 	s.platforms[name] = status
 }
@@ -291,7 +291,7 @@ func (s *State) RecordModelError(provider string, err error) {
 	status.Provider = provider
 	status.Status = "degraded"
 	if err != nil {
-		status.LastError = err.Error()
+		status.LastError = RedactSecrets(err.Error())
 	}
 	status.LastFailureAt = &now
 	s.models[provider] = status
@@ -304,7 +304,7 @@ func (s *State) SetLastRestartReason(reason string) {
 		return
 	}
 	s.mu.Lock()
-	s.lastRestartReason = strings.TrimSpace(reason)
+	s.lastRestartReason = RedactSecrets(reason)
 	s.mu.Unlock()
 }
 

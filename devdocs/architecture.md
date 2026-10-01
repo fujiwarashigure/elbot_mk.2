@@ -61,8 +61,11 @@ rg -n "locator:tool-flow" devdocs/architecture.md
 - `/tasks` 返回活跃请求、`pending_by_kind`、`queued_by_kind` 和累计超时数；`/metrics` 返回任务/资源/平台/模型状态、Provider 熔断状态、限速阈值和拒绝原因、生图队列等。
 - `/diagnostics` 是面向排障的聚合视图：排队/超时、限速命中、熔断状态和最近一次重启原因。watchdog 会把重启/暂停原因写入 `data/run/elbot/last_restart_reason`，进程启动时读取并写入 health snapshot。
 - 配置 `ELBOT_OPS_TOKEN` 后，extra handlers 需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token`；健康三接口保持无鉴权但只应监听回环或可信内网。
+- 平台 / 模型的 `last_error` 和最近重启原因在写入 `State` 前会经过 `health.RedactSecrets`（URL、`sk-`、Bearer、`key=value` / JSON 凭据、Telegram bot token），避免上游错误里的 token 随 `/healthz`、`/metrics`、`/diagnostics` 外泄；这是第二道防线，不替代接口访问控制。
 - `elbot doctor` 是部署验收命令：第一阶段检查配置、存储目录、健康端口、平台状态和模型调用（`config_ok`）；加 `--e2e` 后通过 CLI 远程 WebSocket 完成一次真实消息往返（`e2e_ok`）。
-- `deploy/upgrade.sh` 升级前做配置检查、数据快照和上一版镜像快照；`deploy/rollback.sh` 先用 `restore-verify.sh` 校验数据快照，再恢复 data 和镜像。
+- `deploy/upgrade.sh` 升级前做配置检查、数据快照和上一版镜像快照，并用 `deploy/VERSION` 守卫源码版本（`ELBOT_GIT_REF` 可自动切标签）；重建后等待 healthcheck 并通过 `elbot doctor` 验收才判定成功。`deploy/rollback.sh` 先用 `restore-verify.sh` 校验数据快照，再恢复 data 和镜像。
+- `deploy/backup.sh` 的清单从归档内容生成；`deploy/restore-verify.sh` 默认严格模式（manifest + sha256、sqlite3 integrity_check + 表结构、必需配置与 TOML 解析、本地媒体精确路径），`RESTORE_VERIFY_STRICT=0` 才降级。
+- `deploy/elbot-watchdog.sh` 只依据 `/live` 决定重启；`/ready` 连续失败只发 `not_ready` 告警（需 webhook）。诊断包按 `REDACT_SED` 规则逐文件脱敏并复检，失败写 `REDACTION-FAILED`；`--redact-dir` 可单独重脱敏，`deploy/tests/watchdog_redaction_test.sh` 是 fixture 自测。
 
 Provider 熔断与备用：
 

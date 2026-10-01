@@ -34,6 +34,20 @@ detect_compose() {
 detect_compose || die "未找到 Docker Compose"
 mkdir -p "${ROLLBACK_DIR}"
 
+# 需要时先切换到目标源码标签，再校验源码版本，避免“只改版本号、不换代码”。
+if [ -n "${ELBOT_GIT_REF:-}" ]; then
+    command -v git >/dev/null 2>&1 || die "设置了 ELBOT_GIT_REF，但未找到 git"
+    [ -d "${DEPLOY_DIR}/.git" ] || die "设置了 ELBOT_GIT_REF，但 ${DEPLOY_DIR} 不是 git 工作区"
+    log "切换源码到 ${ELBOT_GIT_REF}"
+    git -C "${DEPLOY_DIR}" fetch --tags --force || die "git fetch 失败"
+    git -C "${DEPLOY_DIR}" checkout --detach "${ELBOT_GIT_REF}" || die "git checkout ${ELBOT_GIT_REF} 失败"
+fi
+
+SOURCE_VERSION="$(tr -d '[:space:]' <"${DEPLOY_DIR}/VERSION")"
+if [ "${NEW_VERSION}" != "${SOURCE_VERSION}" ] && [ "${ELBOT_ALLOW_VERSION_MISMATCH:-0}" != "1" ]; then
+    die "目标版本 ${NEW_VERSION} 与当前源码 deploy/VERSION=${SOURCE_VERSION} 不一致：本脚本只构建当前工作区的代码，不会自动切换。请先 git fetch --tags && git checkout v${NEW_VERSION}（或设置 ELBOT_GIT_REF=v${NEW_VERSION}）；确实只想改版本号时设置 ELBOT_ALLOW_VERSION_MISMATCH=1。"
+fi
+
 container_id="$("${COMPOSE[@]}" -f "${DEPLOY_DIR}/docker-compose.yml" ps -q "${SERVICE}" 2>/dev/null || true)"
 if [ -z "${container_id}" ]; then
     die "未发现运行中的 ${SERVICE} 容器；请先启动一次，或使用 docker compose up -d 后重试"
@@ -45,7 +59,7 @@ if [ -z "${current_image}" ]; then
 fi
 
 log "当前镜像：${current_image}"
-log "新镜像：${IMAGE_TAG}"
+log "新镜像：${IMAGE_TAG}（源码版本 ${SOURCE_VERSION}）"
 
 log "升级前配置检查"
 "${COMPOSE[@]}" -f "${DEPLOY_DIR}/docker-compose.yml" exec -T "${SERVICE}" elbot config check
@@ -85,4 +99,51 @@ log "重建 ${SERVICE}"
 ELBOT_VERSION="${NEW_VERSION}" ELBOT_IMAGE="${IMAGE_TAG}" \
     "${COMPOSE[@]}" -f "${DEPLOY_DIR}/docker-compose.yml" up -d --force-recreate "${SERVICE}"
 
-log "升级完成。回滚命令：bash ${DEPLOY_DIR}/rollback.sh"
+rollback_hint() {
+    warn "如需回滚：bash ${DEPLOY_DIR}/rollback.sh"
+}
+
+service_health() {
+    local cid
+    cid="$("${COMPOSE[@]}" -f "${DEPLOY_DIR}/docker-compose.yml" ps -q "${SERVICE}" 2>/dev/null || true)"
+    [ -n "${cid}" ] || return 1
+    docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${cid}" 2>/dev/null
+}
+
+log "等待 ${SERVICE} 通过健康检查"
+status=""
+healthy=0
+for _ in $(seq 1 40); do
+    status="$(service_health || true)"
+    if [ "${status}" = "healthy" ]; then
+        healthy=1
+        break
+    fi
+    if [ "${status}" = "unhealthy" ] || [ "${status}" = "exited" ]; then
+        break
+    fi
+    sleep 3
+done
+if [ "${healthy}" -ne 1 ]; then
+    warn "升级后 ${SERVICE} 未通过健康检查（最后状态：${status:-unknown}）"
+    rollback_hint
+    exit 1
+fi
+log "${SERVICE} 健康检查通过"
+
+if [ "${ELBOT_UPGRADE_SKIP_DOCTOR:-0}" != "1" ]; then
+    doctor_args=(--no-model)
+    if [ "${ELBOT_UPGRADE_E2E:-0}" = "1" ]; then
+        doctor_args=(--e2e)
+    fi
+    log "运行部署验收：elbot doctor ${doctor_args[*]}"
+    if ! "${COMPOSE[@]}" -f "${DEPLOY_DIR}/docker-compose.yml" exec -T "${SERVICE}" elbot doctor "${doctor_args[@]}"; then
+        warn "升级后验收失败"
+        rollback_hint
+        exit 1
+    fi
+else
+    warn "ELBOT_UPGRADE_SKIP_DOCTOR=1，跳过升级后 doctor 验收"
+fi
+
+log "升级完成并通过验收。回滚命令：bash ${DEPLOY_DIR}/rollback.sh"

@@ -22,8 +22,8 @@ DRY_RUN="${WATCHDOG_DRY_RUN:-0}"
 WEBHOOK_URL="${WATCHDOG_WEBHOOK_URL:-}"
 OPS_TOKEN="${WATCHDOG_OPS_TOKEN:-}"
 RESTART_REASON_FILE="${WATCHDOG_RESTART_REASON_FILE:-${COMPOSE_DIR}/data/run/elbot/last_restart_reason}"
-
-mkdir -p "${STATE_DIR}" "${DIAG_DIR}"
+READY_ALERT_THRESHOLD="${WATCHDOG_READY_ALERT_THRESHOLD:-3}"
+READY_ALERT_COOLDOWN_SECONDS="${WATCHDOG_READY_ALERT_COOLDOWN_SECONDS:-3600}"
 
 log()  { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
 warn() { printf '[%s] WARN: %s\n' "$(date '+%F %T')" "$*" >&2; }
@@ -52,14 +52,80 @@ send_webhook() {
         warn "webhook delivery failed for event ${event}"
 }
 
+REDACT_SED=(
+    -e 's/(sk-[A-Za-z0-9_-]{8,})/[REDACTED]/g'
+    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]{6,}/\1[REDACTED]/Ig'
+    -e 's/((api[_-]?key|token|secret|password)"?[[:space:]]*[=:][[:space:]]*)"[^"]*"/\1[REDACTED]/Ig'
+    -e 's/((api[_-]?key|token|secret|password)"?[[:space:]]*[=:][[:space:]]*)[^[:space:],"]+/\1[REDACTED]/Ig'
+    -e 's#(https?://[^/[:space:]]+/bot)[0-9]+:[A-Za-z0-9_-]+#\1[REDACTED]#g'
+    -e 's#(https?://)[^/[:space:]:@]+:[^/[:space:]@]+@#\1[REDACTED]@#g'
+)
+
+# 逐个文件内联脱敏。这里刻意不再用 xargs 拼接 sed 参数，也不再用
+# `|| true` 吞掉错误：任何一次失败都通过返回值暴露给调用方。
 redact_diagnostics() {
     local dir="$1"
     [ -d "${dir}" ] || return 0
     if ! command -v sed >/dev/null 2>&1; then
+        warn "未找到 sed，诊断包未脱敏：${dir}"
+        return 1
+    fi
+    local failed=0 file
+    while IFS= read -r -d '' file; do
+        if ! sed -i -E "${REDACT_SED[@]}" "${file}" 2>/dev/null; then
+            warn "脱敏失败：${file}"
+            failed=1
+        fi
+    done < <(find "${dir}" -type f -print0 2>/dev/null)
+    return "${failed}"
+}
+
+# 复检：对已脱敏文件再跑一次同样的规则。如果内容仍会变化，说明第一遍
+# 没有覆盖全部凭据，capture_diagnostics 会据此显式告警并打标记。
+verify_redaction() {
+    local dir="$1"
+    [ -d "${dir}" ] || return 0
+    command -v sed >/dev/null 2>&1 || return 1
+    local failed=0 file snapshot
+    snapshot="$(mktemp 2>/dev/null)" || return 0
+    while IFS= read -r -d '' file; do
+        cp -f "${file}" "${snapshot}" 2>/dev/null || continue
+        sed -i -E "${REDACT_SED[@]}" "${file}" 2>/dev/null || true
+        if ! cmp -s "${snapshot}" "${file}"; then
+            warn "脱敏复检未通过，仍可能包含凭据：${file}"
+            failed=1
+        fi
+    done < <(find "${dir}" -type f -print0 2>/dev/null)
+    rm -f "${snapshot}"
+    return "${failed}"
+}
+
+# /live 正常、只有 /ready 持续失败时只告警、不重启：这种"进程活着但初始化
+# 或调度有问题"的情况直接重启容易演变成重启风暴，交给人判断更稳。
+alert_if_not_ready() {
+    [ -n "${WEBHOOK_URL}" ] || return 0
+    if curl -fsS --max-time 5 "${READY_URL}" >/dev/null 2>&1; then
+        if [ "$(read_int ready_failures 0)" -gt 0 ]; then
+            log "readiness recovered"
+        fi
+        write_int ready_failures 0
         return 0
     fi
-    # 诊断包可能包含上游错误或日志片段；再做一层通用凭据脱敏。
-    find "${dir}" -type f -print0 2>/dev/null | xargs -0 -r sed -i -E \n        -e 's/(sk-[A-Za-z0-9_-]{8,})/[REDACTED]/g' \n        -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]+/[REDACTED]/Ig' \n        -e 's/((api[_-]?key|token|secret|password)[[:space:]]*[=:][[:space:]]*)([^[:space:]]+)/[REDACTED]/Ig' \n        2>/dev/null || true
+    local fails now last
+    fails="$(read_int ready_failures 0)"
+    fails=$((fails + 1))
+    write_int ready_failures "${fails}"
+    [ "${fails}" -ge "${READY_ALERT_THRESHOLD}" ] || return 0
+    now="$(date +%s)"
+    last="$(read_int last_ready_alert_epoch 0)"
+    if [ "${last}" -gt 0 ] && [ $((now - last)) -lt "${READY_ALERT_COOLDOWN_SECONDS}" ]; then
+        return 0
+    fi
+    write_int last_ready_alert_epoch "${now}"
+    printf '%s\n' "$(date -Is) not_ready: ${fails} consecutive failures of ${READY_URL}" >>"$(state_file ready_alerts.log)"
+    send_webhook "not_ready" "${SERVICE} is live but not ready (${fails} consecutive failures of ${READY_URL})"
+    warn "readiness alert sent after ${fails} failed checks of ${READY_URL}"
+    return 0
 }
 
 capture_diagnostics() {
@@ -95,7 +161,18 @@ capture_diagnostics() {
         docker logs --tail 500 "${SERVICE}" >"${dir}/docker-logs.txt" 2>&1 || true
         docker stats --no-stream "${SERVICE}" >"${dir}/docker-stats.txt" 2>&1 || true
     fi
-    redact_diagnostics "${dir}"
+    local redaction_failed=0
+    if ! redact_diagnostics "${dir}"; then
+        warn "诊断包脱敏出错：${dir}"
+        redaction_failed=1
+    fi
+    if [ "${redaction_failed}" -eq 1 ] || ! verify_redaction "${dir}"; then
+        warn "诊断包可能仍包含凭据，请勿外发：${dir}"
+        printf '%s\n' "redaction_failed_at=$(date -Is)" >>"${dir}/summary.txt" 2>/dev/null || true
+        : >"${dir}/REDACTION-FAILED" 2>/dev/null || true
+        chmod 700 "${dir}" 2>/dev/null || true
+        send_webhook "diagnostics_unredacted" "diagnostics redaction failed: ${dir}"
+    fi
     df -h >"${dir}/disk.txt" 2>&1 || true
     if [ -d "${COMPOSE_DIR}/data" ]; then
         du -sh "${COMPOSE_DIR}/data" >"${dir}/data-size.txt" 2>&1 || true
@@ -105,6 +182,28 @@ capture_diagnostics() {
         | sort -nr | tail -n +31 | awk '{print $2}' | xargs -r rm -rf
     printf '%s\n' "${dir}"
 }
+
+# 单独对已有诊断目录做脱敏 + 复检（供运维手动执行，也用于自测）。
+case "${1:-}" in
+    --redact-dir)
+        target="${2:-}"
+        if [ -z "${target}" ] || [ ! -d "${target}" ]; then
+            printf '用法：%s --redact-dir <目录>\n' "$0" >&2
+            exit 2
+        fi
+        rc=0
+        redact_diagnostics "${target}" || rc=1
+        verify_redaction "${target}" || rc=1
+        if [ "${rc}" -eq 0 ]; then
+            log "诊断目录脱敏通过：${target}"
+        else
+            warn "诊断目录脱敏未通过：${target}"
+        fi
+        exit "${rc}"
+        ;;
+esac
+
+mkdir -p "${STATE_DIR}" "${DIAG_DIR}"
 
 detect_compose() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -129,6 +228,7 @@ if curl -fsS --max-time 5 "${HEALTH_URL}" >/dev/null 2>&1; then
         log "health recovered after ${fails} consecutive failure(s)"
     fi
     write_int consecutive_failures 0
+    alert_if_not_ready || true
     exit 0
 fi
 

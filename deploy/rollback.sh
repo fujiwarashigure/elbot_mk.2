@@ -52,7 +52,10 @@ if [ "${ROLLBACK_CONFIRM:-0}" != "1" ]; then
 fi
 
 log "验证数据快照"
-bash "${DEPLOY_DIR}/restore-verify.sh" "${ROLLBACK_DATA_BACKUP}"
+if ! bash "${DEPLOY_DIR}/restore-verify.sh" "${ROLLBACK_DATA_BACKUP}"; then
+    warn "数据快照验证失败；如果这是 0.6.1 之前生成、没有 .manifest 的旧备份，可用 RESTORE_VERIFY_STRICT=0 重试"
+    exit 1
+fi
 
 log "停止 ${SERVICE}"
 "${COMPOSE[@]}" -f "${DEPLOY_DIR}/docker-compose.yml" stop "${SERVICE}" >/dev/null
