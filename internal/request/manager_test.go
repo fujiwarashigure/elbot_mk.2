@@ -272,6 +272,25 @@ func TestManagerQueueContextCancel(t *testing.T) {
 	done()
 }
 
+func TestManagerSnapshotCountsTimeouts(t *testing.T) {
+	m := NewManager(10 * time.Millisecond)
+	_, ctx, _, err := m.Start(context.Background(), StartRequest{Kind: KindLLM})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-ctx.Done()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if got := m.Snapshot().Timeouts; got == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeouts = %d, want 1", m.Snapshot().Timeouts)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func assertCanceled(t *testing.T, ctx context.Context) {
 	t.Helper()
 	select {

@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 
+## [v0.6.1 - 2026-10-01]
+
+### Fixed
+
+- 修复未启用任何平台时只在启动阶段发送一次心跳，导致约 90 秒后 `/live` 过期、watchdog 可能反复重启的问题；空平台模式现在持续发送调度心跳。
+- `/live` 改为只表示进程仍在运行；`/ready` 不再因为平台未连接或模型 API 故障而失败，平台和模型状态改由 `/healthz` 的 `degraded` 与状态数组单独展示。调度心跳是否新鲜会作为 `/ready` 的独立检查项。
+- 群聊限速从“只命中群级或用户级中的一个”改为先检查用户额度、再检查群级总额度：单个活跃成员无法再耗尽全群配额，群级配额也仍然保护整体资源。
+- 新增 `/metrics.rate_limit` 的配置阈值、用户/群级拒绝计数、最近一次限速原因与时间，便于区分“个人刷屏”和“全群过热”。
+- 修复诊断包通过 `docker inspect` 写入完整环境变量、可能泄露 Provider API Key / token 的问题；现在只抓容器 State/Ports，并对日志和 JSON 文件做通用凭据脱敏。
+
+### Changed
+
+- Provider 备用策略现在明确区分：默认 `fallback_mode = "circuit"`，仅在熔断打开后切备用；`fallback_mode = "on_error"`（或兼容键 `fallback_on_error = true`）时首个预流式失败请求即可切换。
+- 新增 `fallback_timeout_seconds`，可为单次 Provider 尝试设置总超时，避免一次请求被多个上游重试拖得过长。
+- Shell / Go Skill 等子进程默认不再继承名字含 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`PRIVATE` 的环境变量；Web 搜索、生图和媒体下载等父进程工具仍可读取 `.env` 中的凭据。
+- `/tasks` 和 `/metrics` 支持 `ELBOT_OPS_TOKEN`；非回环监听且未配置 token 时启动日志会明确告警。watchdog 可用 `WATCHDOG_OPS_TOKEN` 携带同一 token。
+- `deploy/backup.sh` 默认在隔离目录调用新增的 `restore-verify.sh`，验证备份中的 SQLite 完整性、配置文件、角色素材目录和本地媒体引用后才视为成功；`BACKUP_VERIFY=0` 可显式跳过。
+- 版本号提升到 `0.6.1`。
+
+### Added
+
+- `/tasks` 新增 `queued_by_kind` 和 `pending_by_kind`，可直接看到受并发上限约束的等待队列与已取得槽位的请求。
+- `provider.FallbackTimeoutSeconds` / `fallback_timeout_seconds` 与 `ProviderConfig.UsesFallbackOnError()` 配置入口。
+- `deploy/restore-verify.sh`：可独立对任意备份执行隔离恢复验证，不接触生产 `data`。
+- `elbot doctor` 部署验收命令：检查配置、健康端口、平台状态、模型调用；加 `--e2e` 后通过 CLI 远程协议做一次真实消息往返，报告区分 `config_ok` 与 `e2e_ok`。
+- 新增 `/diagnostics` 聚合诊断接口；`/tasks` 增加排队/超时计数，健康快照增加最近一次重启原因，`/metrics`/`/diagnostics` 可看到熔断、限速和最近重启信息。
+- 角色素材元数据新增 `version` / `source`，并提供 `Store.Manifest` / `WriteManifest` 清单能力；备份脚本会为角色和媒体文件生成 sha256 清单，恢复时自动 `sha256sum -c` 校验。
+- 新增 `deploy/upgrade.sh` / `deploy/rollback.sh`：升级前做配置检查、数据快照和上一版镜像快照，回滚时先校验数据快照再恢复。
+
+
 ## [v0.6.0 - 2026-10-01]
 
 ### Fixed

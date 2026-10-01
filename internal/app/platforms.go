@@ -162,14 +162,25 @@ func runPlatforms(ctx context.Context, handler platform.PlatformHandler, logger 
 	// 没有任何平台被启用时，wg.Wait() 会立刻返回：如果直接返回 nil，进程会立即
 	// 退出（exit 0）。在 Docker / systemd 下这意味着全新安装的容器会被
 	// restart policy（unless-stopped 对 exit 0 也会重启）反复拉起，health 接口
-	// 也随进程一起消失。因此这里保持存活，等待外部信号。
+	// 也随进程一起消失。因此这里保持存活，等待外部信号，并继续发送调度心跳，
+	// 避免 /ready 与 /healthz 因“未启用平台”而把进程误判为卡死。
 	if len(adapters) == 0 {
 		if logger != nil {
 			logger.WarnContext(runCtx, "no platform is enabled; service stays alive so health endpoints remain available until a platform is configured")
 		}
-		<-ctx.Done()
-		cancel()
-		return ctx.Err()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return ctx.Err()
+			case <-ticker.C:
+				if heartbeat != nil {
+					heartbeat()
+				}
+			}
+		}
 	}
 	done := make(chan struct{})
 	go func() {

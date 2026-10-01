@@ -46,6 +46,37 @@ rg -n "locator:tool-flow" devdocs/architecture.md
 2. `ELBOT_CONFIG_FILE`
 3. 平台配置目录
 
+<!-- locator:health-ops -->
+## 健康状态、限速、熔断与运维接口
+
+健康状态由 `internal/health` 统一维护，语义边界如下：
+
+- `/live` 只由进程存活决定：HTTP 服务可响应且未进入 shutdown 即返回 live；心跳、平台连接和模型健康都不影响该接口。
+- `/ready` 由进程初始化、数据目录/SQLite 目录可写、以及调度心跳“已知且未过期”决定；平台未连接、模型 API 故障不会让 `/ready` 失败。
+- `/healthz` 汇总上述状态；平台或模型异常显示为 `degraded`，调度心跳过期时因 readiness 检查失败返回 `not_ready`；平台与模型状态数组始终保留。
+- `runPlatforms` 无论是否有已启用平台都约每 10 秒发送一次心跳，避免空平台部署被误判为卡死。
+
+运维接口：
+
+- `/tasks` 返回活跃请求、`pending_by_kind`、`queued_by_kind` 和累计超时数；`/metrics` 返回任务/资源/平台/模型状态、Provider 熔断状态、限速阈值和拒绝原因、生图队列等。
+- `/diagnostics` 是面向排障的聚合视图：排队/超时、限速命中、熔断状态和最近一次重启原因。watchdog 会把重启/暂停原因写入 `data/run/elbot/last_restart_reason`，进程启动时读取并写入 health snapshot。
+- 配置 `ELBOT_OPS_TOKEN` 后，extra handlers 需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token`；健康三接口保持无鉴权但只应监听回环或可信内网。
+- `elbot doctor` 是部署验收命令：第一阶段检查配置、存储目录、健康端口、平台状态和模型调用（`config_ok`）；加 `--e2e` 后通过 CLI 远程 WebSocket 完成一次真实消息往返（`e2e_ok`）。
+- `deploy/upgrade.sh` 升级前做配置检查、数据快照和上一版镜像快照；`deploy/rollback.sh` 先用 `restore-verify.sh` 校验数据快照，再恢复 data 和镜像。
+
+Provider 熔断与备用：
+
+- `breakerLLM` 按 Provider 统计失败；默认 `fallback_mode = "circuit"`，仅在熔断打开后切备用 Provider；`fallback_mode = "on_error"`（兼容 `fallback_on_error = true`）对预流式失败立即切换。
+- `fallback_timeout_seconds` 作为单次 Provider 尝试的总超时；已经输出部分流式内容后不重放备用响应。
+- 熔断状态写入 health model status，供 `/healthz` 与 `/metrics` 展示。
+
+限速与子进程环境边界：
+
+- 群聊入站先检查用户级令牌桶，再检查群级令牌桶；超级管理员绕过。拒绝计数和最近原因进入 `/metrics.rate_limit`。
+- Shell / Go Skill 子进程使用进程环境和配置根 `.env` 中的非凭据变量；名字按词段包含 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`PRIVATE` 的变量会被移除。Web 搜索、生图、媒体下载等父进程工具仍使用完整凭据环境。
+
+角色素材在 `character.toml` 中记录 `version` / `source`，图片索引也带版本和来源；`Store.Manifest` / `WriteManifest` 生成 sha256 备份清单，备份脚本会对 `characters/` 和 `media/` 生成 manifest，恢复时校验。临时 `@char:` 指令仍是单轮注入，不写入 Session，回复结束即失效，天然不会串到其他会话。
+
 <!-- locator:agent-chat -->
 ## Agent 对话链路
 

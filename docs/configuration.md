@@ -70,7 +70,7 @@ ElBot 使用以下环境来源：
 1. ElBot 进程环境。
 2. 配置根 `.env`。
 
-Docker Compose 的 `env_file`、`docker run -e`、systemd `EnvironmentFile` 注入的变量都属于 ElBot 进程环境，因此也可能被 Shell / Hook 子进程继承；如果向群聊用户开放工具，不能只依赖“容器不是 root”来保护其中的 API Key。
+Docker Compose 的 `env_file`、`docker run -e`、systemd `EnvironmentFile` 注入的变量都属于 ElBot 进程环境。ElBot 会把名字含独立 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`PRIVATE` 词段的变量从 Shell / Go Skill 子进程环境中移除，但父进程和 Web 搜索、生图、媒体下载等工具仍可读取这些密钥；如果向群聊用户开放工具，不能只依赖“容器不是 root”来保护其中的 API Key。
 
 推荐把真实密钥放在系统环境或配置根 `.env`，不要直接写入 TOML 或提交到仓库。例如：
 
@@ -84,13 +84,14 @@ ELBOT_CLI_LOCAL_TOKEN=your-cli-token
 ELNIS_HOME_TOKEN=your-elnis-token
 ```
 
-配置根 `.env` 中的全部变量还会补充给 LLM Shell，因此只有在信任当前模型及 Shell 权限策略时才应启用相关工具。
+配置根 `.env` 中的变量会作为“凭据环境”提供给 Web 搜索、生图、媒体下载等父进程工具，但不会整体注入 LLM Shell：Shell 与 Go Skill 只继承其中的非凭据变量。
 
 ### Shell 与 Hook 环境
 
 | 进程入口 | 环境来源与优先级 |
 | --- | --- |
-| 内置工具与 Go Skill（含 LLM Shell） | ElBot 进程环境为基础，配置根 `.env` 只补充尚不存在的普通变量。 |
+| 内置工具与 Go Skill（含 LLM Shell） | ElBot 进程环境与配置根 `.env` 的普通变量；名字像密钥的变量会被移除。 |
+| Web 搜索 / 生图 / 媒体下载 | ElBot 进程环境为基础，配置根 `.env` 补充凭据变量。 |
 | 根 Hook 规则 | ElBot 进程环境为基础，`plugins/.env` 覆盖同名普通变量。 |
 | 插件 exec 与 Worker | 根 Hook 环境为基础，插件配置文件同目录的 `.env` 再覆盖同名普通变量。 |
 
@@ -129,17 +130,23 @@ systemd 用户服务没有显式设置 PATH 时，ElBot 使用服务管理器提
 设置 `ELBOT_HEALTH_ADDR`（进程环境或配置根 `.env`）后，ElBot 会启动一个**不依赖 Elnis** 的独立 HTTP 健康接口：
 
 ```dotenv
+# 原生部署默认只监听回环；容器内需要监听 0.0.0.0，宿主机端口仍只映射到 127.0.0.1。
 ELBOT_HEALTH_ADDR=127.0.0.1:32171
 ELBOT_HEALTH_LIVE_STALE_SECONDS=90
+# /tasks 和 /metrics 的访问 token。非回环监听或反代时必须设置。
+# ELBOT_OPS_TOKEN=请替换为随机长字符串
 ```
 
-`ELBOT_HEALTH_LIVE_STALE_SECONDS` 建议明显大于调度心跳间隔；当前实现约每 10 秒更新一次心跳。
+`ELBOT_HEALTH_LIVE_STALE_SECONDS` 建议明显大于调度心跳间隔；当前实现约每 10 秒更新一次心跳，未启用任何平台时也会持续发送心跳。
 
-- `GET /live`：关键调度循环是否仍在推进；watchdog 应只据此判断是否需要重启。
-- `GET /ready`：SQLite / 数据目录是否可写、必要组件是否初始化、已配置平台是否已成功连接过。
-- `GET /healthz`：汇总状态；模型 API 故障显示为 `degraded`，HTTP 仍可能返回 200，不应自动重启本机服务。
+- `GET /live`：只表示进程仍在运行；进程存活时 HTTP 返回 200，不判断模型、平台或调度心跳。
+- `GET /ready`：进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期。平台未连接、模型 API 故障不会让它失败。
+- `GET /healthz`：汇总状态。平台或模型故障显示为 `degraded`；调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。HTTP 状态不应单独作为自动重启依据。
+- `GET /tasks`：活跃任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。
+- `GET /metrics`：任务/资源/平台/模型状态、熔断状态、限速阈值与拒绝计数、生图队列状态。
+- `GET /diagnostics`：面向“机器人没回复”的聚合诊断，包含排队/超时、限速命中、熔断状态和最近一次重启原因。
 
-该接口只应监听容器内部或宿主机回环地址；不要在 Nginx 中暴露到公网。
+`/tasks` 和 `/metrics` 是运维接口。设置 `ELBOT_OPS_TOKEN` 后，请求必须带 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`。该接口只应监听容器内部或宿主机回环地址；不要在 Nginx 中无鉴权暴露到公网。
 
 ## Workspace 工具
 
@@ -626,19 +633,27 @@ circuit_breaker_half_open_max = 1
 ```
 
 - 工具、Hook 和上下文压缩的超时通过 `context` 取消；超时后请求会结束并记录错误，释放并发占用。
-- 用户 / 群聊限速按 `平台 + scope` 维度使用令牌桶；超限时直接提示重试，不进入 LLM 或工具链。超级管理员不受限速影响。
+- 用户 / 群聊限速按 `平台 + scope` 维度使用令牌桶。群聊会**先检查用户级额度，再检查群级总额度**：用户额度防止单个成员刷屏，群级额度保护整个群的资源；任意一项拒绝都会直接提示重试，不进入 LLM 或工具链。超级管理员不受限速影响。
+- `/metrics.rate_limit` 会返回配置阈值、总拒绝数、用户级/群级拒绝数、最近一次拒绝原因和时间。
 - `queue_wait_kinds` 决定哪些请求类型在并发满时允许排队；`turn` 默认不允许排队，队列满或排队超时会明确拒绝。
 - 熔断按 Provider 统计连接失败、首包超时、5xx 和 stream error；连续失败达到阈值后打开，冷却后放少量半开探测。用户取消和整轮 response timeout 不计入熔断。
 
-Provider 可配置备用模型：
+Provider 可配置备用模型与切换时机：
 
 ```toml
 [providers.openai]
 fallback_provider = "deepseek"
 fallback_model = "deepseek-chat"
+# 默认 circuit：熔断打开后才切备用。
+fallback_mode = "circuit"
+# on_error：首个建立流之前的失败就切备用；off 表示禁用。
+# fallback_mode = "on_error"
+# 兼容旧写法：fallback_on_error = true
+# 单次 Provider 尝试总超时；0 表示沿用流式首包/空闲超时。
+fallback_timeout_seconds = 0
 ```
 
-熔断打开时优先切备用 Provider；没有备用时返回明确错误，不再无限重试。外部模型异常只显示为 `degraded`，不会触发自动重启。
+默认 `circuit` 模式下，熔断打开时优先切备用 Provider；没有备用时返回明确错误，不再无限重试。`on_error` 模式只对产生部分流式输出前的错误切换，已经发给用户的内容不会被重放。外部模型异常只显示为 `degraded`，不会触发自动重启。
 - 并发上限按请求类型限制当前活跃任务数；达到上限后新请求会返回 `request concurrency limit reached`，不会无限排队。
 - 活跃任务、开始时间、阶段、最近进展和资源指标可通过独立健康接口的 `/tasks` 与 `/metrics` 查看。
 - Shell、Hook、AgentSkill / Go Skill 在支持平台上会在超时或取消时终止整个子进程树；图片处理等进程内任务只能依赖 `context` 取消，遇到不响应取消的第三方库仍可能延迟释放。

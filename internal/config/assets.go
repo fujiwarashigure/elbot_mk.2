@@ -403,6 +403,9 @@ api_key_env = "OPENAI_API_KEY"
 models = ["gpt-4o-mini"]
 # fallback_provider = "deepseek"
 # fallback_model = "deepseek-chat"
+# fallback_mode = "circuit"          # circuit（默认，熔断后接管）/ on_error（首个失败请求即切换）/ off
+# fallback_on_error = false         # 等价于 fallback_mode = "on_error"
+# fallback_timeout_seconds = 0      # 单次 Provider 尝试的总超时；0 表示沿用现有流式超时控制
 
 # [providers.openai.model_configs."gpt-4o-mini"]
 # context_window = 128000

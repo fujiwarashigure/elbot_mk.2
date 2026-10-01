@@ -115,6 +115,43 @@ func (e Environment) merge(values map[string]string, replace bool) Environment {
 	return e
 }
 
+// WithoutSensitiveKeys returns a copy with common credential variables removed.
+// It is intended for shell / skill child processes: API keys and tokens should
+// not be inherited just because they were placed in the process environment.
+func (e Environment) WithoutSensitiveKeys() Environment {
+	entries := e.Environ()
+	filtered := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || !SensitiveEnvName(name) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return New(filtered)
+}
+
+// SensitiveEnvName reports whether an environment variable name looks like a
+// credential, token, secret, password or private key.
+func SensitiveEnvName(name string) bool {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	parts := strings.FieldsFunc(name, func(r rune) bool {
+		return r == '_' || r == '-' || r == '.'
+	})
+	for _, part := range parts {
+		switch part {
+		case "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "PRIVATE":
+			return true
+		}
+	}
+	compact := strings.NewReplacer("_", "", "-", "", ".", "").Replace(name)
+	for _, marker := range []string{"APIKEY", "ACCESSKEY", "SECRETKEY", "PRIVATEKEY", "CLIENTSECRET", "BOTTOKEN"} {
+		if strings.Contains(compact, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // Configured reports whether the environment is an explicit snapshot.
 func (e Environment) Configured() bool {
 	return e.configured

@@ -13,6 +13,9 @@ package character
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -76,6 +79,8 @@ type Image struct {
 	MediaID   string `toml:"media_id,omitempty" json:"media_id,omitempty"`
 	Path      string `toml:"path,omitempty" json:"path,omitempty"`
 	Size      int64  `toml:"size,omitempty" json:"size,omitempty"`
+	Version   string `toml:"version,omitempty" json:"version,omitempty"`
+	Source    string `toml:"source,omitempty" json:"source,omitempty"`
 	CreatedAt string `toml:"created_at,omitempty" json:"created_at,omitempty"`
 }
 
@@ -98,6 +103,8 @@ type Character struct {
 	OwnerPlatform string
 	OwnerID       string
 	Visibility    Visibility
+	Version       string
+	Source        string
 	CreatedAt     string
 	UpdatedAt     string
 	Dir           string
@@ -118,6 +125,8 @@ type WriteRequest struct {
 	Visibility    string
 	OwnerPlatform string
 	OwnerID       string
+	Version       *string
+	Source        *string
 	Docs          map[string]*string
 	RemoveDocs    []string
 	Image         *ImageSettings
@@ -132,6 +141,34 @@ type SearchResult struct {
 	Score   int
 }
 
+// AssetManifestEntry describes one versioned character asset for backup and
+// restore verification.
+type AssetManifestEntry struct {
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	Version string `json:"version,omitempty"`
+	Source  string `json:"source,omitempty"`
+	SHA256  string `json:"sha256"`
+}
+
+// CharacterManifest is one character's version/source/backup inventory.
+type CharacterManifest struct {
+	ID      string               `json:"id"`
+	Name    string               `json:"name"`
+	Version string               `json:"version,omitempty"`
+	Source  string               `json:"source,omitempty"`
+	Updated string               `json:"updated_at,omitempty"`
+	Assets  []AssetManifestEntry `json:"assets"`
+}
+
+// AssetManifest is the full character-library backup manifest.
+type AssetManifest struct {
+	GeneratedAt string              `json:"generated_at"`
+	Characters  []CharacterManifest `json:"characters"`
+}
+
 type characterMeta struct {
 	ID            string   `toml:"id"`
 	Name          string   `toml:"name"`
@@ -141,6 +178,8 @@ type characterMeta struct {
 	OwnerPlatform string   `toml:"owner_platform,omitempty"`
 	OwnerID       string   `toml:"owner_id,omitempty"`
 	Visibility    string   `toml:"visibility,omitempty"`
+	Version       string   `toml:"version,omitempty"`
+	Source        string   `toml:"source,omitempty"`
 	CreatedAt     string   `toml:"created_at,omitempty"`
 	UpdatedAt     string   `toml:"updated_at,omitempty"`
 }
@@ -250,6 +289,8 @@ func readCharacter(dir string) (*Character, error) {
 		OwnerPlatform: strings.TrimSpace(meta.OwnerPlatform),
 		OwnerID:       strings.TrimSpace(meta.OwnerID),
 		Visibility:    normalizeVisibility(meta.Visibility),
+		Version:       strings.TrimSpace(meta.Version),
+		Source:        strings.TrimSpace(meta.Source),
 		CreatedAt:     strings.TrimSpace(meta.CreatedAt),
 		UpdatedAt:     strings.TrimSpace(meta.UpdatedAt),
 		Dir:           dir,
@@ -454,6 +495,86 @@ func ActiveIDs(ctx context.Context) []string {
 	}
 	ids, _ := ctx.Value(activeContextKey{}).([]string)
 	return append([]string(nil), ids...)
+}
+
+// Manifest returns the version/source/checksum inventory for every character
+// visible to viewer. It is suitable for backup verification and migration.
+func (s *Store) Manifest(ctx context.Context, viewer Viewer) (AssetManifest, error) {
+	if err := s.ensure(ctx); err != nil {
+		return AssetManifest{}, err
+	}
+	s.mu.Lock()
+	items := make([]*Character, 0, len(s.order))
+	for _, id := range s.order {
+		item := s.entries[id]
+		if item != nil && item.VisibleTo(viewer) {
+			items = append(items, item)
+		}
+	}
+	s.mu.Unlock()
+
+	manifest := AssetManifest{GeneratedAt: nowString(), Characters: make([]CharacterManifest, 0, len(items))}
+	for _, item := range items {
+		entry := CharacterManifest{ID: item.ID, Name: item.Name, Version: item.Version, Source: item.Source, Updated: item.UpdatedAt}
+		assets := map[string]AssetManifestEntry{}
+		add := func(kind, name, rel, version, source string) {
+			path, err := safeJoin(item.Dir, rel)
+			if err != nil {
+				return
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return
+			}
+			sum := sha256.Sum256(data)
+			assets[kind+":"+name] = AssetManifestEntry{
+				Kind:    kind,
+				Name:    name,
+				Path:    filepath.ToSlash(rel),
+				Size:    int64(len(data)),
+				Version: version,
+				Source:  source,
+				SHA256:  hex.EncodeToString(sum[:]),
+			}
+		}
+		for kind := range item.Docs {
+			if name, ok := docFileName(kind); ok {
+				add("doc", kind, name, item.Version, item.Source)
+				continue
+			}
+			if strings.HasPrefix(kind, NotesDir+"/") {
+				name := strings.TrimPrefix(kind, NotesDir+"/")
+				add("doc", kind, filepath.ToSlash(filepath.Join(NotesDir, name+".md")), item.Version, item.Source)
+			}
+		}
+		for _, image := range item.Images {
+			add("image", image.Name, image.Path, image.Version, image.Source)
+		}
+		names := make([]string, 0, len(assets))
+		for key := range assets {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		for _, key := range names {
+			entry.Assets = append(entry.Assets, assets[key])
+		}
+		manifest.Characters = append(manifest.Characters, entry)
+	}
+	return manifest, nil
+}
+
+// WriteManifest writes a JSON asset manifest using an atomic replace.
+func (s *Store) WriteManifest(ctx context.Context, path string, viewer Viewer) error {
+	manifest, err := s.Manifest(ctx, viewer)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return writeFileAtomic(path, data)
 }
 
 // ReadImage loads one stored character image by name.

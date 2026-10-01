@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"elbot/internal/storage"
@@ -71,6 +72,7 @@ type Manager struct {
 	active         map[string]*activeRequest
 	pending        map[Kind]int
 	waiters        map[Kind][]*waiter
+	timeouts       atomic.Int64
 }
 
 type waiter struct {
@@ -163,6 +165,9 @@ func (m *Manager) Start(parent context.Context, start StartRequest) (Request, co
 	})
 	go func() {
 		<-ctx.Done()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			m.timeouts.Add(1)
+		}
 		m.finish(req.ID, false)
 	}()
 
@@ -346,10 +351,13 @@ func (m *Manager) grantWaitersLocked(kind Kind) {
 
 // Snapshot is a point-in-time view of active requests.
 type Snapshot struct {
-	Active          []Request        `json:"active"`
-	CountByKind     map[Kind]int     `json:"count_by_kind,omitempty"`
-	OldestStartedAt *time.Time       `json:"oldest_started_at,omitempty"`
-	OldestAge       time.Duration    `json:"oldest_age"`
+	Active          []Request     `json:"active"`
+	CountByKind     map[Kind]int  `json:"count_by_kind,omitempty"`
+	PendingByKind   map[Kind]int  `json:"pending_by_kind,omitempty"`
+	QueuedByKind    map[Kind]int  `json:"queued_by_kind,omitempty"`
+	Timeouts        int64         `json:"timeouts"`
+	OldestStartedAt *time.Time    `json:"oldest_started_at,omitempty"`
+	OldestAge       time.Duration `json:"oldest_age"`
 }
 
 // Touch updates a request's progress timestamp.
@@ -386,8 +394,21 @@ func (m *Manager) Snapshot() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := Snapshot{
-		Active:      make([]Request, 0, len(m.active)),
-		CountByKind: map[Kind]int{},
+		Active:        make([]Request, 0, len(m.active)),
+		CountByKind:   map[Kind]int{},
+		PendingByKind: map[Kind]int{},
+		QueuedByKind:  map[Kind]int{},
+		Timeouts:      m.timeouts.Load(),
+	}
+	for kind, count := range m.pending {
+		if count > 0 {
+			out.PendingByKind[kind] = count
+		}
+	}
+	for kind, waiters := range m.waiters {
+		if len(waiters) > 0 {
+			out.QueuedByKind[kind] = len(waiters)
+		}
 	}
 	now := time.Now()
 	var oldest time.Time

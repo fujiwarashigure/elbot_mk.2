@@ -42,6 +42,8 @@ tags = ["anime", "assistant"]
 owner_platform = "qqonebot"   # 空表示 system（超级管理员维护的公共角色）
 owner_id = "qqonebot:10001"
 visibility = "private"        # public 或 private
+version = "3"                 # 素材版本，更新时自动递增，可显式指定
+source = "import"             # 素材来源，如 import / local / qqonebot
 created_at = "2026-10-01T12:00:00Z"
 updated_at = "2026-10-01T12:00:00Z"
 
@@ -51,6 +53,8 @@ mime_type = "image/png"
 media_id = "media:<64 位小写 sha256>"
 path = "images/avatar.png"
 size = 123456
+version = "1"
+source = "qqonebot"
 created_at = "2026-10-01T12:00:00Z"
 ```
 
@@ -106,7 +110,8 @@ references = ["avatar.png"]
 ```
 
 - 指令会被剥离，不会发给模型；ElBot 会回复“已启用角色：catgirl”。
-- 不需要切换 Session、不写入会话元数据，下一轮自动失效。
+- 作用范围严格限定为**当前一轮**：不切换 Session、不写入会话元数据，回复结束即失效，不会串到其他会话或下一轮。
+- `@char` 没有跨会话 TTL 配置，因为生命期本来就是一次 turn。
 - 在 chat 模式同样可用（因为只是注入文本，不依赖工具）。
 - 角色不存在或无权访问时会提示“未找到或不可用的角色：xxx”。
 - 注入内容上限约 12000 字符；超出会截断。
@@ -118,6 +123,12 @@ references = ["avatar.png"]
 | `/*chars` | 列出当前可见角色 |
 | `/*chars <关键词>` | 按 id / 名称 / 别名 / tags / 简介过滤 |
 | `/*chars reload` | 超级管理员重建索引 |
+
+## 版本、来源与备份清单
+
+- 角色正文元数据写入 `character.toml` 的 `[character].version` 和 `[character].source`；每次普通更新自动递增 `version`，也可通过 `character_manage` 显式指定。
+- 图片索引同样记录 `version` / `source`，默认来源是添加图片时的平台。
+- `Store.Manifest` / `WriteManifest` 会为角色文档和图片生成 sha256 清单；`deploy/backup.sh` 还会对 `characters/` 和 `elbot/media/` 生成 `*.manifest`，恢复时由 `restore-verify.sh` 做 `sha256sum -c` 校验。
 
 ## 图片与 Media Center
 

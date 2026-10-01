@@ -10,8 +10,8 @@ import (
 	elcron "elbot/internal/cron"
 	"elbot/internal/imagegen"
 	"elbot/internal/media"
-	"elbot/internal/ops/concurrency"
 	"elbot/internal/memory/resident"
+	"elbot/internal/ops/concurrency"
 	"elbot/internal/processenv"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
@@ -45,6 +45,7 @@ type RuntimeOptions struct {
 	ImageGeneration        config.ImageGenerationConfig
 	PromptRewriter         ImagePromptRewriter
 	ProcessEnv             processenv.Environment
+	ChildProcessEnv        processenv.Environment
 }
 
 func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
@@ -62,6 +63,10 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 		info.FileDelivery = opts.FileDelivery
 	}
 	info = info.Normalize()
+	childProcessEnv := opts.ChildProcessEnv
+	if !childProcessEnv.Configured() {
+		childProcessEnv = opts.ProcessEnv
+	}
 	registry := tool.NewRegistry()
 	residentStore := resident.NewStoreWithLimits(filepath.Join(opts.ConfigDir, "memories.toml"), opts.ResidentMemoryMaxUnits)
 	var characterStore *character.Store
@@ -99,7 +104,7 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 			}
 		}
 	}
-	skillManager := skill.NewManager(filepath.Join(opts.ConfigDir, "skills"), registry, opts.ProcessEnv)
+	skillManager := skill.NewManager(filepath.Join(opts.ConfigDir, "skills"), registry, childProcessEnv)
 	fileManager := NewFileManagerWithMedia(info.SandboxRoot, info.FileDelivery, opts.Store)
 	if opts.Media != nil {
 		fileManager.Media = opts.Media
@@ -119,6 +124,7 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 		LongMemoryDir:       filepath.Join(opts.ConfigDir, "long_memory"),
 		FileManager:         fileManager,
 		ProcessEnv:          opts.ProcessEnv,
+		ChildProcessEnv:     childProcessEnv,
 	}); err != nil {
 		return nil, err
 	}

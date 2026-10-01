@@ -157,3 +157,50 @@ func TestStoreRejectsInvalidID(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidID", err)
 	}
 }
+
+func TestStoreVersionsSourcesAndManifest(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir())
+	admin := Viewer{Platform: "cli", ActorID: "cli:local", Superadmin: true}
+	profile := "角色资料"
+	item, err := store.Write(ctx, WriteRequest{
+		ID:      "asset",
+		Name:    "素材角色",
+		Version: strPtr("7"),
+		Source:  strPtr("import"),
+		Docs:    map[string]*string{"profile": &profile},
+	}, admin)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if item.Version != "7" || item.Source != "import" {
+		t.Fatalf("version/source = %q/%q", item.Version, item.Source)
+	}
+	if _, err := store.AddImage(ctx, "asset", "avatar.png", "image/png", "media:asset", []byte("png"), admin); err != nil {
+		t.Fatalf("add image: %v", err)
+	}
+	manifest, err := store.Manifest(ctx, admin)
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if len(manifest.Characters) != 1 || manifest.Characters[0].Version != "7" || manifest.Characters[0].Source != "import" {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+	if len(manifest.Characters[0].Assets) != 2 {
+		t.Fatalf("manifest assets = %#v", manifest.Characters[0].Assets)
+	}
+	for _, asset := range manifest.Characters[0].Assets {
+		if asset.SHA256 == "" || asset.Size == 0 {
+			t.Fatalf("asset manifest entry = %#v", asset)
+		}
+	}
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	if err := store.WriteManifest(ctx, manifestPath, admin); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("manifest file: %v", err)
+	}
+}
+
+func strPtr(value string) *string { return &value }

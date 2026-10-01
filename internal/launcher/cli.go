@@ -15,16 +15,20 @@ const (
 	CommandRun         Command = "run"
 	CommandCompletion  Command = "completion"
 	CommandConfigCheck Command = "config-check"
+	CommandDoctor      Command = "doctor"
 )
 
 type Options struct {
-	ConfigPath string
-	ClientName string
-	Mode       app.RunMode
-	Command    Command
-	Completion string
-	Help       bool
-	Version    bool
+	ConfigPath    string
+	ClientName    string
+	Mode          app.RunMode
+	Command       Command
+	Completion    string
+	DoctorE2E     bool
+	DoctorJSON    bool
+	DoctorNoModel bool
+	Help          bool
+	Version       bool
 }
 
 func ParseArgs(args []string) (Options, error) {
@@ -55,6 +59,12 @@ func ParseArgs(args []string) (Options, error) {
 			opts.ConfigPath = args[i]
 		case strings.HasPrefix(arg, "--config="):
 			opts.ConfigPath = strings.TrimPrefix(arg, "--config=")
+		case arg == "--e2e":
+			opts.DoctorE2E = true
+		case arg == "--json":
+			opts.DoctorJSON = true
+		case arg == "--no-model":
+			opts.DoctorNoModel = true
 		case strings.HasPrefix(arg, "-"):
 			return Options{}, fmt.Errorf("unknown option: %s", arg)
 		default:
@@ -90,6 +100,11 @@ func ParseArgs(args []string) (Options, error) {
 			return Options{}, fmt.Errorf("usage: elbot config check [--config path]")
 		}
 		opts.Command = CommandConfigCheck
+	case "doctor":
+		if len(positionals) != 1 {
+			return Options{}, fmt.Errorf("usage: elbot doctor [--config path] [--e2e] [--json] [--no-model]")
+		}
+		opts.Command = CommandDoctor
 	case "completion":
 		if len(positionals) != 2 || !SupportedCompletionShell(positionals[1]) {
 			return Options{}, fmt.Errorf("usage: elbot completion [auto|bash|zsh|fish|nushell|powershell]")
@@ -118,6 +133,7 @@ func WriteUsage(w io.Writer) {
   elbot cli [--config path] [-c client]
   elbot service run [--config path]
   elbot config check [--config path]
+  elbot doctor [--config path] [--e2e] [--json] [--no-model]
   elbot completion [auto|bash|zsh|fish|nushell|powershell]
 
 Commands:
@@ -125,6 +141,7 @@ Commands:
   cli           Run local CLI-only mode: CLI without background platforms or cron.
   service run   Run headless service mode for Linux service managers.
   config check  Load app.toml, print a summary and warnings, exit non-zero on error.
+  doctor        Run deployment acceptance checks. Adds --e2e for a real CLI round-trip.
   completion    Generate shell completion scripts.
 
 Options:

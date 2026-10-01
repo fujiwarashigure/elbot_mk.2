@@ -206,7 +206,7 @@ send_file_mode = "base64"      # 不共享文件系统时保持 base64
 | --- | --- |
 | `config check` 报 TOML 解析错误 | 多半是重复的 `[section]`、中文引号 `“”`、或漏了引号；用面板编辑器看报错行号 |
 | 改完没生效 | 只改 TOML 用 `docker compose restart`；改 `.env` 必须用 `docker compose up -d --force-recreate`，`restart` 不会重新注入环境变量 |
-| `/ready` 长期失败 | 检查 `data` 目录 / SQLite 目录可写、平台连接日志，以及 `ELBOT_HEALTH_ADDR` 配置 |
+| `/ready` 长期失败 | 检查 `data` 目录 / SQLite 目录可写、调度心跳是否过期，以及 `ELBOT_HEALTH_ADDR` 配置；平台/模型故障不会使 `/ready` 失败 |
 | `/healthz` 为 `degraded` | 模型 API / 中转站可能异常；先查上游，不要直接重启容器 |
 | 报告没收到 | 检查 `[security.superadmins]` 是否配了当前平台用户 ID，以及 `docker compose logs` 里的 warning |
 | 生图 404 | `base_url` 少/多了 `/v1`；用 `endpoint` 直接写全路径 |

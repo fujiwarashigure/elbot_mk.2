@@ -401,18 +401,22 @@ type characterImageArgs struct {
 }
 
 type characterManageArgs struct {
-	Operation   string              `json:"operation"`
-	ID          string              `json:"id"`
-	Name        string              `json:"name"`
-	Aliases     []string            `json:"aliases"`
-	Tags        []string            `json:"tags"`
-	Description *string             `json:"description"`
-	Visibility  string              `json:"visibility"`
-	Docs        map[string]string   `json:"docs"`
-	RemoveDocs  []string            `json:"remove_docs"`
-	ImageSource string              `json:"image_source"`
-	ImageName   string              `json:"image_name"`
-	Image       *characterImageArgs `json:"image"`
+	Operation       string              `json:"operation"`
+	ID              string              `json:"id"`
+	Name            string              `json:"name"`
+	Aliases         []string            `json:"aliases"`
+	Tags            []string            `json:"tags"`
+	Description     *string             `json:"description"`
+	Visibility      string              `json:"visibility"`
+	Version         *string             `json:"version"`
+	Source          *string             `json:"source"`
+	Docs            map[string]string   `json:"docs"`
+	RemoveDocs      []string            `json:"remove_docs"`
+	ImageSource     string              `json:"image_source"`
+	ImageName       string              `json:"image_name"`
+	ImageVersion    string              `json:"image_version"`
+	ImageSourceName string              `json:"image_source_label"`
+	Image           *characterImageArgs `json:"image"`
 }
 
 func (CharacterManageTool) Name() string { return CharacterManageName }
@@ -478,6 +482,8 @@ func (t CharacterManageTool) Call(ctx context.Context, req tool.CallRequest) (*t
 			Description: args.Description,
 			Tags:        args.Tags,
 			Visibility:  args.Visibility,
+			Version:     args.Version,
+			Source:      args.Source,
 			RemoveDocs:  args.RemoveDocs,
 			Docs:        map[string]*string{},
 		}
@@ -601,7 +607,7 @@ func (t CharacterManageTool) addImage(ctx context.Context, args characterManageA
 	if name == "" {
 		name = "image"
 	}
-	return t.Store.AddImage(ctx, args.ID, name, mimeType, mediaID, data, viewer)
+	return t.Store.AddImageWithMeta(ctx, args.ID, name, mimeType, mediaID, args.ImageVersion, args.ImageSourceName, data, viewer)
 }
 
 // ---------------------------------------------------------------- delete

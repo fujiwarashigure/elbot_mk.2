@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ElBot 外部 watchdog：只依据独立 /live 接口判断主进程是否卡死，
+# ElBot 外部 watchdog：只依据独立 /live 接口判断进程是否还能响应，
 # 连续失败达到阈值后收集诊断信息，并按冷却时间和次数上限受控重启容器。
 #
 # 推荐由 systemd timer 每分钟执行一次；不要和宝塔 Docker 管理器同时托管同一套 Compose。
@@ -20,6 +20,8 @@ MAX_RESTARTS="${WATCHDOG_MAX_RESTARTS:-3}"
 WINDOW_SECONDS="${WATCHDOG_WINDOW_SECONDS:-21600}"
 DRY_RUN="${WATCHDOG_DRY_RUN:-0}"
 WEBHOOK_URL="${WATCHDOG_WEBHOOK_URL:-}"
+OPS_TOKEN="${WATCHDOG_OPS_TOKEN:-}"
+RESTART_REASON_FILE="${WATCHDOG_RESTART_REASON_FILE:-${COMPOSE_DIR}/data/run/elbot/last_restart_reason}"
 
 mkdir -p "${STATE_DIR}" "${DIAG_DIR}"
 
@@ -50,6 +52,16 @@ send_webhook() {
         warn "webhook delivery failed for event ${event}"
 }
 
+redact_diagnostics() {
+    local dir="$1"
+    [ -d "${dir}" ] || return 0
+    if ! command -v sed >/dev/null 2>&1; then
+        return 0
+    fi
+    # 诊断包可能包含上游错误或日志片段；再做一层通用凭据脱敏。
+    find "${dir}" -type f -print0 2>/dev/null | xargs -0 -r sed -i -E \n        -e 's/(sk-[A-Za-z0-9_-]{8,})/[REDACTED]/g' \n        -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]+/[REDACTED]/Ig' \n        -e 's/((api[_-]?key|token|secret|password)[[:space:]]*[=:][[:space:]]*)([^[:space:]]+)/[REDACTED]/Ig' \n        2>/dev/null || true
+}
+
 capture_diagnostics() {
     local stamp dir
     stamp="$(date '+%Y%m%d-%H%M%S')"
@@ -64,18 +76,26 @@ capture_diagnostics() {
         echo "healthz_url=${HEALTHZ_URL}"
         echo "consecutive_failures=$(read_int consecutive_failures 0)"
         echo "last_restart_at=$(read_int last_restart_epoch 0)"
+        echo "last_restart_reason=$(cat "${RESTART_REASON_FILE}" 2>/dev/null || tail -n 1 "$(state_file restart_reasons.log)" 2>/dev/null || true)"
     } >"${dir}/summary.txt" 2>&1 || true
     curl -sS --max-time 5 "${HEALTH_URL}" >"${dir}/live.json" 2>&1 || true
     curl -sS --max-time 5 "${READY_URL}" >"${dir}/ready.json" 2>&1 || true
     curl -sS --max-time 5 "${HEALTHZ_URL}" >"${dir}/healthz.json" 2>&1 || true
-    curl -sS --max-time 5 "${HEALTHZ_URL%/healthz}/tasks" >"${dir}/tasks.json" 2>&1 || true
-    curl -sS --max-time 5 "${HEALTHZ_URL%/healthz}/metrics" >"${dir}/metrics.json" 2>&1 || true
+    local curl_auth=()
+    if [ -n "${OPS_TOKEN}" ]; then
+        curl_auth=(-H "Authorization: Bearer ${OPS_TOKEN}")
+    fi
+    curl -sS --max-time 5 "${HEALTHZ_URL%/healthz}/tasks" "${curl_auth[@]}" >"${dir}/tasks.json" 2>&1 || true
+    curl -sS --max-time 5 "${HEALTHZ_URL%/healthz}/metrics" "${curl_auth[@]}" >"${dir}/metrics.json" 2>&1 || true
     if command -v docker >/dev/null 2>&1; then
         docker ps -a --filter "name=^/${SERVICE}$" >"${dir}/docker-ps.txt" 2>&1 || true
-        docker inspect "${SERVICE}" >"${dir}/docker-inspect.json" 2>&1 || true
+        # 只抓 State/Ports，避免 docker inspect 中的 Config.Env 把 API Key / token 写进诊断包。
+        docker inspect --format '{{json .State}}' "${SERVICE}" >"${dir}/docker-state.json" 2>&1 || true
+        docker inspect --format '{{json .NetworkSettings.Ports}}' "${SERVICE}" >"${dir}/docker-ports.json" 2>&1 || true
         docker logs --tail 500 "${SERVICE}" >"${dir}/docker-logs.txt" 2>&1 || true
         docker stats --no-stream "${SERVICE}" >"${dir}/docker-stats.txt" 2>&1 || true
     fi
+    redact_diagnostics "${dir}"
     df -h >"${dir}/disk.txt" 2>&1 || true
     if [ -d "${COMPOSE_DIR}/data" ]; then
         du -sh "${COMPOSE_DIR}/data" >"${dir}/data-size.txt" 2>&1 || true
@@ -138,6 +158,10 @@ if [ -f "${history_file}" ]; then
 fi
 if [ "${restarts_in_window}" -ge "${MAX_RESTARTS}" ]; then
     printf '%s\n' "max restarts reached at $(date -Is)" >"$(state_file paused)"
+    paused_line="$(date -Is) paused: max restarts (${MAX_RESTARTS}) reached in window"
+    printf '%s\n' "${paused_line}" >>"$(state_file restart_reasons.log)"
+    mkdir -p "$(dirname "${RESTART_REASON_FILE}")" 2>/dev/null || true
+    printf '%s\n' "${paused_line}" >"${RESTART_REASON_FILE}" 2>/dev/null || true
     warn "max restarts (${MAX_RESTARTS}) reached in window; pausing auto-restart"
     capture_diagnostics >/dev/null
     send_webhook "paused" "max restarts reached; manual intervention required"
@@ -157,6 +181,10 @@ if ! detect_compose || [ ! -f "${COMPOSE_DIR}/docker-compose.yml" ]; then
 fi
 
 log "restarting ${SERVICE} after ${fails} failed live checks"
+reason_line="$(date -Is) restart: ${fails} consecutive failures of ${HEALTH_URL}"
+printf '%s\n' "${reason_line}" >>"$(state_file restart_reasons.log)"
+mkdir -p "$(dirname "${RESTART_REASON_FILE}")" 2>/dev/null || true
+printf '%s\n' "${reason_line}" >"${RESTART_REASON_FILE}" 2>/dev/null || true
 if "${COMPOSE[@]}" -f "${COMPOSE_DIR}/docker-compose.yml" up -d --force-recreate "${SERVICE}"; then
     write_int last_restart_epoch "${now}"
     printf '%s\n' "${now}" >>"${history_file}"

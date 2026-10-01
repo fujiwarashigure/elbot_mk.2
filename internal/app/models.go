@@ -45,7 +45,10 @@ func (defaultModelFactory) Build(req ModelRequest) (ModelClients, error) {
 			OpenCooldown:     time.Duration(cfg.Ops.CircuitBreakerOpenCooldownSeconds) * time.Second,
 			HalfOpenMax:      cfg.Ops.CircuitBreakerHalfOpenMax,
 		})
-		clients[name] = wrapBreakerLLM(name, healthClient, fallback, provider.FallbackProvider, provider.FallbackModel, br, req.Health)
+		clients[name] = wrapBreakerLLM(name, healthClient, fallback, provider.FallbackProvider, provider.FallbackModel, br, req.Health,
+			withFallbackOnError(provider.UsesFallbackOnError()),
+			withFallbackTotalTimeout(time.Duration(provider.FallbackTimeoutSeconds)*time.Second),
+		)
 	}
 	req.Profiler.Mark("llm adapters")
 	return ModelClients{ByProvider: clients}, nil

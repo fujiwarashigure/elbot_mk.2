@@ -78,6 +78,30 @@ type ProviderConfig struct {
 	ExtraPayload     map[string]any         `toml:"extra_payload"`
 	FallbackProvider string                 `toml:"fallback_provider"`
 	FallbackModel    string                 `toml:"fallback_model"`
+	// FallbackMode controls when the fallback provider takes over:
+	// "circuit" (default) waits until the provider breaker opens; "on_error"
+	// switches on the first pre-stream error. "off" disables fallback.
+	FallbackMode string `toml:"fallback_mode"`
+	// FallbackOnError is a compatibility shorthand for fallback_mode="on_error".
+	FallbackOnError bool `toml:"fallback_on_error"`
+	// FallbackTimeoutSeconds bounds one provider attempt (including fallback)
+	// before it is aborted with a total timeout error. 0 disables the extra bound.
+	FallbackTimeoutSeconds int `toml:"fallback_timeout_seconds"`
+}
+
+// UsesFallbackOnError reports whether this provider should switch to its
+// fallback provider on the first pre-stream failure rather than waiting for
+// the circuit breaker to open.
+func (p ProviderConfig) UsesFallbackOnError() bool {
+	if p.FallbackOnError {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(p.FallbackMode)) {
+	case "on_error", "first_error", "immediate", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 type ModelConfig struct {
@@ -996,6 +1020,12 @@ func (c *Config) applyAppDefaults() {
 	}
 	if c.Ops.CircuitBreakerHalfOpenMax <= 0 {
 		c.Ops.CircuitBreakerHalfOpenMax = 1
+	}
+	for name, provider := range c.Providers {
+		if provider.FallbackTimeoutSeconds < 0 {
+			provider.FallbackTimeoutSeconds = 0
+		}
+		c.Providers[name] = provider
 	}
 	if c.Context.CompactTriggerRatio == 0 {
 		c.Context.CompactTriggerRatio = 0.8

@@ -55,17 +55,35 @@ func writeJSONResponse(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-// rateLimitMetrics 是 /metrics 里的限速统计（agent.RateLimitStats）。
+// rateLimitMetrics 是 /metrics 里的限速统计。
 type rateLimitMetrics struct {
-	Allowed  int64 `json:"allowed"`
-	Rejected int64 `json:"rejected"`
-	Keys     int   `json:"keys"`
+	Allowed             int64      `json:"allowed"`
+	Rejected            int64      `json:"rejected"`
+	UserRejected        int64      `json:"user_rejected"`
+	GroupRejected       int64      `json:"group_rejected"`
+	Keys                int        `json:"keys"`
+	UserMessagesPerMin  int        `json:"user_messages_per_minute"`
+	UserBurst           int        `json:"user_burst"`
+	GroupMessagesPerMin int        `json:"group_messages_per_minute"`
+	GroupBurst          int        `json:"group_burst"`
+	LastReason          string     `json:"last_reason,omitempty"`
+	LastRejectedAt      *time.Time `json:"last_rejected_at,omitempty"`
 }
 
 // imageLimitMetrics 是 /metrics 里的生图并发统计。
 type imageLimitMetrics struct {
 	Active  int `json:"active"`
 	Waiting int `json:"waiting"`
+}
+
+type opsDiagnostics struct {
+	CollectedAt       time.Time               `json:"collected_at"`
+	Health            health.Snapshot         `json:"health"`
+	Tasks             request.Snapshot        `json:"tasks"`
+	RateLimit         rateLimitMetrics        `json:"rate_limit"`
+	Models            []health.ModelStatus    `json:"models,omitempty"`
+	Platforms         []health.PlatformStatus `json:"platforms,omitempty"`
+	LastRestartReason string                  `json:"last_restart_reason,omitempty"`
 }
 
 type opsMetrics struct {
@@ -79,6 +97,42 @@ type opsMetrics struct {
 	Models        []health.ModelStatus    `json:"models,omitempty"`
 	RateLimit     rateLimitMetrics        `json:"rate_limit"`
 	ImageLimit    imageLimitMetrics       `json:"image_limit"`
+}
+
+func collectOpsDiagnostics(state *health.State, agt *agent.Agent) any {
+	now := time.Now()
+	healthSnapshot := health.Snapshot{}
+	if state != nil {
+		healthSnapshot = state.Snapshot()
+	}
+	tasks := request.Snapshot{}
+	rateLimit := rateLimitMetrics{}
+	if agt != nil {
+		tasks = agt.ActiveRequests()
+		status := agt.RateLimitStatus()
+		rateLimit = rateLimitMetrics{
+			Allowed:             status.Allowed,
+			Rejected:            status.Rejected,
+			UserRejected:        status.UserRejected,
+			GroupRejected:       status.GroupRejected,
+			Keys:                status.Keys,
+			UserMessagesPerMin:  status.UserMessagesPerMin,
+			UserBurst:           status.UserBurst,
+			GroupMessagesPerMin: status.GroupMessagesPerMin,
+			GroupBurst:          status.GroupBurst,
+			LastReason:          status.LastReason,
+			LastRejectedAt:      status.LastRejectedAt,
+		}
+	}
+	return opsDiagnostics{
+		CollectedAt:       now,
+		Health:            healthSnapshot,
+		Tasks:             tasks,
+		RateLimit:         rateLimit,
+		Models:            healthSnapshot.Models,
+		Platforms:         healthSnapshot.Platforms,
+		LastRestartReason: healthSnapshot.LastRestartReason,
+	}
 }
 
 func collectOpsMetrics(cfg *config.Config, state *health.State, agt *agent.Agent, imageLimiter interface{ Stats() (int, int) }) any {
@@ -106,8 +160,20 @@ func collectOpsMetrics(cfg *config.Config, state *health.State, agt *agent.Agent
 		Resources:   snapshot,
 	}
 	if agt != nil {
-		allowed, rejected, keys := agt.RateLimitStats()
-		metrics.RateLimit = rateLimitMetrics{Allowed: allowed, Rejected: rejected, Keys: keys}
+		status := agt.RateLimitStatus()
+		metrics.RateLimit = rateLimitMetrics{
+			Allowed:             status.Allowed,
+			Rejected:            status.Rejected,
+			UserRejected:        status.UserRejected,
+			GroupRejected:       status.GroupRejected,
+			Keys:                status.Keys,
+			UserMessagesPerMin:  status.UserMessagesPerMin,
+			UserBurst:           status.UserBurst,
+			GroupMessagesPerMin: status.GroupMessagesPerMin,
+			GroupBurst:          status.GroupBurst,
+			LastReason:          status.LastReason,
+			LastRejectedAt:      status.LastRejectedAt,
+		}
 	}
 	if imageLimiter != nil {
 		active, waiting := imageLimiter.Stats()

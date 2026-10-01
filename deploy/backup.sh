@@ -19,6 +19,7 @@ DATA_DIR="${DEPLOY_DIR}/data"
 BACKUP_DIR="${1:-${DEPLOY_DIR}/backups}"
 KEEP="${KEEP:-14}"
 MODE="${BACKUP_MODE:-auto}"
+VERIFY="${BACKUP_VERIFY:-1}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 TARGET=""
 STAGE=""
@@ -56,10 +57,27 @@ detect_compose() {
     return 1
 }
 
+write_manifest() {
+    local target="$1" manifest="$2"
+    [ -f "${target}" ] || return 0
+    : >"${manifest}"
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        warn "未找到 sha256sum，跳过备份清单生成"
+        return 0
+    fi
+    if [ -d "${DATA_DIR}" ]; then
+        (
+            cd "${DATA_DIR}" || exit 1
+            find config/elbot/characters elbot/media -type f -print0 2>/dev/null \n                | xargs -0 -r sha256sum 2>/dev/null \n                | sed 's#  #  data/#'
+        ) >>"${manifest}" || true
+    fi
+}
+
 prune_old_backups() {
-    ls -1t "${BACKUP_DIR}"/elbot-data-*.tar.gz 2>/dev/null \
-        | tail -n +$((KEEP + 1)) \
-        | xargs -r rm -f
+    while IFS= read -r old; do
+        [ -n "${old}" ] || continue
+        rm -f "${old}" "${old}.manifest"
+    done < <(ls -1t "${BACKUP_DIR}"/elbot-data-*.tar.gz 2>/dev/null | tail -n +$((KEEP + 1)))
 }
 
 if [ ! -d "${DATA_DIR}" ]; then
@@ -147,6 +165,22 @@ fi
 
 if [ -z "${TARGET}" ] || [ ! -f "${TARGET}" ]; then
     die "未生成备份文件"
+fi
+MANIFEST="${TARGET}.manifest"
+write_manifest "${TARGET}" "${MANIFEST}"
+log "备份清单：${MANIFEST}"
+
+if [ "${VERIFY}" = "1" ]; then
+    if [ -f "${DEPLOY_DIR}/restore-verify.sh" ]; then
+        log "在隔离目录中执行恢复验证"
+        if ! bash "${DEPLOY_DIR}/restore-verify.sh" "${TARGET}"; then
+            warn "备份恢复验证失败：${TARGET}"
+            warn "保留该备份用于排查；确认恢复流程前不要清理旧备份"
+            exit 1
+        fi
+    else
+        warn "未找到 restore-verify.sh，跳过恢复验证"
+    fi
 fi
 
 log "清理超过 ${KEEP} 份的旧备份"

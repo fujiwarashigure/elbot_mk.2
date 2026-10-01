@@ -19,7 +19,10 @@ func TestServerLiveReadyAndDegraded(t *testing.T) {
 	}
 	handler := server.Handler()
 
-	assertStatus(t, handler, "/live", http.StatusServiceUnavailable, "not_live")
+	// /live only means the process is running; readiness and scheduler health
+	// are separate concerns.
+	assertStatus(t, handler, "/live", http.StatusOK, "live")
+	assertStatus(t, handler, "/ready", http.StatusServiceUnavailable, "not_ready")
 
 	state.Beat()
 	state.SetReady(true)
@@ -30,11 +33,12 @@ func TestServerLiveReadyAndDegraded(t *testing.T) {
 	assertStatus(t, handler, "/healthz", http.StatusOK, "ok")
 
 	state.RecordModelError("deepseek", fmt.Errorf("upstream timeout"))
+	assertStatus(t, handler, "/ready", http.StatusOK, "ready")
 	assertStatus(t, handler, "/healthz", http.StatusOK, "degraded")
 
 	state.MarkPlatformDisconnected("qqonebot", fmt.Errorf("closed"))
-	assertStatus(t, handler, "/ready", http.StatusServiceUnavailable, "not_ready")
-	assertStatus(t, handler, "/healthz", http.StatusServiceUnavailable, "not_ready")
+	assertStatus(t, handler, "/ready", http.StatusOK, "ready")
+	assertStatus(t, handler, "/healthz", http.StatusOK, "degraded")
 }
 
 func TestServerReadyCheckerFailure(t *testing.T) {
@@ -86,6 +90,40 @@ func TestServerExtraHandlers(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusTeapot {
 		t.Fatalf("status = %d", recorder.Code)
+	}
+}
+
+func TestServerExtraHandlersRequireToken(t *testing.T) {
+	state := NewState(Options{})
+	server, err := NewServer(ServerOptions{
+		Addr:  "127.0.0.1:0",
+		State: state,
+		ExtraHandlers: map[string]http.Handler{
+			"/metrics": http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}),
+		},
+		ExtraHandlerToken: "ops-secret",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	handler := server.Handler()
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer ops-secret")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d, body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 }
 

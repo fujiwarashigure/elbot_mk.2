@@ -77,3 +77,12 @@ func TestWriteCompletionShells(t *testing.T) {
 		})
 	}
 }
+func TestParseDoctorArgs(t *testing.T) {
+	got, err := ParseArgs([]string{"doctor", "--e2e", "--json", "--no-model", "--config", "custom/app.toml"})
+	if err != nil {
+		t.Fatalf("ParseArgs() error = %v", err)
+	}
+	if got.Command != CommandDoctor || !got.DoctorE2E || !got.DoctorJSON || !got.DoctorNoModel || got.ConfigPath != "custom/app.toml" {
+		t.Fatalf("doctor options = %#v", got)
+	}
+}

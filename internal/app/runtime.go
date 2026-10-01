@@ -21,8 +21,8 @@ import (
 	hookcontrol "elbot/internal/hook/control"
 	hookruntime "elbot/internal/hook/runtime"
 	"elbot/internal/media"
-	"elbot/internal/ops/diskguard"
 	"elbot/internal/memory/resident"
+	"elbot/internal/ops/diskguard"
 	"elbot/internal/processenv"
 	"elbot/internal/security"
 	"elbot/internal/session"
@@ -43,7 +43,11 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		return nil, fmt.Errorf("load process environment: %w", err)
 	}
 	baseProcessEnv := processenv.New(os.Environ())
-	shellProcessEnv := baseProcessEnv.Fill(dotEnv)
+	credentialEnv := baseProcessEnv.Fill(dotEnv)
+	// Shell / Skill / Go Skill child processes are powerful, so they only get
+	// non-credential variables from .env. Parent-side tools (web search, image
+	// generation, media download) still use credentialEnv to resolve keys.
+	shellProcessEnv := credentialEnv.WithoutSensitiveKeys()
 	hookProcessEnv := hook.ProcessEnvironment(baseProcessEnv)
 	fileDeliveryCredentials, err := resolveFileDeliveryCredentials(cfg.FileDelivery, filepath.Dir(cfg.ConfigPath))
 	if err != nil {
@@ -103,7 +107,8 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		CharacterRoot:          cfg.CharacterLibrary.Root,
 		ImageGeneration:        cfg.ImageGeneration,
 		PromptRewriter:         imageRewriter,
-		ProcessEnv:             shellProcessEnv,
+		ProcessEnv:             credentialEnv,
+		ChildProcessEnv:        shellProcessEnv,
 	})
 	if err != nil {
 		return nil, err
@@ -165,13 +170,13 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	req.Profiler.Mark("agent init")
 
 	return &RuntimeComponents{
-		Media:       mediaCenter,
-		Agent:       agt,
-		Handler:     agt,
-		CronService: cronService,
-		ElvenaBus:     elvenaBus,
-		ImageLimiter:  toolRuntime.ImageLimiter,
-		Lifecycle:     hookRuntimeLifecycle{runtime: hookRuntime},
+		Media:        mediaCenter,
+		Agent:        agt,
+		Handler:      agt,
+		CronService:  cronService,
+		ElvenaBus:    elvenaBus,
+		ImageLimiter: toolRuntime.ImageLimiter,
+		Lifecycle:    hookRuntimeLifecycle{runtime: hookRuntime},
 	}, nil
 }
 

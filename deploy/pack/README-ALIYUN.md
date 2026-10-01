@@ -69,13 +69,13 @@ bash deploy/pack/prepare-offline.sh
 
 生成 `deploy/dist/` 后，再把对应文件传到服务器，例如 `/opt/elbot`：
 
-- **宝塔文件管理器**：直接上传 `elbot-0.6.0-offline-amd64.tar.gz` 到 `/opt/elbot`。
+- **宝塔文件管理器**：直接上传 `elbot-0.6.1-offline-amd64.tar.gz` 到 `/opt/elbot`。
 - **SCP**（本地执行）：
 
 ```bash
-scp elbot-0.6.0-offline-amd64.tar.gz root@<公网IP>:/opt/elbot/
+scp elbot-0.6.1-offline-amd64.tar.gz root@<公网IP>:/opt/elbot/
 # 如果要用 docker load 方案，再传：
-scp elbot-0.6.0-linux-amd64.tar.gz root@<公网IP>:/opt/elbot/
+scp elbot-0.6.1-linux-amd64.tar.gz root@<公网IP>:/opt/elbot/
 ```
 
 - **阿里云 OSS**：先传到 OSS，服务器上用带签名的 URL `wget`。
@@ -87,7 +87,7 @@ scp elbot-0.6.0-linux-amd64.tar.gz root@<公网IP>:/opt/elbot/
 
 ```bash
 mkdir -p /opt/elbot && cd /opt/elbot
-tar -xzf elbot-0.6.0-offline-amd64.tar.gz
+tar -xzf elbot-0.6.1-offline-amd64.tar.gz
 cd offline-amd64
 
 # 首次运行会生成 .env 并提示你填写，然后退出
@@ -100,7 +100,7 @@ chmod 600 .env
 # 再执行
 bash deploy.sh                 # 推荐：预编译二进制 + Debian 运行时，功能完整
 # 或完全离线（scratch 镜像，无 shell 工具）：
-# bash deploy.sh --load ../elbot-0.6.0-linux-amd64.tar.gz
+# bash deploy.sh --load ../elbot-0.6.1-linux-amd64.tar.gz
 ```
 
 脚本会做：架构检测 → Docker 检查 → 创建并 `chown 10001:10001` 数据目录 → 构建/加载镜像 → `docker compose up -d`。
@@ -176,8 +176,8 @@ uname -m                                  # 确认架构
 docker compose ps                         # 容器 Up / healthy
 docker compose logs --tail=100            # 无 TOML / Key 报错
 stat -c '%u:%g %a %n' data                # 期望 10001:10001
-curl -sS http://127.0.0.1:32171/live      # 关键调度心跳
-curl -sS http://127.0.0.1:32171/ready     # 数据/组件/平台就绪
+curl -sS http://127.0.0.1:32171/live      # 进程存活
+curl -sS http://127.0.0.1:32171/ready     # 进程/数据目录/调度心跳就绪
 curl -sS http://127.0.0.1:32171/healthz   # 汇总；degraded 表示外部模型等异常
 curl -sS http://127.0.0.1:32171/tasks     # 活跃任务与阶段
 curl -sS http://127.0.0.1:32171/metrics   # 资源 / 任务 / 模型指标
@@ -197,4 +197,4 @@ curl -sS http://127.0.0.1:32170/healthz
 | Nginx 502 | 容器没起、端口没映射、或 app 监听在 127.0.0.1（容器内要监听 0.0.0.0） |
 | 拉取 debian 很慢/失败 | 配阿里云镜像加速，或 `docker compose build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim` |
 | 磁盘不够（40G） | 不要用源码构建；定期 `docker system prune -af`、`docker builder prune -f`；日志/媒体见 `deploy/README.md` 第 8 节 |
-| 想用阿里云容器镜像服务 ACR | 本地/CI `bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.0`，服务器 `docker login` 后 `docker compose pull && up -d` |
+| 想用阿里云容器镜像服务 ACR | 本地/CI `bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.1`，服务器 `docker login` 后 `docker compose pull && up -d` |

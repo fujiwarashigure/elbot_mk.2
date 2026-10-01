@@ -7,7 +7,7 @@
 > **不想在服务器上编译 Go？**
 > 仓库**不提交**预编译 / 离线产物，`deploy/dist/` 默认不存在；需要时先在本地或 CI 运行
 > `deploy/pack/prepare-offline.sh` 生成，再上传服务器。生成方式见 [`pack/README-OFFLINE.md`](pack/README-OFFLINE.md)：
-> - `deploy/dist/elbot-0.6.0-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
+> - `deploy/dist/elbot-0.6.1-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
 > - `deploy/dist/offline-amd64/`：预编译二进制 + Debian 运行时，服务器只需拉约 30MB debian 基础镜像，功能完整；
 > - 如果从仓库里找不到 `deploy/dist/`，属于正常现象，请先自行生成。
 
@@ -28,7 +28,10 @@ deploy/
 ├── elbot.service             # 备选：原生二进制 systemd 单元（不用容器时）
 ├── nginx-elbot.conf          # 宝塔 Nginx 反向代理片段
 ├── build-push.sh             # 构建并推送镜像到阿里云 ACR / 腾讯云 TCR
-├── backup.sh                 # 数据备份脚本（可挂到宝塔计划任务）
+├── backup.sh                 # 一致性备份 + sha256 manifest（可挂到宝塔计划任务）
+├── restore-verify.sh         # 隔离恢复验证：SQLite / 配置 / 角色 / 媒体 / manifest
+├── upgrade.sh                # 单机升级：配置检查 + 数据/镜像快照 + 新镜像检查
+├── rollback.sh               # 单机回滚：校验数据快照 + 载入上一版镜像 + 恢复 data
 ├── elbot-watchdog.sh         # 外部 watchdog：/live 探活 + 冷却限次自愈
 ├── elbot-watchdog.service    # systemd 一次性执行单元
 ├── elbot-watchdog.timer      # 每分钟触发 watchdog
@@ -158,7 +161,7 @@ ELBOT_HEALTH_LIVE_STALE_SECONDS=90
 
 > 生成随机 token：`openssl rand -hex 32`
 >
-> `.env` 通过 Compose `env_file` 注入 ElBot 进程环境，因此 Shell / Hook 子进程也可能继承这些变量。如果准备向群聊用户开放工具，不要只依赖“容器是非 root”来保护 API Key，务必阅读第 11 节。
+> `.env` 通过 Compose `env_file` 注入 ElBot 进程环境。Shell / Go Skill 子进程会移除名字含独立 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`PRIVATE` 词段的变量；Web 搜索、生图、媒体下载等父进程工具仍可读取。如果准备向群聊用户开放工具，不要只依赖“容器是非 root”来保护 API Key，务必阅读第 11 节。
 
 再次运行初始化：
 
@@ -375,11 +378,12 @@ docker compose logs -f --tail=100
 
 Compose 默认通过环境变量启用独立健康接口，并只映射到宿主机 `127.0.0.1:32171`：
 
-- `GET /live`：关键调度循环最近是否还有心跳。watchdog 只应依据它判断是否需要重启。
-- `GET /ready`：SQLite / 数据目录是否可写、组件是否初始化、已配置平台是否已成功连接过。
-- `GET /healthz`：汇总状态。外部模型 API 故障显示为 `degraded`，HTTP 仍返回 200，**不应触发本机自动重启**。
-- `GET /tasks`：当前活跃的 turn / tool / hook / 上下文压缩任务、阶段、开始时间和最近进展。
-- `GET /metrics`：任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘等资源指标，以及平台和模型健康状态。
+- `GET /live`：只表示进程仍在运行。进程存活时 HTTP 200，不判断调度心跳、模型或平台。
+- `GET /ready`：进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期。平台未连接、模型 API 故障不会让它失败。
+- `GET /healthz`：汇总状态。平台/模型故障显示为 `degraded`；调度心跳过期时返回 `not_ready`。**不应仅凭它自动重启本机服务**。
+- `GET /tasks`：当前活跃的 turn / tool / hook / 上下文压缩任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。
+- `GET /metrics`：任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台和模型状态、Provider 熔断状态、限速阈值/拒绝原因和生图队列状态。
+- `GET /diagnostics`：面向“机器人没回复”的聚合诊断，包含排队/超时、限速命中、熔断状态和最近一次重启原因。
 
 ```bash
 # 在宿主机执行
@@ -393,11 +397,13 @@ curl -sS http://127.0.0.1:32171/healthz
 ```dotenv
 # 容器内监听地址；Compose 映射 127.0.0.1:32171:32171
 ELBOT_HEALTH_ADDR=0.0.0.0:32171
-# 多久没有调度心跳视为 not_live，默认 90 秒
+# 调度心跳过期阈值；未启用平台时也会持续心跳，默认 90 秒。
 ELBOT_HEALTH_LIVE_STALE_SECONDS=90
+# /tasks 和 /metrics 的 token；反代或非回环访问前必须设置。
+# ELBOT_OPS_TOKEN=请替换为随机长字符串
 ```
 
-> `ELBOT_HEALTH_LIVE_STALE_SECONDS` 应明显大于调度心跳间隔（当前 10 秒），建议保持默认 90。
+> `/tasks` 和 `/metrics` 在设置 `ELBOT_OPS_TOKEN` 后需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`。`ELBOT_HEALTH_LIVE_STALE_SECONDS` 应明显大于调度心跳间隔（当前 10 秒），建议保持默认 90。
 >
 > 32171 **不要**加入宝塔 Nginx 的公网 location；它只供宿主机 watchdog、宝塔监控或本机 curl 使用。标准 Dockerfile 已把 `HEALTHCHECK` 切到 `curl /live`；如果你使用无 curl 的 scratch 离线镜像或自定义镜像，自动处置仍应直接请求宿主机 `127.0.0.1:32171/live`，不要只看 Docker 的 `healthy/unhealthy`。
 
@@ -478,10 +484,10 @@ systemctl reload elbot-compose      # 重新 up -d
 
 ### 6.1 外部 watchdog：分级自愈而不是遇事就重启
 
-`deploy/elbot-watchdog.sh` 只依据独立 `/live` 判断关键调度循环是否卡死，不会因为 CPU 高、模型 API 暂时失败或队列瞬时堆积就杀进程：
+`deploy/elbot-watchdog.sh` 只依据独立 `/live` 判断进程是否还能响应，不会因为 CPU 高、模型 API 暂时失败、平台重连或队列瞬时堆积就杀进程：
 
 1. `curl /live` 连续失败达到 `WATCHDOG_FAILURE_THRESHOLD` 次才开始处置；
-2. 重启前收集 `docker ps/inspect/logs/stats`、`/live`、`/ready`、`/healthz`、磁盘和 data 大小到 `diagnostics/`；
+2. 重启前收集容器 State/Ports、logs/stats、`/live`、`/ready`、`/healthz`、磁盘和 data 大小到 `diagnostics/`；诊断输出会过滤 `docker inspect` 的完整环境变量并做通用凭据脱敏；
 3. 启用 `WATCHDOG_COOLDOWN_SECONDS` 冷却时间；
 4. 在 `WATCHDOG_WINDOW_SECONDS` 内最多自动重启 `WATCHDOG_MAX_RESTARTS` 次；
 5. 超过上限后写入 `watchdog-state/paused` 并停止自动重启，保留现场，等待人工处理。
@@ -497,7 +503,7 @@ systemctl daemon-reload
 systemctl enable --now elbot-watchdog.timer
 ```
 
-配置 `/ready` 长期失败、模型 API `degraded` 等状态不会触发 watchdog 重启；它们只用于告警和排障。需要临时暂停自动重启时：
+配置 `/ready` 长期失败、模型 API `degraded` 等状态不会触发 watchdog 重启；它们只用于告警和排障。若启用了 `ELBOT_OPS_TOKEN`，在 `watchdog.env` 中把同一个值写入 `WATCHDOG_OPS_TOKEN`，否则 `/tasks`、`/metrics` 诊断会收到 401。需要临时暂停自动重启时：
 
 ```bash
 touch /opt/elbot/deploy/watchdog-state/paused
@@ -510,10 +516,10 @@ rm -f /opt/elbot/deploy/watchdog-state/paused
 ### 6.2 任务超时、并发上限与实时指标
 
 - `app.toml [ops]` 可为工具、Hook、上下文压缩设置超时，并限制并发 turn / tool / hook 数量；可通过 `queue_wait_kinds` 允许 tool / hook / compress 短暂排队，turn 和队列满时明确拒绝。
-- 独立健康接口新增 `/tasks`（活跃任务、阶段、开始/进展时间）和 `/metrics`（任务数、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台连接次数、模型状态、限速命中/拒绝数）。
+- 独立健康接口新增 `/tasks`（活跃任务、阶段、开始/进展时间、`queued_by_kind`）和 `/metrics`（任务数、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台/模型/熔断状态、限速阈值与用户级/群级拒绝原因、生图队列）。
 - Shell、Hook、AgentSkill / Go Skill 在支持平台上会在超时或取消时终止整个子进程树；图片压缩 / 缩放通过同一二进制的隐藏 worker 子进程执行，超时或取消时终止整个 worker 进程树。
 - `[storage]` 的 `disk_warn_ratio` / `disk_critical_ratio` / `disk_min_free_bytes` 提供磁盘分级保护；critical 时拒绝非必要媒体写入，保护 SQLite 和配置写入。
-- `[ops]` 还可开启 Provider 熔断并配置 `fallback_provider` / `fallback_model`；模型 API 熔断只让 `/healthz` 变 `degraded` 并切备用，不会触发本机重启。
+- `[ops]` 还可开启 Provider 熔断并配置 `fallback_provider` / `fallback_model`；默认 `fallback_mode = "circuit"` 只在熔断后切备用，`fallback_mode = "on_error"` 可在首个预流式失败请求切换，`fallback_timeout_seconds` 可限制单次 Provider 尝试总时长。模型 API 熔断只让 `/healthz` 变 `degraded`，不会触发本机重启。
 - `[image_generation]` 的 `max_concurrent` / `queue_size` / `queue_timeout_seconds` 用于限制生图并发；`/metrics` 会显示 `image_limit.active` 和 `image_limit.waiting`。
 - 告警系统可以轮询 `/metrics` 与 `/healthz`，但自动重启只应由 `elbot-watchdog` 根据 `/live` 触发。
 
@@ -521,7 +527,7 @@ rm -f /opt/elbot/deploy/watchdog-state/paused
 
 ## 7. 备份与恢复
 
-`deploy/backup.sh` 默认执行**一致性备份**，备份到 `deploy/backups/`，默认保留 14 份：
+`deploy/backup.sh` 默认执行**一致性备份**，备份到 `deploy/backups/`，默认保留 14 份；备份完成后会生成 `*.manifest` 文件级 sha256 清单，并在隔离临时目录执行恢复验证，确认 SQLite、配置、角色素材和本地媒体可一起读取：
 
 - 宿主机有 `sqlite3`：对 SQLite 数据库（`*.db` / `*.sqlite` / `*.sqlite3`）执行 `.backup`，其余文件归档，不中断服务；
 - 没有 `sqlite3`：短暂停止 Compose 容器，打包完成后自动 `up -d`；
@@ -534,6 +540,8 @@ bash /opt/elbot/deploy/backup.sh
 BACKUP_MODE=stop bash /opt/elbot/deploy/backup.sh
 # 明确接受热打包风险（不推荐）：
 BACKUP_MODE=hot bash /opt/elbot/deploy/backup.sh
+# 只生成备份、跳过恢复验证（不推荐）：
+BACKUP_VERIFY=0 bash /opt/elbot/deploy/backup.sh
 ```
 
 在宝塔【计划任务】中加一条 Shell 脚本，每天凌晨执行：
@@ -551,6 +559,14 @@ bash /opt/elbot/deploy/backup.sh >/dev/null 2>&1
 - `data/elbot/logs/`：运行/审计/Elnis 日志
 
 ### 7.1 恢复演练（建议至少做一次）
+
+`deploy/restore-verify.sh` 会自动完成解压、SQLite 完整性、配置、角色素材和本地媒体引用检查；也可以手动执行：
+
+```bash
+bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.tar.gz
+```
+
+手工恢复步骤如下：
 
 ```bash
 # 1. 解压到临时目录（不要直接覆盖生产 data）
@@ -593,6 +609,20 @@ cd /opt/elbot/deploy
 docker compose pull
 docker compose up -d
 ```
+
+仓库还提供了更稳妥的单机升级/回滚流程：
+
+```bash
+cd /opt/elbot/deploy
+
+# 升级：当前配置检查 -> 数据快照 -> 上一版镜像快照 -> 新镜像配置兼容性检查 -> 重建
+bash upgrade.sh
+
+# 回滚：校验数据快照 -> 载入上一版镜像 -> 恢复 data -> 重建
+bash rollback.sh
+```
+
+`upgrade.sh` 会把回滚所需信息写入 `deploy/rollback/rollback.env`，包括上一版镜像 tar、数据快照路径和版本信息。回滚前仍会调用 `restore-verify.sh` 校验数据快照；如果要跳过交互确认可使用 `ROLLBACK_CONFIRM=1 bash rollback.sh`。
 
 ### 8.2 查看日志
 
@@ -645,14 +675,14 @@ s3_secret_key_env = "ELBOT_S3_SECRET_ACCESS_KEY"
 
 ```bash
 docker login registry.cn-hangzhou.aliyuncs.com
-bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.0
+bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.1
 ```
 
 ### 9.2 腾讯云 TCR
 
 ```bash
 docker login ccr.ccs.tencentyun.com
-bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.0
+bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.1
 ```
 
 ### 9.3 服务器使用远端镜像
@@ -660,7 +690,7 @@ bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.0
 编辑 `deploy/.env`：
 
 ```dotenv
-ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.0
+ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.1
 ```
 
 服务器登录私有仓库后：
@@ -684,7 +714,7 @@ Dockerfile 的 `VERSION` 构建参数只影响镜像内的版本字符串与 OCI
 
 ```bash
 PLATFORM=linux/amd64,linux/arm64 \
-  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.0
+  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.1
 ```
 
 多平台只能 `--push`（buildx 限制），脚本已处理。Dockerfile 的构建阶段固定在
@@ -750,7 +780,7 @@ systemctl enable --now elbot
 3. 宝塔面板改端口、强密码、开启二次验证，并限制来源 IP。
 4. Elnis 建议再加一层限制：只允许已知来源 IP，或由内网机器投递。
 5. 2C4G 上建议保留 `mem_limit: 1536m`；如果同机还有 MySQL 等，降到 `1024m`。
-6. **不要只依赖“容器是非 root”来保护 Key**：Compose 的 `env_file` 会把 `.env` 注入 ElBot 进程环境，Shell / Hook 子进程同样可能继承这些变量；systemd `EnvironmentFile` 也有同样效果。详见 [环境变量与进程环境继承](../docs/configuration.md#环境变量与进程环境继承)。
+6. **不要只依赖“容器是非 root”来保护 Key**：Compose 的 `env_file` 会把 `.env` 注入 ElBot 进程环境。ElBot 会从 Shell / Go Skill 子进程环境中移除名字像密钥的变量，但父进程和 Web / 生图等工具仍可读取；systemd `EnvironmentFile` 则会让变量从一开始就进入 ElBot 进程环境。详见 [环境变量与进程环境继承](../docs/configuration.md#环境变量与进程环境继承)。
 
 ### 11.1 向群聊用户开放工具时的检查项
 
@@ -812,9 +842,29 @@ curl -sS http://127.0.0.1:32171/ready
 curl -sS http://127.0.0.1:32171/healthz
 ```
 
-- `/live` 失败才说明关键调度循环可能卡死；
-- `/ready` 失败说明数据目录、SQLite 目录或平台连接尚未就绪；
-- `/healthz` 为 `degraded` 时说明模型 API 等外部依赖异常，但不应自动重启本地服务。
+- `/live` 失败说明进程已无法响应 HTTP；
+- `/ready` 失败说明进程尚未初始化、调度心跳已过期，或数据目录不可写；平台未连接、模型 API 故障不会让它失败；
+- `/healthz` 为 `degraded` 时说明平台/模型异常；为 `not_ready` 时说明进程未就绪或调度心跳过期。两者都不应单独触发自动重启。
+
+### 12.3.1 一条命令部署验收：`elbot doctor`
+
+```bash
+# 容器内运行；检查配置、健康端口、平台状态和模型调用
+docker compose exec -T elbot elbot doctor
+
+# 追加真实消息往返：通过 CLI 远程协议发送一条消息并等待回复
+docker compose exec -T elbot elbot doctor --e2e
+
+# 输出 JSON，便于接入 CI / 发布流水线
+docker compose exec -T elbot elbot doctor --e2e --json
+```
+
+报告使用两个总字段区分阶段：
+
+- `config_ok`：配置加载、数据目录可写、端口可达、平台状态和模型调用检查通过；
+- `e2e_ok`：`--e2e` 时，CLI 远程服务器实际完成一次“发送消息 → 收到回复”；未加 `--e2e` 时为 `false`，并显示 `skipped`。
+
+`--no-model` 可跳过真实模型调用，只做配置和本地检查。CLI 远程消息往返要求 `platform.cli.server.enabled=true`，并配置好客户端 token。
 
 ### 12.4 实际连通与会话持久化
 
@@ -839,8 +889,9 @@ curl -sS http://127.0.0.1:32171/healthz
 | Nginx 502 | 容器没起、端口没映射、应用监听在 127.0.0.1（容器内需 0.0.0.0） |
 | 日志报 permission denied | `chown -R 10001:10001 /opt/elbot/deploy/data`；用宝塔文件管理器编辑后也要重跑 |
 | 改了 `.env` 不生效 | 必须 `docker compose up -d --force-recreate`，`restart` 不会重注环境变量 |
-| `/ready` 长期 `not_ready` | 检查数据目录/SQLite 目录是否可写、日志中的平台连接错误、`ELBOT_HEALTH_ADDR` 是否配置 |
+| `/ready` 长期 `not_ready` | 检查数据目录/SQLite 目录是否可写、调度心跳是否过期、`ELBOT_HEALTH_ADDR` 是否配置；平台/模型故障不会使 `/ready` 失败 |
 | `/healthz` 为 `degraded` | 通常是模型 API 或中转站异常；先查上游，不要直接重启容器 |
+| `/healthz` 为 `not_ready` | 检查进程是否完成初始化、调度心跳是否过期、数据目录是否可写；平台/模型故障不会导致它 not_ready |
 | 启动报 `service already appears to be running` | 多为 PID 文件残留：`rm -f /opt/elbot/deploy/data/run/elbot/elbot.pid` 后重启 |
 | 大陆机器调用 OpenAI 超时 | 配 Provider `proxy`，或换 DeepSeek/通义/混元等国内兼容接口 |
 | Go Skill 编译失败 | `.env` 设 `ELBOT_BUILD_TARGET=go-runtime` 后 `docker compose build && docker compose up -d` |

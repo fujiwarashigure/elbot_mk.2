@@ -11,8 +11,8 @@
 #
 # 多架构（需 buildx；一次产出 amd64 + arm64 的 manifest list）：
 #   docker buildx build --platform linux/amd64,linux/arm64 \
-#     -f deploy/Dockerfile --build-arg VERSION=0.6.0 \
-#     --push -t <registry>/<namespace>/elbot:0.6.0 .
+#     -f deploy/Dockerfile --build-arg VERSION=0.6.1 \
+#     --push -t <registry>/<namespace>/elbot:0.6.1 .
 #
 # 基础镜像可以覆盖（国内加速 / pin digest）：
 #   --build-arg GO_BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/golang
@@ -157,9 +157,9 @@ VOLUME ["/data"]
 # docker-compose 中只映射到宿主机 127.0.0.1，公网访问请走宝塔 Nginx 反向代理。
 EXPOSE 32170 32171 32172
 
-# 使用独立 /live 心跳判断关键调度循环是否推进；不再只看 PID。
-# /live 不判断模型 API、QQ OneBot / Telegram 或 CLI / Elnis 的完整连通性，
-# 部署验收仍需实际发一条消息并按 deploy/README.md 第 12 节检查。
+# 使用独立 /live 判断进程是否还能响应；不再只看 PID。
+# /live 不判断调度心跳、模型 API、QQ OneBot / Telegram 或 CLI / Elnis 的完整连通性，
+# 调度/数据目录就绪看 /ready，部署验收仍需实际发消息并按 deploy/README.md 第 12 节检查。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD ["curl", "-fsS", "--max-time", "3", "http://127.0.0.1:32171/live"]
 

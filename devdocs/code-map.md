@@ -50,6 +50,30 @@ rg -n "func Run|service run|completion|--client|RunCron" cmd internal/app intern
 rg -n "ELBOT_CONFIG_FILE|providers.toml|state.toml|tool_tags.toml|TextHandler|audit" internal/config internal/logging docs/configuration.md
 ```
 
+<!-- locator:health-ops -->
+## 健康状态、限速、熔断与运维接口
+
+适用任务：`/live`、`/ready`、`/healthz` 语义，watchdog 诊断，Provider 熔断/备用，群聊限速，`/tasks`、`/metrics` 和 ops token。
+
+先看：
+
+- `internal/health/`：健康状态、`/live`、`/ready`、`/healthz`、extra handler token；`state.go` 区分进程存活、readiness、调度心跳、平台和模型状态。
+- `internal/app/health.go`、`ops_health.go`、`health_llm.go`、`health_handler.go`：启动健康接口、读取 `ELBOT_HEALTH_*` / `ELBOT_OPS_TOKEN` / 重启原因文件、组装 `/metrics` 与 `/diagnostics`。
+- `internal/app/doctor.go`、`internal/launcher/cli.go`、`cmd/elbot/main.go`：`elbot doctor` 配置/端口/平台/模型验收与 `--e2e` CLI 真实消息往返。
+- `internal/character/store.go`、`write.go`：角色/图片 `version`、`source` 与 `Manifest`/`WriteManifest` 备份清单。
+- `internal/app/breaker_llm.go`、`internal/app/models.go`、`internal/llm/breaker/`：Provider 熔断、`fallback_mode` / `fallback_on_error`、备用 Provider 和总超时。
+- `internal/agent/ratelimit.go`、`internal/ops/ratelimit/ratelimit.go`：用户级/群级令牌桶叠加；阈值和拒绝原因进入 `/metrics.rate_limit`。
+- `internal/processenv/environment.go`：Shell / Go Skill 子进程凭据变量过滤。
+- `deploy/elbot-watchdog.sh`、`deploy/restore-verify.sh`、`deploy/backup.sh`：阈值/冷却/诊断脱敏、重启原因文件、sha256 备份清单和隔离恢复验证。
+- `deploy/upgrade.sh`、`deploy/rollback.sh`：配置兼容性检查、上一版镜像/数据快照与回滚。
+
+常用搜索：
+
+```bash
+rg -n "IsProcessLive|SchedulerKnown|ExtraHandlerToken|RateLimitStatus|UsesFallbackOnError|WithoutSensitiveKeys|RunDoctor|WriteManifest" internal
+rg -n "ELBOT_OPS_TOKEN|WATCHDOG_OPS_TOKEN|restore-verify|fallback_mode|doctor|upgrade.sh|rollback.sh" docs deploy README.zh-CN.md
+```
+
 <!-- locator:agent-chat -->
 ## Agent 对话流程
 

@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,22 +17,27 @@ const defaultReadHeaderTimeout = 5 * time.Second
 
 // ServerOptions configures the independent health HTTP server.
 type ServerOptions struct {
-	Addr              string
-	State             *State
-	Checkers          []Checker
-	ExtraHandlers     map[string]http.Handler
+	Addr          string
+	State         *State
+	Checkers      []Checker
+	ExtraHandlers map[string]http.Handler
+	// ExtraHandlerToken protects /tasks, /metrics and any other extra handler.
+	// Empty means no authentication, which is only appropriate when the server
+	// is bound to loopback or otherwise not reachable from untrusted networks.
+	ExtraHandlerToken string
 	Logger            *slog.Logger
 	ReadHeaderTimeout time.Duration
 }
 
 // Server exposes /live, /ready and /healthz for internal or loopback access.
 type Server struct {
-	addr     string
-	state    *State
-	checkers []Checker
-	logger   *slog.Logger
-	server   *http.Server
-	listener net.Listener
+	addr              string
+	state             *State
+	checkers          []Checker
+	extraHandlerToken string
+	logger            *slog.Logger
+	server            *http.Server
+	listener          net.Listener
 }
 
 // NewServer creates a health server without binding a port.
@@ -48,10 +54,11 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		readHeaderTimeout = defaultReadHeaderTimeout
 	}
 	s := &Server{
-		addr:     addr,
-		state:    opts.State,
-		checkers: opts.Checkers,
-		logger:   opts.Logger,
+		addr:              addr,
+		state:             opts.State,
+		checkers:          opts.Checkers,
+		extraHandlerToken: strings.TrimSpace(opts.ExtraHandlerToken),
+		logger:            opts.Logger,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/live", s.handleLive)
@@ -63,6 +70,9 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		}
 		if !strings.HasPrefix(path, "/") {
 			return nil, fmt.Errorf("health extra handler path must start with /: %q", path)
+		}
+		if s.extraHandlerToken != "" {
+			handler = s.requireExtraHandlerToken(handler)
 		}
 		mux.Handle(path, handler)
 	}
@@ -209,6 +219,16 @@ func (s *Server) evaluateReady(ctx context.Context) (bool, map[string]string) {
 	} else {
 		checks["process"] = "ready"
 	}
+	if s.state.SchedulerKnown() {
+		if s.state.SchedulerLive() {
+			checks["scheduler"] = "ok"
+		} else {
+			ready = false
+			checks["scheduler"] = "heartbeat stale"
+		}
+	} else {
+		checks["scheduler"] = "not started"
+	}
 	for _, checker := range s.checkers {
 		if checker == nil {
 			continue
@@ -221,14 +241,30 @@ func (s *Server) evaluateReady(ctx context.Context) (bool, map[string]string) {
 		}
 		checks[name] = "ok"
 	}
-	platformsReady, platformChecks := s.state.PlatformReadiness()
-	if !platformsReady {
-		ready = false
-	}
-	for name, value := range platformChecks {
-		checks[name] = value
-	}
 	return ready, checks
+}
+
+func (s *Server) requireExtraHandlerToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r.Header.Get("Authorization"))
+		if token == "" {
+			token = strings.TrimSpace(r.Header.Get("X-Elbot-Ops-Token"))
+		}
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.extraHandlerToken)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func bearerToken(header string) string {
+	header = strings.TrimSpace(header)
+	const prefix = "bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(header[len(prefix):])
 }
 
 func allowGet(w http.ResponseWriter, r *http.Request) bool {

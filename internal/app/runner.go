@@ -67,9 +67,11 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 
 	tasksProvider := &lazyJSONProvider{}
 	metricsProvider := &lazyJSONProvider{}
+	diagnosticsProvider := &lazyJSONProvider{}
 	healthState, healthServer, err := startHealthServer(foundation.Config, foundation.Logger, opts.Version, map[string]http.Handler{
-		"/tasks":   tasksProvider,
-		"/metrics": metricsProvider,
+		"/tasks":       tasksProvider,
+		"/metrics":     metricsProvider,
+		"/diagnostics": diagnosticsProvider,
 	})
 	if err != nil {
 		return err
@@ -79,6 +81,7 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 			return closeHealthServer(ctx, healthServer)
 		}})
 	}
+	applyRestartReason(healthState)
 	if healthState != nil {
 		cleanups = append(cleanups, cleanupStep{name: "health state", close: func(context.Context) error {
 			healthState.SetShuttingDown(true)
@@ -123,7 +126,10 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 	}
 
 	tasksProvider.Set(func() any { return runtime.Agent.ActiveRequests() })
-	metricsProvider.Set(func() any { return collectOpsMetrics(foundation.Config, healthState, runtime.Agent, runtime.ImageLimiter) })
+	metricsProvider.Set(func() any {
+		return collectOpsMetrics(foundation.Config, healthState, runtime.Agent, runtime.ImageLimiter)
+	})
+	diagnosticsProvider.Set(func() any { return collectOpsDiagnostics(healthState, runtime.Agent) })
 	if healthState != nil {
 		runtime.Handler = healthHandler{inner: runtime.Handler, state: healthState}
 		healthState.SetReady(true)

@@ -44,6 +44,7 @@ rg -n "locator:agent-chat" AGENTS.md devdocs/*.md
 | Tool/工具调用 | `locator:tool`, `locator:tool-flow` | `devdocs/architecture.md`, `devdocs/code-map.md` |
 | Skill | `locator:skill` | `devdocs/code-map.md` |
 | Hook/插件 | `locator:hook` | `docs/hooks.md`, `devdocs/code-map.md` |
+| 健康状态与运维接口 | `locator:health-ops` | `devdocs/architecture.md`, `devdocs/code-map.md` |
 | Output/发送 | `locator:output` | `devdocs/architecture.md`, `devdocs/code-map.md` |
 | 平台适配 | `locator:platform` | `devdocs/code-map.md` |
 | Session/上下文 | `locator:session`, `locator:context` | `devdocs/architecture.md`, `devdocs/code-map.md` |

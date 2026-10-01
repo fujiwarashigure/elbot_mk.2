@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,18 @@ func (s *Store) Write(ctx context.Context, req WriteRequest, viewer Viewer) (*Ch
 	}
 	if req.Image != nil {
 		imageSettings = *req.Image
+	}
+	if req.Version != nil {
+		meta.Version = strings.TrimSpace(*req.Version)
+	} else if existing != nil {
+		meta.Version = nextVersion(meta.Version)
+	} else if strings.TrimSpace(meta.Version) == "" {
+		meta.Version = "1"
+	}
+	if req.Source != nil {
+		meta.Source = strings.TrimSpace(*req.Source)
+	} else if strings.TrimSpace(meta.Source) == "" {
+		meta.Source = firstNonEmpty(strings.TrimSpace(viewer.Platform), "local")
 	}
 	if !viewer.Superadmin {
 		// Regular users own their characters and can only keep them private.
@@ -139,6 +152,11 @@ func (s *Store) Delete(ctx context.Context, id string, viewer Viewer) error {
 
 // AddImage stores the original bytes plus the Media Center reference.
 func (s *Store) AddImage(ctx context.Context, id, name, mimeType, mediaID string, data []byte, viewer Viewer) (*Image, error) {
+	return s.AddImageWithMeta(ctx, id, name, mimeType, mediaID, "", "", data, viewer)
+}
+
+// AddImageWithMeta is AddImage plus explicit asset version and source label.
+func (s *Store) AddImageWithMeta(ctx context.Context, id, name, mimeType, mediaID, version, source string, data []byte, viewer Viewer) (*Image, error) {
 	name = safeImageName(name)
 	if name == "" {
 		return nil, fmt.Errorf("invalid image name")
@@ -175,6 +193,8 @@ func (s *Store) AddImage(ctx context.Context, id, name, mimeType, mediaID string
 		MediaID:   strings.TrimSpace(mediaID),
 		Path:      filepath.ToSlash(filepath.Join(ImagesDir, name)),
 		Size:      int64(len(data)),
+		Version:   firstNonEmpty(strings.TrimSpace(version), "1"),
+		Source:    firstNonEmpty(strings.TrimSpace(source), strings.TrimSpace(viewer.Platform), "local"),
 		CreatedAt: nowString(),
 	}
 	s.mu.Lock()
@@ -258,6 +278,8 @@ func (c *Character) toFile() fileFormat {
 			OwnerPlatform: c.OwnerPlatform,
 			OwnerID:       c.OwnerID,
 			Visibility:    string(c.Visibility),
+			Version:       c.Version,
+			Source:        c.Source,
 			CreatedAt:     c.CreatedAt,
 			UpdatedAt:     c.UpdatedAt,
 		},
@@ -383,6 +405,18 @@ func cleanStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func nextVersion(current string) string {
+	current = strings.TrimSpace(current)
+	if current == "" {
+		return "1"
+	}
+	value, err := strconv.Atoi(current)
+	if err != nil || value <= 0 {
+		return "1"
+	}
+	return strconv.Itoa(value + 1)
 }
 
 func nowString() string {
