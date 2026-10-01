@@ -7,7 +7,7 @@
 > **不想在服务器上编译 Go？**
 > 仓库**不提交**预编译 / 离线产物，`deploy/dist/` 默认不存在；需要时先在本地或 CI 运行
 > `deploy/pack/prepare-offline.sh` 生成，再上传服务器。生成方式见 [`pack/README-OFFLINE.md`](pack/README-OFFLINE.md)：
-> - `deploy/dist/elbot-0.5.0-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
+> - `deploy/dist/elbot-0.6.0-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
 > - `deploy/dist/offline-amd64/`：预编译二进制 + Debian 运行时，服务器只需拉约 30MB debian 基础镜像，功能完整；
 > - 如果从仓库里找不到 `deploy/dist/`，属于正常现象，请先自行生成。
 
@@ -33,10 +33,15 @@ deploy/
 ├── elbot-watchdog.service    # systemd 一次性执行单元
 ├── elbot-watchdog.timer      # 每分钟触发 watchdog
 ├── watchdog.env.example      # watchdog 阈值 / webhook 模板
+├── VERSION                   # 版本号单点来源（build-push.sh / prepare-offline.sh 默认读它）
 └── README.md                 # 本文档
 ```
 
 > 说明：仓库本身没有官方 Dockerfile，本目录是本次新增的部署封装。
+>
+> **行尾（CRLF）**：`deploy/` 下的 `.sh` / `.service` / `.timer` / `.conf` / `.yml` / `.env.example`
+> 已在 `.gitattributes` 中强制 `eol=lf`。请勿用其它工具写回 CRLF；否则 Linux 上会出现
+> `bad interpreter: /usr/bin/env bash^M`、systemd unit 解析失败等问题。
 
 ---
 
@@ -118,7 +123,7 @@ bash init-host.sh
 
 首次运行会：
 1. 检查 Docker / Compose；
-2. 创建 `deploy/data/{config,run,logs}`，并把属主设为容器内的 **UID/GID 10001**；
+2. 创建 `deploy/data/{config,run,logs,cache}`，并把属主设为容器内的 **UID/GID 10001**；
 3. 从 `.env.example` 生成 `.env`，然后提示你填写。
 
 > **数据卷权限**：Compose 把 `./data` 挂到容器 `/data`，容器以 `10001:10001` 运行；部署前只要 `deploy/data` 不属于该 UID，SQLite、配置和日志就可能写入失败。请使用 `init-host.sh`，或在启动前手动执行：
@@ -197,6 +202,12 @@ deploy/data/elbot/
 ├── elbot_chat_history.db
 ├── logs/
 └── sandbox/
+```
+
+缓存（Go Skill 编译缓存、媒体处理临时文件；对应 `XDG_CACHE_HOME`）在：
+
+```
+deploy/data/cache/
 ```
 
 > **首次启动后先做一次配置核对**：
@@ -634,14 +645,14 @@ s3_secret_key_env = "ELBOT_S3_SECRET_ACCESS_KEY"
 
 ```bash
 docker login registry.cn-hangzhou.aliyuncs.com
-bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.5.0
+bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.0
 ```
 
 ### 9.2 腾讯云 TCR
 
 ```bash
 docker login ccr.ccs.tencentyun.com
-bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.5.0
+bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.0
 ```
 
 ### 9.3 服务器使用远端镜像
@@ -649,7 +660,7 @@ bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.5.0
 编辑 `deploy/.env`：
 
 ```dotenv
-ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.5.0
+ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.0
 ```
 
 服务器登录私有仓库后：
@@ -662,6 +673,47 @@ docker compose up -d --build   # 如需覆盖为本地构建
 ```
 
 > ARM 实例（部分腾讯云/阿里云规格）用：`PLATFORM=linux/arm64 bash deploy/build-push.sh <image>`。
+
+### 9.4 构建参数、多架构与版本号
+
+**版本号**：`deploy/VERSION` 是单点来源，`build-push.sh` 与 `pack/prepare-offline.sh`
+在未设置 `ELBOT_VERSION` 时会读取它。`deploy/.env` 里的 `ELBOT_VERSION` 建议与之保持一致。
+Dockerfile 的 `VERSION` 构建参数只影响镜像内的版本字符串与 OCI label。
+
+**多架构**（一次产出 amd64 + arm64 的 manifest list，需 buildx）：
+
+```bash
+PLATFORM=linux/amd64,linux/arm64 \
+  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.0
+```
+
+多平台只能 `--push`（buildx 限制），脚本已处理。Dockerfile 的构建阶段固定在
+`$BUILDPLATFORM` 上原生执行、只交叉编译出 `$TARGETARCH` 的产物，
+因此打 arm64 不会让整个 Go 构建流程都走 QEMU 模拟。
+
+**基础镜像覆盖 / pin digest**：
+
+```bash
+GO_BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/golang \
+RUNTIME_BASE_IMAGE=debian:bookworm-slim@sha256:<digest> \
+  bash deploy/build-push.sh <image>
+```
+
+**运行镜像里的系统命令**：默认列表（bash / procps / ping / dig / iproute2 / less / file /
+tree / tar / gzip / xz / rsync / zip / python3 等）内联在 `deploy/Dockerfile` 中，
+**只增不减**——ElBot 的 `shell` 工具能力优先。需要额外命令时用 `EXTRA_TOOLS` 追加：
+
+```bash
+EXTRA_TOOLS="imagemagick ffmpeg" bash deploy/build-push.sh <image>
+# 或在 deploy/.env 里设置 EXTRA_TOOLS=... 后 docker compose build
+```
+
+> 不要用 `cap_drop: ALL` 这类加固：`ping` 需要 `NET_RAW`，过窄的 capability
+> 会直接砍掉 Agent 的工具能力。确实不需要 shell 工具时，改用 `deploy/pack` 的
+> scratch 预编译镜像（镜像内没有任何命令）。
+
+**缓存位置**：镜像把 `XDG_CACHE_HOME` 指向 `/data/cache`（Go Skill 编译缓存、
+媒体处理临时文件都落在数据卷上），重建容器后仍可用；`init-host.sh` 会创建该目录。
 
 ---
 
@@ -736,7 +788,7 @@ systemctl enable --now elbot
 cd /opt/elbot/deploy
 stat -c '%u:%g %a %n' data
 # 期望：10001:10001；至少确认容器进程可写 test -w
-docker compose exec -T elbot sh -c 'test -w /data && test -w /data/config && test -w /data/elbot && echo data-writable'
+docker compose exec -T elbot sh -c 'test -w /data && test -w /data/config && test -w /data/elbot && test -w /data/cache && echo data-writable'
 ```
 
 > 如果使用 scratch 离线镜像（无 shell），用 `docker inspect` / 备份写入测试代替 `exec`。

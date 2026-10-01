@@ -13,14 +13,25 @@
 
 services:
   elbot:
-    image: ${ELBOT_IMAGE:-elbot:0.5.0}
+    image: ${ELBOT_IMAGE:-elbot:0.6.0}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
       target: ${ELBOT_BUILD_TARGET:-runtime}   # runtime 或 go-runtime
       args:
         GO_VERSION: ${GO_VERSION:-1.26}
-        VERSION: ${ELBOT_VERSION:-0.5.0}
+        VERSION: ${ELBOT_VERSION:-0.6.0}
+        # 基础镜像（可覆盖成国内加速路径 / pin digest）。默认值必须非空，
+        # 否则 ${VAR:-} 展开成空串会把 FROM 变成 ":1.26-bookworm" 而直接报错。
+        GO_BASE_IMAGE: ${GO_BASE_IMAGE:-golang}
+        RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-debian:bookworm-slim}
+        # 追加更多系统命令（默认列表在 Dockerfile 内，只增不减）
+        EXTRA_TOOLS: ${EXTRA_TOOLS:-}
+        # Go 模块代理：国内直连 proxy.golang.org 会超时
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        # apt 镜像主机名：国内构建必设，否则走 deb.debian.org（实测仅十几 KB/s）
+        # 可选 mirrors.aliyun.com / mirrors.cloud.tencent.com / mirrors.ustc.edu.cn
+        APT_MIRROR: ${APT_MIRROR:-}
     container_name: elbot
     hostname: elbot
     # 镜像内同样以 10001:10001 运行；这里显式写死，避免换镜像后 UID 漂移导致数据卷不可写
@@ -42,6 +53,8 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       XDG_CONFIG_HOME: /data/config
       XDG_DATA_HOME: /data
+      # 缓存（Go Skill 编译、媒体处理临时文件）也放在数据卷上，重建容器后仍可用
+      XDG_CACHE_HOME: /data/cache
       XDG_RUNTIME_DIR: /data/run
       # 独立运维健康接口：仅监听容器内部，宿主机只映射到 127.0.0.1
       ELBOT_HEALTH_ADDR: ${ELBOT_HEALTH_ADDR:-0.0.0.0:32171}
@@ -73,6 +86,15 @@ services:
     memswap_limit: 1536m
     pids_limit: 512
 
+    # Agent 会派生 shell / hook / worker 子进程，文件描述符给足
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    # 只禁提权，不 cap_drop / 不加 read_only：
+    # Agent 的 shell 工具依赖容器内完整命令（ping 需要 NET_RAW 等），
+    # 过度收窄 capability 会直接砍掉工具能力。
     security_opt:
       - no-new-privileges:true
 

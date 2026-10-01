@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"sync"
+	"time"
 
 	"elbot/internal/config"
 	"elbot/internal/contextmgr"
@@ -24,10 +25,10 @@ type contextRuntimeState struct {
 
 	mu              sync.Mutex
 	compressTimeout time.Duration
-	config        config.ContextConfig
-	modelMetadata config.ModelMetadataConfig
-	compactModel  config.ModelSelection
-	lastUsage     map[string]*llm.Usage
+	config          config.ContextConfig
+	modelMetadata   config.ModelMetadataConfig
+	compactModel    config.ModelSelection
+	lastUsage       map[string]*llm.Usage
 }
 
 func newContextRuntimeState(store storage.Store, sessions *session.Service, requests *request.Manager, turns *turn.Manager) contextRuntimeState {

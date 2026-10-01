@@ -3,27 +3,52 @@
 # 预编译二进制版运行镜像（不需要 Go 工具链，也不需要拉 golang:1.26 大镜像）
 # 构建上下文需要包含名为 `elbot` 的 Linux 静态二进制。
 #
-#   docker build -t elbot:0.5.0 .
-#   docker run -d --name elbot -v $PWD/data:/data -p 127.0.0.1:32172:32172 -p 127.0.0.1:32171:32171 elbot:0.5.0
+#   docker build -t elbot:0.6.0 .
+#   docker run -d --init --name elbot -v $PWD/data:/data \
+#     -p 127.0.0.1:32172:32172 -p 127.0.0.1:32171:32171 elbot:0.6.0
 #
 # 国内服务器拉 debian 慢时，可换镜像源：
-#   docker build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim -t elbot:0.5.0 .
+#   docker build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim -t elbot:0.6.0 .
+# 需要 pin digest 时：
+#   docker build --build-arg BASE_IMAGE=debian:bookworm-slim@sha256:<digest> -t elbot:0.6.0 .
 
 ARG BASE_IMAGE=debian:bookworm-slim
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG VERSION=dev
+# 只用于“追加”更多命令；下面的默认命令列表是内联的。
+ARG EXTRA_TOOLS=
 
 ENV TZ=Asia/Shanghai \
     XDG_CONFIG_HOME=/data/config \
     XDG_DATA_HOME=/data \
+    XDG_CACHE_HOME=/data/cache \
     XDG_RUNTIME_DIR=/data/run \
     HOME=/home/elbot \
     LANG=C.UTF-8 \
     ELBOT_HEALTH_ADDR=0.0.0.0:32171
 
-# 保留常用 CLI 工具，保证 ElBot 的 shell 工具可用
+# 保留常用 CLI 工具，保证 ElBot 的 shell 工具可用（只增不减）。
+#
+# 实测：部分网络会黑洞明文 HTTP(80)，且直连 deb.debian.org 很慢，所以下面换 https +
+# 国内镜像。但 slim 镜像里没有 CA 证书，直接切 https 会报
+# "No system certificates available"，因此先用原始源装上 ca-certificates 再切换。
+# 可用 --build-arg APT_MIRROR=mirrors.aliyun.com 指定国内镜像。
+ARG APT_MIRROR=
+
 RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/*.list; do \
+        [ -f "${f}" ] || continue; \
+        sed -i "s|http://deb[.]debian[.]org|https://deb.debian.org|g" "${f}" 2>/dev/null || true; \
+        if [ -n "${APT_MIRROR}" ]; then \
+            sed -i "s|deb[.]debian[.]org|${APT_MIRROR}|g" "${f}" 2>/dev/null || true; \
+        fi; \
+    done \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
@@ -33,15 +58,36 @@ RUN apt-get update \
         git \
         jq \
         unzip \
+        bash \
+        procps \
+        iputils-ping \
+        dnsutils \
+        netcat-openbsd \
+        iproute2 \
+        less \
+        file \
+        tree \
+        tar \
+        gzip \
+        xz-utils \
+        rsync \
+        zip \
+        python3 \
+        ${EXTRA_TOOLS} \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 10001 elbot \
  && useradd -u 10001 -g 10001 -d /home/elbot -m -s /usr/sbin/nologin elbot \
- && mkdir -p /data/config /data/run /home/elbot \
+ && mkdir -p /data/config /data/cache /data/run /home/elbot \
  && chown -R elbot:elbot /data /home/elbot \
  && chmod 750 /data/run
 
 COPY elbot /usr/local/bin/elbot
 RUN chmod 0755 /usr/local/bin/elbot
+
+LABEL org.opencontainers.image.title="elbot" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/fujiwarashigure/elbot_mk.2" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 USER elbot:elbot
 WORKDIR /home/elbot

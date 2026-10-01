@@ -24,7 +24,7 @@ fi
 echo "    使用：${COMPOSE}"
 
 echo "==> 准备数据目录 ${DATA_DIR}"
-mkdir -p "${DATA_DIR}/config" "${DATA_DIR}/run" "${DATA_DIR}/logs"
+mkdir -p "${DATA_DIR}/config" "${DATA_DIR}/run" "${DATA_DIR}/logs" "${DATA_DIR}/cache"
 chown -R "${ELBOT_UID}:${ELBOT_GID}" "${DATA_DIR}"
 chmod 750 "${DATA_DIR}" "${DATA_DIR}/run"
 

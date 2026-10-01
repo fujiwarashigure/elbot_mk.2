@@ -5,6 +5,7 @@ import gzip  # noqa: F401  (tarfile 会自动处理 gz)
 import hashlib
 import io
 import json
+import os
 import struct
 import sys
 import tarfile
@@ -18,7 +19,7 @@ def sha(b: bytes) -> str:
 ELF_MACHINE = {0x3E: "amd64", 0xB7: "arm64"}
 
 
-def verify(path: str) -> dict:
+def verify(path: str, expect_tag: str = "") -> dict:
     with tarfile.open(path, "r:gz") as outer:
         names = outer.getnames()
 
@@ -36,7 +37,13 @@ def verify(path: str) -> dict:
         config_bytes = read(item["Config"])
         config = json.loads(config_bytes)
         assert sha(config_bytes) == Path(item["Config"]).stem, "config filename != sha256(config)"
-        assert item["RepoTags"] == ["elbot:0.5.0"], item["RepoTags"]
+        # 版本号不再硬编码：由 --tag / --version / ELBOT_VERSION 提供期望值；
+        # 未提供时只校验 RepoTags 合法（单一、非空），避免改版本就校验失败。
+        repo_tags = item.get("RepoTags")
+        assert isinstance(repo_tags, list) and len(repo_tags) == 1 and repo_tags[0], repo_tags
+        if expect_tag:
+            assert repo_tags[0] == expect_tag, \
+                "image tag %s != expected %s" % (repo_tags[0], expect_tag)
 
         layers = item["Layers"]
         diff_ids = config["rootfs"]["diff_ids"]
@@ -109,8 +116,41 @@ def verify(path: str) -> dict:
         }
 
 
+def parse_args(argv):
+    """返回 (expect_tag, 文件列表)。
+
+    --tag elbot:0.6.0     指定期望 tag
+    --version 0.6.0       等价于 --tag elbot:0.6.0
+    环境变量 ELBOT_VERSION 作为兜底；都没有时只做结构校验。
+    """
+    expect_tag = ""
+    files = []
+    it = iter(argv)
+    for arg in it:
+        if arg == "--tag":
+            expect_tag = next(it, "")
+        elif arg.startswith("--tag="):
+            expect_tag = arg.split("=", 1)[1]
+        elif arg == "--version":
+            version = next(it, "")
+            expect_tag = "elbot:" + version if version else ""
+        elif arg.startswith("--version="):
+            version = arg.split("=", 1)[1]
+            expect_tag = "elbot:" + version if version else ""
+        elif arg in ("-h", "--help"):
+            sys.exit(__doc__ + "\n用法: verify-image-tar.py [--tag <tag>|--version <ver>] <image.tar.gz> [...]")
+        else:
+            files.append(arg)
+    if not expect_tag:
+        version = os.environ.get("ELBOT_VERSION", "").strip()
+        if version:
+            expect_tag = "elbot:" + version
+    return expect_tag, files
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit("usage: verify-image-tar.py <image.tar.gz> [...]")
-    for p in sys.argv[1:]:
-        print(json.dumps(verify(p), indent=2, ensure_ascii=False))
+    expect_tag, files = parse_args(sys.argv[1:])
+    if not files:
+        sys.exit("用法: verify-image-tar.py [--tag <tag>|--version <ver>] <image.tar.gz> [...]")
+    for p in files:
+        print(json.dumps(verify(p, expect_tag), indent=2, ensure_ascii=False))

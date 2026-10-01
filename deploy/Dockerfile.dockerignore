@@ -1,30 +1,48 @@
-# BuildKit 会为同目录下的 Dockerfile 自动读取 Dockerfile.dockerignore。
-# 该文件相对构建上下文根目录（仓库根目录）生效。
+# Docker 构建上下文裁剪。
+#
+# 构建上下文 = 仓库根目录，命令形如：
+#   docker build -f deploy/Dockerfile .
+#
+# 注意：BuildKit 会优先读取 Dockerfile 同目录下的
+# deploy/Dockerfile.dockerignore；因此本文件必须与那份保持一致。
+# （两份文件内容完全相同，改一份就要同步另一份。）
 
+# ---------- Git / CI ----------
 .git
 .gitattributes
 .gitignore
 .github
 
-# 仅文档，运行时不需要
+# ---------- 文档（构建不需要；代码里没有 go:embed docs/） ----------
 docs
 docs.en
 devdocs
 *.md
 !README.md
 
-# 翻译缓存 / 脚本 / 发布包
+# ---------- 翻译缓存 / 脚本 / 发布包 ----------
 .translation-cache
 scripts
 *.zip
 *.tar.gz
+*.tgz
 *.tar
 
-# 本地运行数据与构建产物
+# ---------- 本地运行数据、备份与诊断 ----------
+# deploy/backups 是一致性备份（全部 SQLite + 配置 + API Key），
+# deploy/diagnostics、deploy/watchdog-state 是 watchdog 产物；
+# 这些内容既大又敏感，绝对不要进构建上下文。
 data
 bin
 dist
 release-assets
 deploy/dist
 deploy/data
+deploy/backups
+deploy/diagnostics
+deploy/watchdog-state
+deploy/watchdog.env
 deploy/.env
+*.log
+**/__pycache__
+__pycache__

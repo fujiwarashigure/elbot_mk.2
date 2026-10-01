@@ -59,8 +59,10 @@ func TestLimiterCleanup(t *testing.T) {
 	if !l.Allow("new").Allowed {
 		t.Fatal("allow new failed")
 	}
-	// A cleanup happens at request 1024 or when bucket count >= 4096; request it explicitly.
+	// cleanupLocked 只在「每 1024 次请求」或「桶数量 >= 4096」时真正清理，
+	// 直接调用时若 requests 不是 1024 的倍数会提前返回，所以这里把计数对齐。
 	l.mu.Lock()
+	l.requests = cleanupEveryNAllows
 	l.cleanupLocked(now)
 	l.mu.Unlock()
 	if l.Keys() != 1 {

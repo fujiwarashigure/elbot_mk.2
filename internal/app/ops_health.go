@@ -55,15 +55,30 @@ func writeJSONResponse(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+// rateLimitMetrics 是 /metrics 里的限速统计（agent.RateLimitStats）。
+type rateLimitMetrics struct {
+	Allowed  int64 `json:"allowed"`
+	Rejected int64 `json:"rejected"`
+	Keys     int   `json:"keys"`
+}
+
+// imageLimitMetrics 是 /metrics 里的生图并发统计。
+type imageLimitMetrics struct {
+	Active  int `json:"active"`
+	Waiting int `json:"waiting"`
+}
+
 type opsMetrics struct {
-	Version       string                 `json:"version,omitempty"`
-	CollectedAt   time.Time              `json:"collected_at"`
-	UptimeSeconds int64                  `json:"uptime_seconds"`
-	Health        health.Snapshot        `json:"health"`
-	Tasks         request.Snapshot       `json:"tasks"`
-	Resources     sysinfo.Snapshot       `json:"resources"`
+	Version       string                  `json:"version,omitempty"`
+	CollectedAt   time.Time               `json:"collected_at"`
+	UptimeSeconds int64                   `json:"uptime_seconds"`
+	Health        health.Snapshot         `json:"health"`
+	Tasks         request.Snapshot        `json:"tasks"`
+	Resources     sysinfo.Snapshot        `json:"resources"`
 	Platforms     []health.PlatformStatus `json:"platforms,omitempty"`
 	Models        []health.ModelStatus    `json:"models,omitempty"`
+	RateLimit     rateLimitMetrics        `json:"rate_limit"`
+	ImageLimit    imageLimitMetrics       `json:"image_limit"`
 }
 
 func collectOpsMetrics(cfg *config.Config, state *health.State, agt *agent.Agent, imageLimiter interface{ Stats() (int, int) }) any {

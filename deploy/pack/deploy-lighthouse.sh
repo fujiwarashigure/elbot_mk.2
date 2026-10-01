@@ -5,7 +5,7 @@
 #   在解压后的 offline-<arch>/ 目录内执行：
 #     bash deploy.sh                 # 推荐：用预编译二进制 + Debian 运行时构建（功能完整）
 #     bash deploy.sh --load          # 直接 docker load 现成镜像 tar（完全离线，但无 shell）
-#     bash deploy.sh --load /path/to/elbot-0.5.0-linux-amd64.tar.gz
+#     bash deploy.sh --load /path/to/elbot-0.6.0-linux-amd64.tar.gz
 #
 # 前置：
 #   - 已安装 Docker 和 docker compose
@@ -37,6 +37,11 @@ done
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${BUNDLE_DIR}"
 
+# 版本号：优先读离线包内的 VERSION（prepare-offline.sh 会拷进来），
+# 避免这里再硬编码一份——升版本时不会再漏改。
+VERSION="$(tr -d '[:space:]' <"${BUNDLE_DIR}/VERSION" 2>/dev/null || true)"
+[ -n "${VERSION}" ] || VERSION="0.6.0"
+
 # 1. 架构检测
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
@@ -67,7 +72,7 @@ if [ ! -f .env ]; then
 fi
 
 # 4. 数据目录属主（bind mount 会使用宿主机属主，容器内是 10001）
-mkdir -p data
+mkdir -p data data/cache
 if command -v chown >/dev/null 2>&1; then
     chown -R 10001:10001 data 2>/dev/null || warn "chown data 失败，如容器反复重启请手动执行 chown -R 10001:10001 data"
 fi
@@ -76,12 +81,12 @@ chmod 750 data 2>/dev/null || true
 # 5. 获得镜像
 if [ "${MODE}" = "load" ]; then
     if [ -z "${IMAGE_TAR}" ]; then
-        # 自动在上级目录找对应架构的镜像 tar
-        for cand in "../elbot-0.5.0-linux-${ARCH}.tar.gz" "./elbot-0.5.0-linux-${ARCH}.tar.gz"; do
+        # 自动在上级目录找对应架构的镜像 tar（版本号来自包内 VERSION）
+        for cand in "../elbot-${VERSION}-linux-${ARCH}.tar.gz" "./elbot-${VERSION}-linux-${ARCH}.tar.gz"; do
             if [ -f "${cand}" ]; then IMAGE_TAR="${cand}"; break; fi
         done
     fi
-    [ -n "${IMAGE_TAR}" ] && [ -f "${IMAGE_TAR}" ] || die "未找到镜像 tar，请用 --load /path/to/elbot-0.5.0-linux-${ARCH}.tar.gz"
+    [ -n "${IMAGE_TAR}" ] && [ -f "${IMAGE_TAR}" ] || die "未找到镜像 tar，请用 --load /path/to/elbot-${VERSION}-linux-${ARCH}.tar.gz"
     log "docker load -i ${IMAGE_TAR}（scratch 精简镜像，无 shell 工具）"
     docker load -i "${IMAGE_TAR}"
 else

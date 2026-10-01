@@ -129,20 +129,26 @@ type RuntimeConfig struct {
 
 // OpsConfig controls operational timeouts and concurrency limits.
 type OpsConfig struct {
-	ToolTimeoutSeconds     int `toml:"tool_timeout_seconds"`
-	HookTimeoutSeconds     int `toml:"hook_timeout_seconds"`
-	CompressTimeoutSeconds int `toml:"compress_timeout_seconds"`
-	MaxConcurrentTurns     int `toml:"max_concurrent_turns"`
-	MaxConcurrentTools     int `toml:"max_concurrent_tools"`
-	MaxConcurrentHooks     int `toml:"max_concurrent_hooks"`
-	UserMessagesPerMinute  int      `toml:"user_messages_per_minute"`
-	UserBurst              int      `toml:"user_burst"`
-	GroupMessagesPerMinute int      `toml:"group_messages_per_minute"`
-	GroupBurst             int      `toml:"group_burst"`
+	ToolTimeoutSeconds      int      `toml:"tool_timeout_seconds"`
+	HookTimeoutSeconds      int      `toml:"hook_timeout_seconds"`
+	CompressTimeoutSeconds  int      `toml:"compress_timeout_seconds"`
+	MaxConcurrentTurns      int      `toml:"max_concurrent_turns"`
+	MaxConcurrentTools      int      `toml:"max_concurrent_tools"`
+	MaxConcurrentHooks      int      `toml:"max_concurrent_hooks"`
+	UserMessagesPerMinute   int      `toml:"user_messages_per_minute"`
+	UserBurst               int      `toml:"user_burst"`
+	GroupMessagesPerMinute  int      `toml:"group_messages_per_minute"`
+	GroupBurst              int      `toml:"group_burst"`
 	RateLimitIdleTTLSeconds int      `toml:"rate_limit_idle_ttl_seconds"`
-	QueueMaxSize           int      `toml:"queue_max_size"`
-	QueueWaitTimeoutSeconds int     `toml:"queue_wait_timeout_seconds"`
-	QueueWaitKinds         []string `toml:"queue_wait_kinds"`
+	QueueMaxSize            int      `toml:"queue_max_size"`
+	QueueWaitTimeoutSeconds int      `toml:"queue_wait_timeout_seconds"`
+	QueueWaitKinds          []string `toml:"queue_wait_kinds"`
+
+	// Provider 熔断（对应 default config 里 [ops] 的 circuit_breaker_* 键）：
+	// 连续失败达到阈值后打开，冷却后放少量半开探测；0 表示关闭。
+	CircuitBreakerFailureThreshold    int `toml:"circuit_breaker_failure_threshold"`
+	CircuitBreakerOpenCooldownSeconds int `toml:"circuit_breaker_open_cooldown_seconds"`
+	CircuitBreakerHalfOpenMax         int `toml:"circuit_breaker_half_open_max"`
 }
 
 type ContextConfig struct {

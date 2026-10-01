@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 
+## [v0.6.0 - 2026-10-01]
+
+### Fixed
+
+- 修复 `[ops]` 熔断配置字段缺失（`circuit_breaker_failure_threshold`、`circuit_breaker_open_cooldown_seconds`、`circuit_breaker_half_open_max`）导致 `internal/config` 无法编译的问题。
+- 修复 `internal/agent/context_runtime.go` 缺少 `time` 导入、`internal/app/ops_health.go` 缺少限速与生图指标类型，导致整个项目无法编译的问题。
+- 修复未启用任何平台时 `elbot service run` 立即以 0 退出：在 Docker / systemd 下会被 `restart: unless-stopped` 反复拉起，健康接口也随进程消失；现在保持存活并输出 warning。
+- 修复 `diskguard` / `ratelimit` 单元测试断言错误，`go test ./...` 恢复全绿。
+
+### Changed
+
+- 运行镜像默认保留更多 Agent 常用命令（bash、procps、iputils-ping、dnsutils、netcat-openbsd、iproute2、less、file、tree、tar、gzip、xz-utils、rsync、zip、python3），且默认只增不减。
+- `XDG_CACHE_HOME` 指向 `/data/cache`：Go Skill 编译缓存与媒体临时文件落在数据卷上，重建容器后仍可复用。
+- `go-runtime` 镜像内编译 Go Skill 不再因 `/go` 无写权限而失败（GOPATH / GOMODCACHE / GOCACHE 均指向 10001 可写目录）。
+- 版本号统一由 `deploy/VERSION` 提供，镜像、离线包与文档不再多处硬编码。
+
+### Added
+
+- Docker 构建支持多架构：构建阶段固定在 `$BUILDPLATFORM` 原生交叉编译，打 arm64 不再整段走 QEMU。
+- Docker 构建支持国内网络环境：新增 `GOPROXY`、`APT_MIRROR`（自动强制 https）构建参数，可用 `GO_BASE_IMAGE` / `RUNTIME_BASE_IMAGE` 覆盖基础镜像加速或 pin digest。
+- 新增离线 / 预编译部署产物：`prepare-offline.sh` 生成 amd64/arm64 静态二进制、`docker load` 直接可用的 scratch 镜像与完整离线包，并附 `SHA256SUMS` 校验。
+
+
 ## [v0.5.0 - 2026-09-28]
 
 ### Added

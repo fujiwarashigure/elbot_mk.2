@@ -5,18 +5,24 @@
 #   docker compose build
 #   docker compose up -d
 #
-# 如果已经用 `docker load` 载入了 elbot-0.5.0-linux-amd64.tar.gz，
+# 如果已经用 `docker load` 载入了 elbot-0.6.0-linux-amd64.tar.gz，
 # 可直接 `docker compose up -d`，无需 build。
 
 services:
   elbot:
-    image: ${ELBOT_IMAGE:-elbot:0.5.0}
+    image: ${ELBOT_IMAGE:-elbot:0.6.0}
     build:
       context: .
       dockerfile: Dockerfile
       args:
         # 国内可换成：registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim
+        # 需要 pin digest 时：debian:bookworm-slim@sha256:<digest>
         BASE_IMAGE: ${BASE_IMAGE:-debian:bookworm-slim}
+        # 可选：追加更多系统命令，默认命令列表在 Dockerfile 内（只增不减）
+        # 追加更多系统命令（默认列表在 Dockerfile 内，只增不减）
+        EXTRA_TOOLS: ${EXTRA_TOOLS:-}
+        # apt 镜像主机名：国内构建必设，否则走 deb.debian.org（很慢）
+        APT_MIRROR: ${APT_MIRROR:-}
     container_name: elbot
     hostname: elbot
     # 镜像内已以 10001:10001 运行；显式写死，避免数据卷属主和容器 UID 不一致
@@ -32,6 +38,8 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       XDG_CONFIG_HOME: /data/config
       XDG_DATA_HOME: /data
+      # 缓存（媒体处理临时文件等）放在数据卷上，重建容器后仍可用
+      XDG_CACHE_HOME: /data/cache
       XDG_RUNTIME_DIR: /data/run
       # 独立运维健康接口：仅监听容器内部，宿主机只映射到 127.0.0.1
       ELBOT_HEALTH_ADDR: ${ELBOT_HEALTH_ADDR:-0.0.0.0:32171}
@@ -58,6 +66,14 @@ services:
     mem_limit: 1536m
     memswap_limit: 1536m
     pids_limit: 512
+
+    # Agent 会派生 shell / hook / worker 子进程，文件描述符给足
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    # 只禁提权，不 cap_drop / 不加 read_only：Agent 的 shell 工具依赖容器内完整命令。
     security_opt:
       - no-new-privileges:true
 

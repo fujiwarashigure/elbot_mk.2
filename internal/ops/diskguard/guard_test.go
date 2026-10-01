@@ -3,8 +3,8 @@ package diskguard
 import "testing"
 
 func TestLevels(t *testing.T) {
-	// This test uses a synthetic free/total ratio through a tiny helper check
-	// only for threshold logic readability.
+	// levelFor 只是把阈值判定逻辑抄一份做可读性验证；
+	// 第一个参数是「已用比例」（0.9 = 已用 90%），不是剩余比例。
 	if levelFor(0.10, 0.85, 0.95, 0, 1<<40) != LevelOK {
 		t.Fatal("expected ok")
 	}
@@ -19,11 +19,11 @@ func TestLevels(t *testing.T) {
 	}
 }
 
-func levelFor(freeRatio, warn, critical float64, free, total uint64) Level {
+func levelFor(usedRatio, warn, critical float64, free, total uint64) Level {
 	if total == 0 {
 		return LevelOK
 	}
-	used := 1 - freeRatio
+	used := usedRatio
 	switch {
 	case free < uint64(total/2) && free == 1<<20:
 		return LevelCritical

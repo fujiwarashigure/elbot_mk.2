@@ -25,7 +25,44 @@ PACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "${PACK_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${DEPLOY_DIR}/.." && pwd)"
 DIST_DIR="${DEPLOY_DIR}/dist"
-VERSION="${ELBOT_VERSION:-0.5.0}"
+
+# 版本号单点来源：deploy/VERSION（可用 ELBOT_VERSION 覆盖）
+if [ -n "${ELBOT_VERSION:-}" ]; then
+    VERSION="${ELBOT_VERSION}"
+elif [ -f "${DEPLOY_DIR}/VERSION" ]; then
+    VERSION="$(tr -d '[:space:]' <"${DEPLOY_DIR}/VERSION")"
+else
+    VERSION="dev"
+fi
+
+# 把离线包内可能被 Windows 检出成 CRLF 的文本文件统一成 LF。
+# 否则 Linux 上 ./deploy.sh 会报 "bad interpreter: /usr/bin/env bash^M"，
+# systemd unit 也可能解析失败。
+normalize_line_endings() {
+    local dir="$1"
+    "${PYTHON}" - "$dir" <<'PYEOF'
+import pathlib
+import sys
+
+CRLF = (chr(13) + chr(10)).encode()
+LF = chr(10).encode()
+SUFFIXES = {".sh", ".service", ".timer", ".conf", ".yml", ".yaml", ".example"}
+NAMES = {"Dockerfile"}
+
+root = pathlib.Path(sys.argv[1])
+changed = 0
+for path in sorted(root.rglob("*")):
+    if not path.is_file():
+        continue
+    if path.suffix not in SUFFIXES and path.name not in NAMES:
+        continue
+    data = path.read_bytes()
+    if CRLF in data:
+        path.write_bytes(data.replace(CRLF, LF))
+        changed += 1
+print("    CRLF -> LF:", changed)
+PYEOF
+}
 
 if ! command -v go >/dev/null 2>&1; then
     echo "错误：未找到 go。请安装 Go 1.26，或设置 GOROOT/PATH。" >&2
@@ -75,8 +112,11 @@ for arch in amd64 arm64; do
     cp "${PACK_DIR}/deploy-lighthouse.sh" "${out}/deploy.sh"
     cp "${PACK_DIR}/README-ALIYUN.md" "${out}/README-ALIYUN.md"
     cp "${PACK_DIR}/README-BAOTA-CONFIG.md" "${out}/README-BAOTA-CONFIG.md"
+    # 把版本号拷进离线包：deploy.sh / README 里都用它，避免多处硬编码
+    cp "${DEPLOY_DIR}/VERSION" "${out}/VERSION"
     mkdir -p "${out}/data"
     chmod +x "${out}/backup.sh" "${out}/init.sh" "${out}/deploy.sh" "${out}/elbot-watchdog.sh" 2>/dev/null || true
+    normalize_line_endings "${out}"
 done
 
 # 3.5 打包成单文件离线包
@@ -88,6 +128,7 @@ done
 
 # 4. 校验 + 校验和
 "${PYTHON}" "${PACK_DIR}/verify-image-tar.py" \
+    --tag "elbot:${VERSION}" \
     "${DIST_DIR}/elbot-${VERSION}-linux-amd64.tar.gz" \
     "${DIST_DIR}/elbot-${VERSION}-linux-arm64.tar.gz"
 

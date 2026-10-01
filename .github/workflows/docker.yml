@@ -1,0 +1,111 @@
+# 推 v* 标签时构建并推送多架构（linux/amd64 + linux/arm64）运行镜像到 GHCR。
+#
+# 说明：
+# - 与 Release workflow 相互独立：镜像推送失败不会影响 GitHub Release（反之亦然）。
+# - 镜像内容对应 deploy/Dockerfile 的 runtime target（Debian 运行时 + 工具链）。
+# - 境外 runner 直连 Docker Hub / deb.debian.org 即可；如需国内加速，可用
+#   build-args 的 GOPROXY / APT_MIRROR / GO_BASE_IMAGE / RUNTIME_BASE_IMAGE。
+# - 首次推送后 GHCR 包默认是 private，需要到
+#   GitHub → 包(packages) → 该包 → Package settings 里改成 public 才能匿名 pull。
+
+name: Docker image (GHCR)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "镜像版本号（留空则读 deploy/VERSION）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test ./...
+
+  image:
+    name: Build & push multi-arch image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${{ inputs.version }}"
+            [ -n "${v}" ] || v="$(tr -d '[:space:]' < deploy/VERSION)"
+            v="${v#v}"
+          fi
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+          echo "resolved version: ${v}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # latest=auto：正式版（v0.6.0）才更新 latest，预发布（-rc/-beta）不更新
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
