@@ -128,39 +128,35 @@ jobs:
             exit 1
           fi
 
+          # 英文 release notes 是「可选」的：翻译依赖外部 LLM（Translate user docs workflow），
+          # 它失败或延迟不应该阻塞发版。优先取 tag 内的 CHANGELOG.en.md，其次尝试 main 上
+          # 的最新版本（翻译 bot 可能已经提交），两者都没有就退回纯中文说明。
           en_notes=""
+          en_source=""
           if [ -f CHANGELOG.en.md ]; then
             en_notes=$(extract_section CHANGELOG.en.md)
+            if [ -n "$en_notes" ]; then
+              en_source="tag"
+            fi
           fi
 
           if [ -z "$en_notes" ]; then
-            echo "English notes for ${tag} are not in the tag; waiting for the translation on main."
-            max_attempts=80
-            for ((attempt=1; attempt<=max_attempts; attempt++)); do
-              if git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main && \
-                 git show origin/main:CHANGELOG.en.md > /tmp/CHANGELOG.en.md 2>/dev/null; then
-                en_notes=$(extract_section /tmp/CHANGELOG.en.md)
-                if [ -n "$en_notes" ]; then
-                  echo "Found English notes for ${tag} on main."
-                  break
-                fi
-              else
-                echo "WARNING: failed to fetch English CHANGELOG from main (attempt ${attempt}/${max_attempts})." >&2
+            if git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main && \
+               git show origin/main:CHANGELOG.en.md > /tmp/CHANGELOG.en.md 2>/dev/null; then
+              en_notes=$(extract_section /tmp/CHANGELOG.en.md)
+              if [ -n "$en_notes" ]; then
+                en_source="origin/main"
               fi
-
-              if [ "$attempt" -lt "$max_attempts" ]; then
-                echo "English notes are not ready (attempt ${attempt}/${max_attempts}); retrying in 15 seconds."
-                sleep 15
-              fi
-            done
+            fi
           fi
 
-          if [ -z "$en_notes" ]; then
-            echo "ERROR: English CHANGELOG section for ${tag} was not available after 20 minutes." >&2
-            exit 1
+          if [ -n "$en_notes" ]; then
+            echo "Using English release notes from ${en_source}."
+            printf '%s\n\n---\n\n%s\n' "$zh_notes" "$en_notes" > release-notes.md
+          else
+            echo "::warning::No English CHANGELOG section for ${tag}; publishing Chinese-only release notes. Configure TRANSLATE_LLM_API_KEY / TRANSLATE_LLM_BASE_URL / TRANSLATE_LLM_MODEL to enable translations."
+            printf '%s\n' "$zh_notes" > release-notes.md
           fi
-
-          printf '%s\n\n---\n\n%s\n' "$zh_notes" "$en_notes" > release-notes.md
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

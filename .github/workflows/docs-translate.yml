@@ -25,6 +25,11 @@ jobs:
     name: Translate docs to English
     runs-on: ubuntu-latest
     if: github.actor != 'github-actions[bot]'
+    # 翻译依赖外部 LLM（TRANSLATE_LLM_* secrets）。它失败不应该把仓库的 workflow
+    # 状态弄红、也不应该阻塞 Docs 链接检查：release.yml 在缺少英文 CHANGELOG 段落时
+    # 会自动退回「只用中文 release notes」，不再等待、不再失败。
+    # 配好 secrets 后这里会自动重新翻译并提交 CHANGELOG.en.md / docs.en/**。
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
