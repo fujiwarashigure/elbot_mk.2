@@ -27,13 +27,13 @@ type Config struct {
 
 // Breaker is a concurrency-safe circuit breaker.
 type Breaker struct {
-	mu sync.Mutex
+	mu  sync.Mutex
 	cfg Config
 	now func() time.Time
 
-	state           state
-	failures        int
-	openedAt        time.Time
+	state            state
+	failures         int
+	openedAt         time.Time
 	halfOpenInFlight int
 }
 

@@ -109,13 +109,13 @@ type RuntimeRequest struct {
 }
 
 type RuntimeComponents struct {
-	Media       *media.Manager
-	Agent       *agent.Agent
-	Handler     platform.PlatformHandler
-	CronService *elcron.Service
-	ElvenaBus   *elvena.Bus
+	Media        *media.Manager
+	Agent        *agent.Agent
+	Handler      platform.PlatformHandler
+	CronService  *elcron.Service
+	ElvenaBus    *elvena.Bus
 	ImageLimiter *concurrency.Limiter
-	Lifecycle   Lifecycle
+	Lifecycle    Lifecycle
 }
 
 type RuntimeFactory interface {
