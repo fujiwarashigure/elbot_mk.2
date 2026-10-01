@@ -541,15 +541,15 @@ docker compose up -d
 ```bash
 bash deploy/pack/prepare-offline.sh
 # 或使用已下载产物
-docker load -i elbot-0.6.1-linux-amd64.tar.gz
+docker load -i elbot-0.6.2-linux-amd64.tar.gz
 ```
 
 多架构构建：
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/Dockerfile --build-arg VERSION=0.6.1 \
-  --push -t <registry>/<namespace>/elbot:0.6.1 .
+  -f deploy/Dockerfile --build-arg VERSION=0.6.2 \
+  --push -t <registry>/<namespace>/elbot:0.6.2 .
 ```
 
 构建参数：

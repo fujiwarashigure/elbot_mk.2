@@ -5,7 +5,7 @@ All notable changes to ElBot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [v0.6.2 - 2026-10-01]
 
 ### Fixed
 
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `deploy/watchdog.env.example` 新增 `WATCHDOG_READY_ALERT_THRESHOLD` / `WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`：`/live` 正常但 `/ready` 连续失败时只推送一次 `not_ready` 告警（需要配置 webhook），仍然不作为重启条件；watchdog 的重启决策继续只依据 `/live`。
-
+- 版本号提升到 `0.6.2`；`deploy/VERSION`、Compose 默认镜像以及部署/离线文档中的版本示例同步更新。
 
 ## [v0.6.1 - 2026-10-01]
 
