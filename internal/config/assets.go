@@ -13,7 +13,7 @@ type defaultAsset struct {
 
 var defaultConfigAssets = []defaultAsset{
 	{Path: "app.toml", Content: defaultAppTOML},
-	{Path: "providers.toml", Content: defaultProvidersTOML},
+	{Path: "services.toml", Content: defaultServicesTOML},
 	{Path: "state.toml", Content: defaultStateTOML},
 	{Path: "SOUL.md", Content: defaultSoulMD},
 	{Path: "memories.toml", Content: defaultMemoriesTOML},
@@ -75,7 +75,11 @@ func writeFileIfMissing(path, content string) error {
 const defaultAppTOML = `# Main application config. Relative paths are resolved from this file.
 
 [config_files]
-providers = "providers.toml"
+# 共享的只读服务配置：大模型 provider、image_generation、model_profiles。
+# 多个服务可以挂载并读取同一个 services.toml；密钥仍只放在 .env。
+services = "services.toml"
+# providers 仅用于兼容旧部署；当 services 存在时不再读取 providers.toml。
+# providers = "providers.toml"
 state = "state.toml"
 elnis = "elnis.toml"
 tool_tags = "tool_tags.toml"
@@ -111,6 +115,11 @@ retention_days = 7
 enabled = true
 schedule = "35 4 * * *"
 retention_days = 180
+
+[maintenance.privacy_cleanup]
+# clean-room angel_memory / self_learning 数据保留清理；具体保留天数在各自 section 配置。
+enabled = true
+schedule = "45 4 * * *"
 
 # 每天两次的资源/用量报告（生图量、Token、费用、磁盘、内存）。
 [maintenance.daily_report]
@@ -226,6 +235,17 @@ retry_initial_delay_seconds = 2
 [context]
 compact_enabled = true
 compact_trigger_ratio = 0.8
+# 发送前的 prompt 上限比例，超过会触发长消息保护。
+max_prompt_ratio = 0.8
+# 预留的输出 token；0 表示根据模型窗口自动计算。
+reserve_output_tokens = 0
+# 单条用户消息占模型窗口的比例上限，超过会触发保护。
+single_message_max_ratio = 0.5
+# 压缩上下文时，每条历史用户原话保留的最大字符数，避免长消息撑爆摘要。
+user_original_max_runes = 4000
+# 长消息保护默认策略：reject / truncate / summarize。
+# 群管理员可用 /*overflow 覆盖当前群的 chat/work 模式。
+overflow_mode = "reject"
 
 [soul]
 path = "SOUL.md"
@@ -234,61 +254,33 @@ path = "SOUL.md"
 enabled = true
 root = "characters"
 
-# Optional image generation tool. The endpoint must be OpenAI-compatible
-# POST {base_url}/images/generations. Provide the API key via api_key_env.
-[image_generation]
-enabled = false
-# base_url = "https://your-relay.example.com/v1"  # /images/generations is appended
-# endpoint = ""                                    # override the full URL when the relay differs
-api_key_env = "IMAGE_API_KEY"
-# api_key = ""                                     # discouraged; prefer api_key_env
-model = "gpt-image-2.5"
-size = "1024x1024"
-quality = "high"          # low / medium / high (depends on the relay)
-output_format = "png"     # png / jpeg / webp
-# response_format = "b64_json"  # set only if the relay requires it
-timeout_seconds = 180
+[group_analysis]
+# 群分析工具默认启用；它只读取本地 chat_history/outbound_messages，不复制第三方模板或素材。
+enabled = true
+# 单次统计最多读取多少条本地历史消息。
+max_messages = 5000
+# 可选：每天定时把统计/摘要发送到指定平台会话。默认关闭。
+report_enabled = false
+report_schedule = "0 9 * * *"
+# report_platform = "qqonebot"      # 必填且 report_enabled=true 才会注册
+# report_scope_id = "group:123456"
+report_days = 1
 
-# 预设提示词：最终 prompt = preset_prompt + 角色预设 + 场景描述。
-preset_prompt = ""
-# negative_prompt = ""
-max_prompt_runes = 4000
+[angel_memory]
+# clean-room 长期记忆；默认启用。
+enabled = true
+# 0 表示不按时间清理。
+retention_days = 365
 
-# 提示词优化：off 或 rules（使用内置的 GPT Image Prompts 大全规则库）。
-optimize = "rules"
-optimize_term_mode = "phrase"   # phrase：短语锚点；tag：单个单词 tag 串
-optimize_max_anchors = 4
-optimize_max_negatives = 10
-optimize_max_added_runes = 400
-optimize_max_tags = 12
+[self_learning]
+# clean-room 表达/黑话学习；默认启用，但只有 review 通过的内容会注入。
+enabled = true
+retention_days = 365
+# 候选至少出现多少次才进入 review。
+min_count = 3
 
-# LLM 语义改写：off / auto（短或含糊的 prompt 才改写）/ always。
-optimize_rewrite = "auto"
-optimize_rewrite_model = "naming"   # naming / compact / chat / work
-optimize_rewrite_min_runes = 40
-
-# 自动编排：从 prompt 里识别角色名/别名并自动选角、自动拉当前群聊上下文。
-auto_character = true
-auto_context = true
-context_default_limit = 6
-
-# 权限与落盘。
-superadmin_only = true       # 只有超级管理员能调用 image_generate
-save_to_character = true     # 出图写回当前角色的 images/
-send_by_default = false      # 生成后是否默认发到当前聊天
-
-# 参考图（视中转站是否支持）。开启后会把角色图片按 reference_field 字段透传。
-supports_reference = false
-reference_field = "image"
-
-# extra_payload = { }
-# extra_headers = { }
-# proxy = ""
-
-# 生图独立并发限制；0 表示不限制。queue_size > 0 时超限会短暂排队。
-max_concurrent = 0
-queue_size = 0
-queue_timeout_seconds = 0
+# image_generation 已移到共享的只读 services.toml，避免多个服务各配一份。
+# 旧部署仍可把 [image_generation] 写回这里；写了 services.toml 时以 services.toml 为准。
 
 [view]
 session_list_page_size = 10
@@ -327,6 +319,19 @@ circuit_breaker_half_open_max = 1
 # Memory length units: CJK characters count as one each; English/digits count by word.
 core_max_units = 200
 normal_max_units = 300
+
+# P1/P2 normal 写入保护。显式写 0 可关闭对应限制。
+# 最小写入间隔（秒）；防止短时间内反复改写 normal。
+normal_write_min_interval_seconds = 5
+# 写入频率窗口（秒）与窗口内最大写入次数。
+normal_write_window_seconds = 60
+normal_write_max_per_window = 6
+# normal 最大条目数（每条一行）；0 表示不限制。
+normal_max_lines = 20
+# 单条 normal 的最大长度；0 表示不限制。
+normal_max_units_per_entry = 80
+# 拒绝明显的指令类内容（如 "ignore previous instructions"）；false 关闭。
+normal_block_instruction_patterns = true
 
 [security]
 user_max_tool_risk = "low"
@@ -414,6 +419,76 @@ models = ["gpt-4o-mini"]
 [model_metadata]
 default_context_window = 256000
 `
+
+const defaultImageGenerationTOML = `# Optional image generation tool. The endpoint must be OpenAI-compatible
+# POST {base_url}/images/generations. Provide the API key via api_key_env.
+[image_generation]
+enabled = false
+# base_url = "https://your-relay.example.com/v1"  # /images/generations is appended
+# endpoint = ""                                    # override the full URL when the relay differs
+api_key_env = "IMAGE_API_KEY"
+# api_key = ""                                     # discouraged; prefer api_key_env
+model = "gpt-image-2.5"
+size = "1024x1024"
+quality = "high"          # low / medium / high (depends on the relay)
+output_format = "png"     # png / jpeg / webp
+# response_format = "b64_json"  # set only if the relay requires it
+timeout_seconds = 180
+
+# 预设提示词：最终 prompt = preset_prompt + 角色预设 + 场景描述。
+preset_prompt = ""
+# negative_prompt = ""
+max_prompt_runes = 4000
+
+# 提示词优化：off 或 rules（使用内置的 GPT Image Prompts 大全规则库）。
+optimize = "rules"
+optimize_term_mode = "phrase"   # phrase：短语锚点；tag：单个单词 tag 串
+optimize_max_anchors = 4
+optimize_max_negatives = 10
+optimize_max_added_runes = 400
+optimize_max_tags = 12
+
+# LLM 语义改写：off / auto（短或含糊的 prompt 才改写）/ always。
+optimize_rewrite = "auto"
+optimize_rewrite_model = "naming"   # naming / compact / chat / work
+optimize_rewrite_min_runes = 40
+
+# 自动编排：从 prompt 里识别角色名/别名并自动选角、自动拉当前群聊上下文。
+auto_character = true
+auto_context = true
+context_default_limit = 6
+
+# 权限与落盘。
+superadmin_only = true       # 只有超级管理员能调用 image_generate
+save_to_character = true     # 出图写回当前角色的 images/
+send_by_default = false      # 生成后是否默认发到当前聊天
+
+# 参考图（视中转站是否支持）。开启后会把角色图片按 reference_field 字段透传。
+supports_reference = false
+reference_field = "image"
+
+# extra_payload = { }
+# extra_headers = { }
+# proxy = ""
+
+# 生图独立并发限制；0 表示不限制。queue_size > 0 时超限会短暂排队。
+max_concurrent = 0
+queue_size = 0
+queue_timeout_seconds = 0
+`
+
+// defaultServicesTOML is the single read-only service config generated for new
+// installs. It combines the legacy providers.toml and the [image_generation]
+// section. Runtime state stays in state.toml; secrets stay in .env.
+const defaultServicesTOML = `# Shared read-only service config for ElBot and compatible services.
+# - LLM providers: [providers.*] and [model_metadata]
+# - Image generation: [image_generation]
+# - Secrets: reference .env via api_key_env; never put real keys in this file.
+# - Runtime state: keep state.toml separate; ElBot rewrites it at runtime.
+# Other services may mount this file read-only and consume only their sections.
+
+` + defaultProvidersTOML + `
+` + defaultImageGenerationTOML
 
 const defaultStateTOML = `[session]
 default_mode = "work"

@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"elbot/internal/delivery"
 	"elbot/internal/security"
@@ -56,6 +57,59 @@ type MessageSegment struct {
 
 type MediaResolver interface {
 	ResolveMedia(context.Context, MessageSegment, int64) (delivery.Source, error)
+}
+
+// GroupInfo is the platform-neutral subset used by group analysis.
+type GroupInfo struct {
+	ID          string
+	Name        string
+	MemberCount int
+}
+
+// GroupMember is the platform-neutral subset used by group analysis.
+type GroupMember struct {
+	UserID      string
+	Nickname    string
+	GroupCard   string
+	DisplayName string
+	Role        string
+}
+
+// HistoryMessage is a platform-neutral history row returned by an optional
+// GroupHistoryProvider. Adapters that cannot fetch remote history may leave the
+// interface unimplemented and callers should fall back to local chat history.
+type HistoryMessage struct {
+	PlatformMessageID string
+	SenderID          string
+	SenderName        string
+	Text              string
+	Segments          []MessageSegment
+	CreatedAt         time.Time
+}
+
+// GroupHistoryProvider is implemented by platform adapters that can fetch
+// remote group history. Callers must treat it as an optional capability.
+type GroupHistoryProvider interface {
+	FetchGroupHistory(ctx context.Context, groupID string, since, until time.Time, limit int) ([]HistoryMessage, error)
+}
+
+// GroupDirectoryProvider is implemented by platform adapters that can resolve
+// group metadata and member lists.
+type GroupDirectoryProvider interface {
+	GetGroupInfo(ctx context.Context, groupID string) (GroupInfo, error)
+	GetGroupMemberList(ctx context.Context, groupID string) ([]GroupMember, error)
+}
+
+// UserAvatarProvider is implemented by platform adapters that can resolve a
+// user avatar URL.
+type UserAvatarProvider interface {
+	GetUserAvatarURL(ctx context.Context, userID string, size int) (string, error)
+}
+
+// GroupAssetProvider covers optional group file and album uploads.
+type GroupAssetProvider interface {
+	UploadGroupFile(ctx context.Context, groupID, filePath, filename string) error
+	UploadGroupAlbum(ctx context.Context, groupID, imagePath, albumID, albumName string) error
 }
 
 type ReplyContext struct {

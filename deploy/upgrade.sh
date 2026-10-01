@@ -4,7 +4,7 @@
 #
 # 用法：
 #   bash upgrade.sh            # 使用 deploy/VERSION 作为新版本
-#   ELBOT_VERSION=0.6.2 bash upgrade.sh
+#   ELBOT_VERSION=0.6.3 bash upgrade.sh
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,10 +37,13 @@ mkdir -p "${ROLLBACK_DIR}"
 # 需要时先切换到目标源码标签，再校验源码版本，避免“只改版本号、不换代码”。
 if [ -n "${ELBOT_GIT_REF:-}" ]; then
     command -v git >/dev/null 2>&1 || die "设置了 ELBOT_GIT_REF，但未找到 git"
-    [ -d "${DEPLOY_DIR}/.git" ] || die "设置了 ELBOT_GIT_REF，但 ${DEPLOY_DIR} 不是 git 工作区"
+    # 正常仓库结构是 仓库/.git + 仓库/deploy/upgrade.sh，因此不能用 deploy/.git 判断；
+    # rev-parse 同时兼容 .git 目录、worktree 和子模块等布局。
+    REPO_ROOT="$(git -C "${DEPLOY_DIR}" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "${REPO_ROOT}" ] || die "设置了 ELBOT_GIT_REF，但 ${DEPLOY_DIR} 不在 git 工作区内"
     log "切换源码到 ${ELBOT_GIT_REF}"
-    git -C "${DEPLOY_DIR}" fetch --tags --force || die "git fetch 失败"
-    git -C "${DEPLOY_DIR}" checkout --detach "${ELBOT_GIT_REF}" || die "git checkout ${ELBOT_GIT_REF} 失败"
+    git -C "${REPO_ROOT}" fetch --tags --force || die "git fetch 失败"
+    git -C "${REPO_ROOT}" checkout --detach "${ELBOT_GIT_REF}" || die "git checkout ${ELBOT_GIT_REF} 失败"
 fi
 
 SOURCE_VERSION="$(tr -d '[:space:]' <"${DEPLOY_DIR}/VERSION")"
@@ -88,12 +91,14 @@ ELBOT_VERSION="${NEW_VERSION}" ELBOT_IMAGE="${IMAGE_TAG}" \
     "${COMPOSE[@]}" -f "${DEPLOY_DIR}/docker-compose.yml" build "${SERVICE}"
 
 log "用新镜像做配置兼容性检查"
+# 镜像 ENTRYPOINT 已经是 `tini -- /usr/local/bin/elbot`，这里只能传 "config check"；
+# 再传一次 "elbot" 会变成 `.../elbot elbot config check` 并阻断升级验收。
 docker run --rm \
     -v "${DEPLOY_DIR}/data:/data" \
     -e XDG_CONFIG_HOME=/data/config \
     -e XDG_DATA_HOME=/data \
     -e XDG_RUNTIME_DIR=/data/run \
-    "${IMAGE_TAG}" elbot config check || die "新镜像配置检查失败，已取消升级"
+    "${IMAGE_TAG}" config check || die "新镜像配置检查失败，已取消升级"
 
 log "重建 ${SERVICE}"
 ELBOT_VERSION="${NEW_VERSION}" ELBOT_IMAGE="${IMAGE_TAG}" \

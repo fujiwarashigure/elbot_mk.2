@@ -9,10 +9,11 @@ import (
 )
 
 type CompactRequest struct {
-	Provider   string
-	Model      string
-	Messages   []CompactMessage
-	UserInputs []string
+	Provider          string
+	Model             string
+	Messages          []CompactMessage
+	UserInputs        []string
+	UserInputMaxRunes int
 }
 
 type CompactMessage struct {
@@ -47,7 +48,8 @@ func (c Compressor) Compact(ctx context.Context, req CompactRequest) (*CompactRe
 		return nil, fmt.Errorf("压缩模型未配置")
 	}
 
-	prompt := compactPrompt(req.Messages, req.UserInputs)
+	messages, userInputs := capCompactRequest(req)
+	prompt := compactPrompt(messages, userInputs)
 	ch, err := c.ClientFor(req.Provider).ChatStream(ctx, llm.ChatRequest{
 		Model: req.Model,
 		Messages: []llm.LLMMessage{
@@ -75,5 +77,24 @@ func (c Compressor) Compact(ctx context.Context, req CompactRequest) (*CompactRe
 		return nil, fmt.Errorf("压缩模型返回空摘要")
 	}
 
-	return &CompactResult{Summary: summaryText, AssembledSummary: assembleSummary(summaryText, req.UserInputs), Usage: usage}, nil
+	return &CompactResult{Summary: summaryText, AssembledSummary: assembleSummary(summaryText, userInputs), Usage: usage}, nil
+}
+
+func capCompactRequest(req CompactRequest) ([]CompactMessage, []string) {
+	maxRunes := req.UserInputMaxRunes
+	if maxRunes <= 0 {
+		maxRunes = DefaultUserOriginalMaxRunes
+	}
+	messages := make([]CompactMessage, len(req.Messages))
+	for i, message := range req.Messages {
+		messages[i] = message
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			messages[i].Content = TruncateTextWithMarker(message.Content, maxRunes, "\n...[用户原话过长，压缩时已截断]")
+		}
+	}
+	userInputs := make([]string, 0, len(req.UserInputs))
+	for _, input := range req.UserInputs {
+		userInputs = append(userInputs, TruncateTextWithMarker(input, maxRunes, "\n...[用户原话过长，压缩时已截断]"))
+	}
+	return messages, userInputs
 }

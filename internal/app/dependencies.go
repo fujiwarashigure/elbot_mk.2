@@ -46,6 +46,7 @@ type LogManager interface {
 
 type ChatHistoryStore interface {
 	Repository() storage.ChatHistoryRepository
+	Outbound() storage.OutboundMessageRepository
 	Close() error
 }
 
@@ -63,6 +64,7 @@ type FoundationComponents struct {
 	Store            storage.Store
 	ChatHistoryStore ChatHistoryStore
 	ChatHistory      storage.ChatHistoryRepository
+	OutboundMessages storage.OutboundMessageRepository
 	CronManager      *elcron.Manager
 	StartCron        func(context.Context, *elcron.Service)
 	Lifecycle        Lifecycle

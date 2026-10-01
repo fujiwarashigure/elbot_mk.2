@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,9 +24,82 @@ const (
 
 var ErrNotFound = errors.New("resident memory not found")
 
+// errFileChanged reports that the on-disk memories file was modified between
+// the load and the save of one update. The caller reloads and retries instead
+// of overwriting the external change.
+var errFileChanged = errors.New("resident memory file changed during update")
+
+// maxUpdateAttempts bounds the optimistic-concurrency retry loop. A conflict
+// only happens when an external writer touches memories.toml in the tiny
+// window between our load and rename, so a few retries are ample.
+const maxUpdateAttempts = 3
+
 type Limits struct {
 	Core   int
 	Normal int
+}
+
+// NormalWritePolicy controls normal memory writes. Zero values disable the
+// corresponding guard. The app runtime enables safe defaults from app.toml.
+//
+// Normal is stored as newline-separated entries (one fact per line). MaxLines
+// therefore bounds both the number of lines and the number of entries.
+type NormalWritePolicy struct {
+	MinInterval              time.Duration
+	Window                   time.Duration
+	MaxWrites                int
+	MaxLines                 int
+	MaxUnitsPerEntry         int
+	BlockInstructionPatterns bool
+}
+
+// Normalized removes invalid/partial rate-limit settings.
+func (p NormalWritePolicy) Normalized() NormalWritePolicy {
+	if p.MinInterval < 0 {
+		p.MinInterval = 0
+	}
+	if p.Window <= 0 || p.MaxWrites <= 0 {
+		p.Window = 0
+		p.MaxWrites = 0
+	}
+	if p.MaxLines < 0 {
+		p.MaxLines = 0
+	}
+	if p.MaxUnitsPerEntry < 0 {
+		p.MaxUnitsPerEntry = 0
+	}
+	return p
+}
+
+// normalInstructionPatterns is a conservative, best-effort filter. It cannot
+// replace the trust boundary around injected memory, but it blocks the most
+// explicit "memory as instruction" payloads before they are persisted.
+var normalInstructionPatterns = []string{
+	"ignore previous instructions",
+	"ignore all previous instructions",
+	"ignore the above instructions",
+	"disregard previous instructions",
+	"forget previous instructions",
+	"ignore system prompt",
+	"override system prompt",
+	"system prompt override",
+	"developer message",
+	"jailbreak",
+	"you are now",
+	"from now on you",
+	"忽略之前的指令",
+	"忽略以上指令",
+	"忽略前面的指令",
+	"忽略前面的要求",
+	"无视之前的指令",
+	"忘记之前的指令",
+	"忽略系统提示词",
+	"忽略系统指令",
+	"覆盖系统提示",
+	"越狱",
+	"从现在开始你",
+	"接下来你要",
+	"不要遵守",
 }
 
 type Memory struct {
@@ -41,13 +113,17 @@ func (m Memory) Empty() bool {
 
 func (m Memory) Text() string {
 	parts := []string{}
-	for _, part := range []string{m.Core, m.Normal} {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			parts = append(parts, part)
-		}
+	if core := strings.TrimSpace(m.Core); core != "" {
+		parts = append(parts, core)
 	}
-	return strings.Join(parts, " ")
+	if normal := strings.TrimSpace(m.Normal); normal != "" {
+		entries := splitNormalEntries(normal)
+		for i := range entries {
+			entries[i] = "- " + entries[i]
+		}
+		parts = append(parts, strings.Join(entries, "\n"))
+	}
+	return strings.Join(parts, "\n")
 }
 
 type ResidentMemory struct {
@@ -64,10 +140,17 @@ type tomlFile struct {
 }
 
 type Store struct {
-	Path   string
-	Limits Limits
-	mu     sync.Mutex
-	cache  storeCache
+	Path         string
+	Limits       Limits
+	NormalPolicy NormalWritePolicy
+	mu           sync.Mutex
+	cache        storeCache
+	normalWrites map[string]normalWriteState
+}
+
+type normalWriteState struct {
+	last   time.Time
+	recent []time.Time
 }
 
 type storeCache struct {
@@ -83,11 +166,19 @@ type fileState struct {
 }
 
 func NewStore(path string) *Store {
-	return NewStoreWithLimits(path, Limits{})
+	return NewStoreWithOptions(path, Limits{}, NormalWritePolicy{})
 }
 
 func NewStoreWithLimits(path string, limits Limits) *Store {
-	return &Store{Path: path, Limits: normalizeLimits(limits)}
+	return NewStoreWithOptions(path, limits, NormalWritePolicy{})
+}
+
+func NewStoreWithOptions(path string, limits Limits, policy NormalWritePolicy) *Store {
+	return &Store{
+		Path:         path,
+		Limits:       normalizeLimits(limits),
+		NormalPolicy: policy.Normalized(),
+	}
 }
 
 func ActorScope(actor security.Actor) session.Scope {
@@ -113,13 +204,13 @@ func (s *Store) Read(ctx context.Context, scope session.Scope) (Memory, error) {
 }
 
 func (s *Store) WriteCore(ctx context.Context, scope session.Scope, content string) error {
-	return s.update(ctx, scope, validateCore, func(memory *ResidentMemory) {
+	return s.update(ctx, scope, false, func(memory *ResidentMemory) {
 		memory.Core = strings.TrimSpace(content)
 	})
 }
 
 func (s *Store) WriteNormal(ctx context.Context, scope session.Scope, content string) error {
-	return s.update(ctx, scope, validateNormal, func(memory *ResidentMemory) {
+	return s.update(ctx, scope, true, func(memory *ResidentMemory) {
 		memory.Normal = strings.TrimSpace(content)
 	})
 }
@@ -129,12 +220,12 @@ func (s *Store) AppendNormal(ctx context.Context, scope session.Scope, content s
 	if content == "" {
 		return fmt.Errorf("resident memory normal content is required")
 	}
-	return s.update(ctx, scope, validateNormal, func(memory *ResidentMemory) {
+	return s.update(ctx, scope, true, func(memory *ResidentMemory) {
 		existing := strings.TrimSpace(memory.Normal)
 		if existing == "" {
 			memory.Normal = content
 		} else {
-			memory.Normal = existing + " " + content
+			memory.Normal = existing + "\n" + content
 		}
 	})
 }
@@ -147,9 +238,7 @@ func (s *Store) LimitsOrDefault() Limits {
 	return normalizeLimits(s.Limits)
 }
 
-type validatePart func(ResidentMemory, Limits) error
-
-func (s *Store) update(ctx context.Context, scope session.Scope, validate validatePart, update func(*ResidentMemory)) error {
+func (s *Store) update(ctx context.Context, scope session.Scope, normal bool, update func(*ResidentMemory)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -159,33 +248,59 @@ func (s *Store) update(ctx context.Context, scope session.Scope, validate valida
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	file, err := s.loadLocked()
-	if err != nil {
-		return err
-	}
-	now := storage.FormatTime(storage.Now())
-	idx := findMemory(file.ResidentMemories, scope)
-	if idx < 0 {
-		file.ResidentMemories = append(file.ResidentMemories, ResidentMemory{Platform: scope.Platform, ActorID: scope.ActorID, CreatedAt: now})
-		idx = len(file.ResidentMemories) - 1
-	}
-	memory := file.ResidentMemories[idx]
-	update(&memory)
-	memory.Core = strings.TrimSpace(memory.Core)
-	memory.Normal = strings.TrimSpace(memory.Normal)
-	if err := validate(memory, s.LimitsOrDefault()); err != nil {
-		return err
-	}
-	if memory.Core == "" && memory.Normal == "" {
-		file.ResidentMemories = append(file.ResidentMemories[:idx], file.ResidentMemories[idx+1:]...)
-	} else {
-		memory.UpdatedAt = now
-		if memory.CreatedAt == "" {
-			memory.CreatedAt = now
+	for attempt := 0; attempt < maxUpdateAttempts; attempt++ {
+		file, err := s.loadLocked()
+		if err != nil {
+			return err
 		}
-		file.ResidentMemories[idx] = memory
+		loadedState := s.cache.state
+		nowTime := storage.Now()
+		now := storage.FormatTime(nowTime)
+		idx := findMemory(file.ResidentMemories, scope)
+		if idx < 0 {
+			file.ResidentMemories = append(file.ResidentMemories, ResidentMemory{Platform: scope.Platform, ActorID: scope.ActorID, CreatedAt: now})
+			idx = len(file.ResidentMemories) - 1
+		}
+		memory := file.ResidentMemories[idx]
+		update(&memory)
+		memory.Core = strings.TrimSpace(memory.Core)
+		if normal {
+			memory.Normal = normalizeNormalEntries(memory.Normal)
+		} else {
+			memory.Normal = strings.TrimSpace(memory.Normal)
+		}
+		if normal {
+			if err := validateNormal(memory, s.LimitsOrDefault(), s.NormalPolicy); err != nil {
+				return err
+			}
+			if err := s.checkNormalWritePolicy(scope, nowTime); err != nil {
+				return err
+			}
+		} else if err := validateCore(memory, s.LimitsOrDefault()); err != nil {
+			return err
+		}
+		if memory.Core == "" && memory.Normal == "" {
+			file.ResidentMemories = append(file.ResidentMemories[:idx], file.ResidentMemories[idx+1:]...)
+		} else {
+			memory.UpdatedAt = now
+			if memory.CreatedAt == "" {
+				memory.CreatedAt = now
+			}
+			file.ResidentMemories[idx] = memory
+		}
+		if err := s.saveLocked(file, loadedState); err != nil {
+			if errors.Is(err, errFileChanged) {
+				s.cache = storeCache{}
+				continue
+			}
+			return err
+		}
+		if normal {
+			s.recordNormalWrite(scope, nowTime)
+		}
+		return nil
 	}
-	return s.saveLocked(file)
+	return fmt.Errorf("resident memory update conflicted with concurrent file changes, please retry")
 }
 
 func validateCore(memory ResidentMemory, limits Limits) error {
@@ -195,11 +310,169 @@ func validateCore(memory ResidentMemory, limits Limits) error {
 	return nil
 }
 
-func validateNormal(memory ResidentMemory, limits Limits) error {
+func validateNormal(memory ResidentMemory, limits Limits, policy NormalWritePolicy) error {
 	if units := CountUnits(memory.Normal); units > limits.Normal {
 		return fmt.Errorf("resident memory normal is too long: %d/%d units", units, limits.Normal)
 	}
+	return validateNormalContent(memory.Normal, policy)
+}
+
+func validateNormalContent(content string, policy NormalWritePolicy) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	for _, r := range content {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			return fmt.Errorf("resident memory normal content contains an unsupported control character")
+		}
+	}
+	entries := splitNormalEntries(content)
+	if policy.MaxLines > 0 && len(entries) > policy.MaxLines {
+		return fmt.Errorf("resident memory normal has too many entries: %d/%d", len(entries), policy.MaxLines)
+	}
+	for _, entry := range entries {
+		if policy.MaxUnitsPerEntry > 0 {
+			if units := CountUnits(entry); units > policy.MaxUnitsPerEntry {
+				return fmt.Errorf("resident memory normal entry is too long: %d/%d units", units, policy.MaxUnitsPerEntry)
+			}
+		}
+		if !policy.BlockInstructionPatterns {
+			continue
+		}
+		lower := strings.ToLower(entry)
+		for _, pattern := range normalInstructionPatterns {
+			if strings.Contains(lower, strings.ToLower(pattern)) {
+				return fmt.Errorf("resident memory normal content looks like an instruction and was rejected: %q", pattern)
+			}
+		}
+	}
 	return nil
+}
+
+// normalizeNormalEntries turns arbitrary normal content into the canonical
+// one-fact-per-line form: blank lines removed, list markers stripped,
+// whitespace collapsed, exact duplicates dropped (case-insensitively), and
+// entries joined with "\n". It is applied to every normal write so the stored
+// value, the read result and the injected prompt stay consistent.
+func normalizeNormalEntries(content string) string {
+	entries := splitNormalEntries(content)
+	if len(entries) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(entries))
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		entry = stripNormalEntryPrefix(entry)
+		entry = strings.Join(strings.Fields(entry), " ")
+		if entry == "" {
+			continue
+		}
+		key := strings.ToLower(entry)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, entry)
+	}
+	return strings.Join(out, "\n")
+}
+
+func splitNormalEntries(content string) []string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	raw := strings.Split(content, "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// stripNormalEntryPrefix removes a single leading markdown/numbered list marker
+// so "1. 用户喜欢短回复" and "- 用户喜欢短回复" normalize to the same entry.
+func stripNormalEntryPrefix(line string) string {
+	line = strings.TrimSpace(line)
+	for _, prefix := range []string{"-", "*", "•", "·", "—"} {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	i := 0
+	runes := []rune(line)
+	for i < len(runes) && runes[i] >= '0' && runes[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(runes) {
+		switch runes[i] {
+		case '.', ')', '、', '．':
+			return strings.TrimSpace(string(runes[i+1:]))
+		}
+	}
+	return line
+}
+
+func (s *Store) checkNormalWritePolicy(scope session.Scope, now time.Time) error {
+	policy := s.NormalPolicy
+	if policy.MinInterval <= 0 && (policy.Window <= 0 || policy.MaxWrites <= 0) {
+		return nil
+	}
+	state := s.normalWrites[scopeKey(scope)]
+	if policy.MinInterval > 0 && !state.last.IsZero() {
+		elapsed := now.Sub(state.last)
+		if elapsed < policy.MinInterval {
+			remaining := policy.MinInterval - elapsed
+			return fmt.Errorf("resident memory normal write too frequent: wait %s", remaining.Round(time.Second))
+		}
+	}
+	if policy.Window > 0 && policy.MaxWrites > 0 {
+		cutoff := now.Add(-policy.Window)
+		count := 0
+		for _, writtenAt := range state.recent {
+			if writtenAt.After(cutoff) {
+				count++
+			}
+		}
+		if count >= policy.MaxWrites {
+			return fmt.Errorf("resident memory normal write limit reached: max %d per %s", policy.MaxWrites, policy.Window)
+		}
+	}
+	return nil
+}
+
+func (s *Store) recordNormalWrite(scope session.Scope, now time.Time) {
+	policy := s.NormalPolicy
+	if policy.MinInterval <= 0 && (policy.Window <= 0 || policy.MaxWrites <= 0) {
+		return
+	}
+	if s.normalWrites == nil {
+		s.normalWrites = map[string]normalWriteState{}
+	}
+	key := scopeKey(scope)
+	state := s.normalWrites[key]
+	state.last = now
+	if policy.Window > 0 && policy.MaxWrites > 0 {
+		cutoff := now.Add(-policy.Window)
+		pruned := state.recent[:0]
+		for _, writtenAt := range state.recent {
+			if writtenAt.After(cutoff) {
+				pruned = append(pruned, writtenAt)
+			}
+		}
+		state.recent = append(pruned, now)
+	}
+	s.normalWrites[key] = state
+}
+
+func scopeKey(scope session.Scope) string {
+	return strings.TrimSpace(scope.Platform) + "\x00" + strings.TrimSpace(scope.ActorID)
 }
 
 func CountUnits(content string) int {
@@ -261,19 +534,23 @@ func (s *Store) loadLocked() (tomlFile, error) {
 	return file, nil
 }
 
-func (s *Store) saveLocked(file tomlFile) error {
+func (s *Store) saveLocked(file tomlFile, expected fileState) error {
 	path := strings.TrimSpace(s.Path)
 	if path == "" {
 		return fmt.Errorf("resident memory path is required")
+	}
+	current, err := currentFileState(path)
+	if err != nil {
+		return err
+	}
+	if !sameFileState(expected, current) {
+		return errFileChanged
 	}
 	data, err := toml.Marshal(file)
 	if err != nil {
 		return fmt.Errorf("marshal resident memory: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create resident memory dir %q: %w", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := writeFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("write resident memory %q: %w", path, err)
 	}
 	state, err := currentFileState(path)

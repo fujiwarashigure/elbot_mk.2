@@ -19,9 +19,9 @@ cd elbot_mk.2
 
 ## 配置 Provider
 
-ElBot 默认按配置查找顺序读取主配置。首次运行且平台配置目录没有 `app.toml` 时，会在平台配置目录自动生成 `app.toml`、`providers.toml`、`state.toml`、`SOUL.md`、`elnis.toml` 和 `.env.example`；已有配置文件不会被覆盖。
+ElBot 默认按配置查找顺序读取主配置。首次运行且平台配置目录没有 `app.toml` 时，会在平台配置目录自动生成 `app.toml`、`services.toml`、`state.toml`、`SOUL.md`、`elnis.toml` 和 `.env.example`；已有配置文件不会被覆盖。
 
-默认配置已经包含 DeepSeek 和 OpenAI Provider：
+Provider、生图和模型别名默认写在 `services.toml`。默认配置已经包含 DeepSeek 和 OpenAI Provider：
 
 ```toml
 [providers.deepseek]
@@ -34,7 +34,7 @@ api_key_env = "OPENAI_API_KEY"
 models = ["gpt-4o-mini"]
 ```
 
-推荐把密钥放在系统环境变量，或把自动生成的 `.env.example` 复制为配置目录下的 `.env` 后填写，不要直接写进 `providers.toml`。
+推荐把密钥放在系统环境变量，或把自动生成的 `.env.example` 复制为配置目录下的 `.env` 后填写，不要直接写进 `services.toml`（或旧 `providers.toml`）。
 
 示例 `.env`：
 
@@ -185,7 +185,7 @@ elbot completion nushell > ~/.config/nushell/completions/elbot.nu
 
 检查：
 
-- `providers.toml` 中的 `api_key_env` 是否写对。
+- `services.toml`（旧部署为 `providers.toml`）中的 `api_key_env` 是否写对。
 - 系统环境变量或配置目录 `.env` 是否包含对应 Key。
 - 当前 shell 是否能读取这些环境变量。
 
@@ -193,7 +193,7 @@ elbot completion nushell > ~/.config/nushell/completions/elbot.nu
 
 检查：
 
-- `state.toml` 中的 `provider` 是否存在于 `providers.toml`。
+- `state.toml` 中的 `provider` 是否存在于 `services.toml`（旧部署为 `providers.toml`）。
 - `model` 名称是否被 Provider 支持。
 - 可以启动后用 `/*models --fresh` 或 `/*models --refresh` 刷新模型列表。
 

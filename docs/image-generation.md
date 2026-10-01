@@ -4,6 +4,8 @@ ElBot 内置 `image_generate` 工具，用于对接 OpenAI 兼容的 `/images/ge
 
 ## 配置
 
+生图的 `[image_generation]` 位于共享的 `services.toml`（旧部署仍可放在 `app.toml`）。本节后面的 `[image_generation]` 片段都指同一个 section：
+
 ```toml
 [image_generation]
 enabled = true
@@ -46,30 +48,49 @@ IMAGE_API_KEY=sk-xxxxxxxx
 
 ```text
 最终 prompt = 全局预设 preset_prompt
-            + 角色预设（image_prompt.md 和 character.toml 的 [image] preset_prompt）
+            + 每个角色预设（image_prompt.md 和 character.toml 的 [image] preset_prompt）
             + 场景描述（prompt 参数）
-            + "avoid: <negative_prompt>, <角色 negative_prompt>"
+            + 多角色同框约束（索引了 2 个及以上角色时）
+            + "avoid: <negative_prompt>, <各角色 negative_prompt>"
 ```
 
-- 角色预设只在"指定了 `character_id`"或"本轮用 `@char:<id>` 启用了角色"时加入；
-- 总长度受 `max_prompt_runes` 限制；
+- 角色预设只在"指定了 `character_id` / `character_ids`"或"本轮用 `@char:<id>` 启用了角色"时加入；
+- 总长度受 `max_prompt_runes` 限制；多角色时每个角色块会带 `角色 名称（id）：` 标签；
 - 全局预设用来放统一画风/画质/安全词，角色预设用来放人物外貌、发色、服装、画风一致性关键词。
 
-**触发角色预设的两种方式：**
+**触发角色预设的方式：**
 
-1. 模型显式传参：
+1. 模型显式传单个角色：
 
 ```json
 {"prompt": "在雨里的霓虹街道回眸", "character_id": "catgirl"}
 ```
 
-2. 消息里先启用角色（推荐，确定性自动带上）：
+2. 模型显式传多个角色：
 
-```text
-@char:catgirl 画一张她站在雨里的霓虹街道回眸
+```json
+{"prompt": "两人在雨夜街道同框", "character_ids": ["catgirl", "foxgirl"]}
 ```
 
-第二种方式不需要模型记得传 `character_id`：`@char:` 激活的角色会随本轮上下文传给 `image_generate`。
+3. 消息里先启用一个或多个角色（推荐，确定性自动带上）：
+
+```text
+@char:catgirl @char:foxgirl 画一张两人站在雨里的霓虹街道同框
+```
+
+`@char:` 激活的角色会随本轮上下文传给 `image_generate`。默认情况下，所有被索引的角色都会写进**同一张图**；只有当工具参数 `count > 1` 时，才会生成多张图，并且每张图仍然包含全部被索引角色，不会把角色拆到不同图片里。
+
+参考图还支持多张：
+
+```json
+{
+  "prompt": "两人同框",
+  "character_ids": ["catgirl", "foxgirl"],
+  "reference_images": ["catgirl:avatar.png", "foxgirl:avatar.png"]
+}
+```
+
+`reference_images` 每项可以是 `media:<sha256>`、角色图片名，或多角色时的 `<character_id>:<图片名>`。是否支持多张参考图取决于中转站；开启 `supports_reference = true` 后，单张会按原格式发送，多张会以数组发送到 `reference_field` 指定的字段。
 
 ## 内置提示词优化（rules）
 
@@ -215,7 +236,7 @@ references = ["avatar.png"]  # 作为参考图的角色图片名
 
 | 能力 | 触发条件 | 说明 |
 | --- | --- | --- |
-| **自动选角** | prompt 里出现角色名/别名，或传了 `character_id: "auto"` / `character_query` | 命中后自动带上该角色的图片预设和参考图 |
+| **自动选角** | prompt 里出现多个角色名/别名，或传了 `character_id: "auto"` / `character_ids` / `character_query` | 命中后自动带上所有命中角色的图片预设和参考图，合并到同一张图 |
 | **自动拉群聊上下文** | prompt 里出现"刚才/上一条/那张图/群里/大家"等指代词 | 从当前群历史检索相关消息，作为参考对话；写进 rewrite 输入，未做改写时追加到 prompt |
 | **TAG 库优化** | `optimize = "rules"` | 自动补用途比例、画风锚点/单词 tag、负面词 |
 | **LLM 语义改写** | `optimize_rewrite = "auto"` 且 prompt 太短（默认 < 40 字）或拉了群聊上下文 | 用 `optimize_rewrite_model` 指定的低成本模型改写；失败自动回退到规则结果 |
@@ -249,11 +270,14 @@ context_default_limit = 6
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
 | `prompt` | 是 | 画面/场景描述；不要重复角色外貌，会由角色预设自动拼接 |
-| `character_id` | 否 | 指定角色；不填时使用本轮 `@char:<id>` 启用的角色 |
-| `size` | 否 | 如 `1024x1024`、`1536x1024`、`1024x1536`；优先级：参数 > 角色 `[image].size` > 全局 |
+| `character_id` | 否 | 指定单个角色；不填时使用本轮 `@char:<id>` 启用的角色 |
+| `character_ids` | 否 | 指定多个角色；默认所有角色画进同一张图，最多 4 个 |
+| `size` | 否 | 如 `1024x1024`、`1536x1024`、`1024x1536`；优先级：参数 > 第一个角色 `[image].size` > 全局 |
 | `quality` | 否 | `low` / `medium` / `high`；优先级同上 |
-| `reference_image` | 否 | `media:<sha256>` 或角色图片名；需要 `supports_reference = true` |
-| `save_to_character` | 否 | 是否写回角色 `images/`；默认跟 `save_to_character` 配置 |
+| `reference_image` | 否 | 单张参考图：`media:<sha256>`、角色图片名，或多角色时 `<character_id>:<图片名>`；需要 `supports_reference = true` |
+| `reference_images` | 否 | 多张参考图；每项同上，多个角色时建议用 `<character_id>:<图片名>` 标明归属 |
+| `count` | 否 | 强制生成张数，默认 1，单次最多 4；每张都包含全部已索引角色 |
+| `save_to_character` | 否 | 是否写回角色 `images/`；多角色时写回第一个角色；默认跟 `save_to_character` 配置 |
 | `send` | 否 | 是否直接发到当前聊天；默认 `false` |
 | `mode` | 否 | `auto`（默认）/ `manual` |
 | `character_query` | 否 | `character_id: "auto"` 时的检索词；不填用 prompt |
@@ -261,10 +285,12 @@ context_default_limit = 6
 | `context_limit` | 否 | 拉取条数，默认 6 |
 | `rewrite` | 否 | 本次是否做 LLM 语义改写 |
 
+`count` 通过最多 4 个并发子请求实现，每个上游请求仍是 `n = 1`；这样不依赖中转站是否支持 `n > 1`，每张图也都会包含全部被索引角色。
+
 ## 出图之后
 
-- 图片导入 Media Center，返回图片段，模型能直接看到结果；
-- `save_to_character = true` 且解析到角色时，图片同时写回 `characters/<id>/images/`，并在 `character.toml` 的 `[[images]]` 里登记 `media:<sha256>`；
+- 图片导入 Media Center，返回图片段，模型能直接看到结果；`count > 1` 时会返回多张图片段，每张图都包含全部被索引角色；
+- `save_to_character = true` 且解析到角色时，图片写回第一个角色的 `characters/<id>/images/`，并在 `character.toml` 的 `[[images]]` 里登记 `media:<sha256>`；
 - `send = true` 或 `send_by_default = true` 时会把图片发到当前会话（群聊可用）。
 
 ## 中转站兼容性说明
@@ -290,6 +316,7 @@ context_default_limit = 6
 ```
 
 - 返回 `url` 时会自动下载（带超时和 20MB 上限）；
+- 单张参考图按 `reference_field` 发送为字符串；`reference_images` 有多张且 `supports_reference=true` 时，同一字段会发送为 data URL 数组；中转站若不支持数组，请每次只传一张参考图。
 - 非 2xx 会读取 `error.message` 作为错误信息；
 - 中转站如果有额外字段（`aspect_ratio`、`seed`、`watermark` 等），用 `extra_payload` 透传；需要额外请求头用 `extra_headers`；
 - GPT Image 系列有的中转不接受 `response_format`，默认不发送；只有中转站明确要求时才配置 `response_format = "b64_json"`；
@@ -305,7 +332,7 @@ context_default_limit = 6
 
 | 现象 | 原因 |
 | --- | --- |
-| `生图服务未启用` | `[image_generation] enabled = false` 或没重启 |
+| `生图服务未启用` | `services.toml` 的 `[image_generation] enabled = false`（旧部署为 `app.toml`）或没重启 |
 | `缺少 API Key` | `IMAGE_API_KEY` 没设置，或 `.env` 没被加载 |
 | `生图服务返回 404` | `base_url` 少/多了 `/v1`；用 `endpoint` 直接写全路径 |
 | `生图服务返回 400` | `quality` / `size` / `output_format` 不被中转支持；用 `extra_payload` 调整 |

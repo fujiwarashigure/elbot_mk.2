@@ -2,6 +2,8 @@ package builtin
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 
 	"elbot/internal/character"
@@ -29,31 +31,60 @@ type ImagePromptRewriter interface {
 	RewriteImagePrompt(ctx context.Context, req ImagePromptRewriteRequest) (string, error)
 }
 
-// resolveImageCharacter picks the character for this image request:
-// explicit id > active @char:<id> > explicit query > name/alias found in the prompt.
-func (t ImageGenerateTool) resolveImageCharacter(ctx context.Context, args imageGenerateArgs, prompt string, viewer character.Viewer, auto bool) (*character.Character, error) {
+// resolveImageCharacters picks all characters for this image request:
+// explicit character_id / character_ids > active @char ids > explicit query > names/aliases found in the prompt.
+func (t ImageGenerateTool) resolveImageCharacters(ctx context.Context, args imageGenerateArgs, prompt string, viewer character.Viewer, auto bool) ([]*character.Character, error) {
 	if t.characters == nil || !t.characters.Enabled() {
 		return nil, nil
 	}
-	id := strings.TrimSpace(args.CharacterID)
-	if id != "" && !strings.EqualFold(id, "auto") {
-		item, err := t.characters.GetVisible(ctx, id, viewer)
-		if err != nil {
-			return nil, imageCharacterError(id, err)
+	explicit := explicitCharacterIDs(args)
+	if len(explicit) > 0 {
+		out := make([]*character.Character, 0, len(explicit))
+		seen := map[string]bool{}
+		for _, id := range explicit {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			item, err := t.characters.GetVisible(ctx, id, viewer)
+			if err != nil {
+				return nil, imageCharacterError(id, err)
+			}
+			out = append(out, item)
+			if len(out) >= maxImageCharacters {
+				break
+			}
 		}
-		return item, nil
+		return out, nil
 	}
 	if active := character.ActiveIDs(ctx); len(active) > 0 {
-		if item, err := t.characters.GetVisible(ctx, active[0], viewer); err == nil {
-			return item, nil
+		out := make([]*character.Character, 0, len(active))
+		seen := map[string]bool{}
+		for _, id := range active {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			item, err := t.characters.GetVisible(ctx, id, viewer)
+			if err != nil {
+				continue
+			}
+			out = append(out, item)
+			if len(out) >= maxImageCharacters {
+				break
+			}
+		}
+		if len(out) > 0 {
+			return out, nil
 		}
 	}
 	query := strings.TrimSpace(args.CharacterQuery)
-	if !auto && !strings.EqualFold(id, "auto") && query == "" {
+	explicitAuto := strings.EqualFold(strings.TrimSpace(args.CharacterID), "auto")
+	if !auto && !explicitAuto && query == "" {
 		return nil, nil
 	}
-	if item := t.matchCharacterByName(ctx, prompt, viewer); item != nil {
-		return item, nil
+	if items := t.matchCharactersByName(ctx, prompt, viewer, maxImageCharacters); len(items) > 0 {
+		return items, nil
 	}
 	if query == "" {
 		query = prompt
@@ -61,42 +92,141 @@ func (t ImageGenerateTool) resolveImageCharacter(ctx context.Context, args image
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
-	results, err := t.characters.Search(ctx, query, "", "", 3, viewer)
+	results, err := t.characters.Search(ctx, query, "", "", maxImageCharacters, viewer)
 	if err != nil || len(results) == 0 {
 		return nil, nil
 	}
-	item, err := t.characters.GetVisible(ctx, results[0].ID, viewer)
-	if err != nil {
-		return nil, nil
+	out := make([]*character.Character, 0, len(results))
+	seen := map[string]bool{}
+	for _, result := range results {
+		if seen[result.ID] {
+			continue
+		}
+		seen[result.ID] = true
+		item, err := t.characters.GetVisible(ctx, result.ID, viewer)
+		if err != nil {
+			continue
+		}
+		out = append(out, item)
 	}
-	return item, nil
+	return out, nil
 }
 
-// matchCharacterByName finds a visible character whose name or alias appears in
-// the prompt. The longest match wins so short aliases do not shadow full names.
-func (t ImageGenerateTool) matchCharacterByName(ctx context.Context, prompt string, viewer character.Viewer) *character.Character {
+func explicitCharacterIDs(args imageGenerateArgs) []string {
+	ids := []string{}
+	seen := map[string]bool{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.EqualFold(value, "auto") || seen[value] {
+			return
+		}
+		seen[value] = true
+		ids = append(ids, value)
+	}
+	add(args.CharacterID)
+	for _, value := range args.CharacterIDs {
+		add(value)
+	}
+	return ids
+}
+
+// matchCharactersByName finds all visible characters whose name or alias appears
+// in the prompt. Longer names are matched first so short aliases do not shadow
+// full names; an already matched span is blanked before testing shorter keys.
+func (t ImageGenerateTool) matchCharactersByName(ctx context.Context, prompt string, viewer character.Viewer, limit int) []*character.Character {
+	if limit <= 0 {
+		limit = maxImageCharacters
+	}
 	items, err := t.characters.List(ctx, viewer)
 	if err != nil {
 		return nil
 	}
-	folded := strings.ToLower(prompt)
-	var best *character.Character
-	bestLen := 0
+	type candidate struct {
+		key  string
+		item *character.Character
+	}
+	candidates := make([]candidate, 0, len(items))
+	seenKeys := map[string]bool{}
 	for _, item := range items {
 		names := append([]string{item.Name}, item.Aliases...)
 		for _, name := range names {
-			name = strings.ToLower(strings.TrimSpace(name))
-			if len([]rune(name)) < 2 || !strings.Contains(folded, name) {
+			key := strings.ToLower(strings.TrimSpace(name))
+			if len([]rune(key)) < 2 || seenKeys[key] {
 				continue
 			}
-			if length := len([]rune(name)); length > bestLen {
-				best = item
-				bestLen = length
-			}
+			seenKeys[key] = true
+			candidates = append(candidates, candidate{key: key, item: item})
 		}
 	}
-	return best
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := len([]rune(candidates[i].key)), len([]rune(candidates[j].key))
+		if left != right {
+			return left > right
+		}
+		return candidates[i].key < candidates[j].key
+	})
+	folded := strings.ToLower(prompt)
+	out := make([]*character.Character, 0, min(limit, len(candidates)))
+	seenIDs := map[string]bool{}
+	for _, candidate := range candidates {
+		if seenIDs[candidate.item.ID] || !strings.Contains(folded, candidate.key) {
+			continue
+		}
+		seenIDs[candidate.item.ID] = true
+		out = append(out, candidate.item)
+		if len(out) >= limit {
+			break
+		}
+		folded = strings.ReplaceAll(folded, candidate.key, " ")
+	}
+	return out
 }
+
+func imageCharacterNames(items []*character.Character) string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil && strings.TrimSpace(item.Name) != "" {
+			names = append(names, item.Name)
+		}
+	}
+	return strings.Join(names, "、")
+}
+
+func imageCharacterPrompts(items []*character.Character) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		preset := strings.TrimSpace(item.ImagePrompt())
+		if preset == "" {
+			continue
+		}
+		if len(items) > 1 {
+			parts = append(parts, fmt.Sprintf("角色 %s（%s）：\n%s", item.Name, item.ID, preset))
+			continue
+		}
+		parts = append(parts, preset)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func imageCharacterSummary(items []*character.Character) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s(%s)", item.Name, item.ID))
+	}
+	return strings.Join(parts, "、")
+}
+
+// imageToolMessage wraps a user-facing message as a normal error so callers can
+// surface it without failing the tool call.
+type imageToolMessage struct{ text string }
+
+func (m *imageToolMessage) Error() string { return m.text }
 
 func imageCharacterError(id string, err error) error {
 	switch err {
@@ -108,26 +238,6 @@ func imageCharacterError(id string, err error) error {
 		return err
 	}
 }
-
-func characterName(item *character.Character) string {
-	if item == nil {
-		return ""
-	}
-	return item.Name
-}
-
-func characterImagePrompt(item *character.Character) string {
-	if item == nil {
-		return ""
-	}
-	return item.ImagePrompt()
-}
-
-// imageToolMessage wraps a user-facing message as a normal error so callers can
-// surface it without failing the tool call.
-type imageToolMessage struct{ text string }
-
-func (m *imageToolMessage) Error() string { return m.text }
 
 // imageContextQuery decides whether to pull group chat context.
 func (t ImageGenerateTool) imageContextQuery(args imageGenerateArgs, prompt string, auto bool) (string, bool) {

@@ -18,45 +18,54 @@ const XDGAppDirName = "elbot"
 const PluginConfigDirName = "plugins"
 
 type Config struct {
-	ConfigFiles         ConfigFilesConfig             `toml:"config_files"`
-	ModeModels          map[string]ModelSelection     `toml:"mode_models"`
-	NamingModel         ModelSelection                `toml:"naming_model"`
-	CompactModel        ModelSelection                `toml:"-"`
-	Providers           map[string]ProviderConfig     `toml:"providers"`
-	ModelMetadata       ModelMetadataConfig           `toml:"model_metadata"`
-	Storage             StorageConfig                 `toml:"storage"`
-	Runtime             RuntimeConfig                 `toml:"runtime"`
-	Ops                 OpsConfig                     `toml:"ops"`
-	Context             ContextConfig                 `toml:"context"`
-	Commands            CommandsConfig                `toml:"commands"`
-	Tools               ToolsConfig                   `toml:"tools"`
-	ResidentMemory      ResidentMemoryConfig          `toml:"resident_memory"`
-	View                ViewConfig                    `toml:"view"`
-	Security            SecurityConfig                `toml:"security"`
-	Session             SessionConfig                 `toml:"session"`
-	LLMRequest          LLMRequestConfig              `toml:"llm_request"`
-	Maintenance         MaintenanceConfig             `toml:"maintenance"`
-	Sandbox             SandboxConfig                 `toml:"sandbox"`
-	Media               MediaConfig                   `toml:"media"`
-	FileDelivery        FileDeliveryConfig            `toml:"file_delivery"`
-	PlatformFiles       PlatformFilesConfig           `toml:"platform_files"`
-	Platform            PlatformConfig                `toml:"platform"`
-	Elnis               ElnisConfig                   `toml:"elnis"`
-	Soul                SoulConfig                    `toml:"soul"`
-	CharacterLibrary    CharacterLibraryConfig        `toml:"character_library"`
-	ImageGeneration     ImageGenerationConfig         `toml:"image_generation"`
-	ModelProfiles       map[string]ModelProfileConfig `toml:"model_profiles"`
-	ToolProfiles        map[string]ToolProfileConfig  `toml:"tool_profiles"`
-	TurnDirectives      TurnDirectivesConfig          `toml:"turn_directives"`
-	ToolTags            ToolTagsConfig                `toml:"-"`
-	ConfigPath          string                        `toml:"-"`
-	ProvidersConfigPath string                        `toml:"-"`
-	StateConfigPath     string                        `toml:"-"`
-	ElnisConfigPath     string                        `toml:"-"`
-	ToolTagsConfigPath  string                        `toml:"-"`
+	ConfigFiles         ConfigFilesConfig                `toml:"config_files"`
+	ModeModels          map[string]ModelSelection        `toml:"mode_models"`
+	NamingModel         ModelSelection                   `toml:"naming_model"`
+	CompactModel        ModelSelection                   `toml:"-"`
+	Providers           map[string]ProviderConfig        `toml:"providers"`
+	ModelMetadata       ModelMetadataConfig              `toml:"model_metadata"`
+	Storage             StorageConfig                    `toml:"storage"`
+	Runtime             RuntimeConfig                    `toml:"runtime"`
+	Ops                 OpsConfig                        `toml:"ops"`
+	Context             ContextConfig                    `toml:"context"`
+	Commands            CommandsConfig                   `toml:"commands"`
+	Tools               ToolsConfig                      `toml:"tools"`
+	ResidentMemory      ResidentMemoryConfig             `toml:"resident_memory"`
+	View                ViewConfig                       `toml:"view"`
+	Security            SecurityConfig                   `toml:"security"`
+	Session             SessionConfig                    `toml:"session"`
+	LLMRequest          LLMRequestConfig                 `toml:"llm_request"`
+	Maintenance         MaintenanceConfig                `toml:"maintenance"`
+	Sandbox             SandboxConfig                    `toml:"sandbox"`
+	Media               MediaConfig                      `toml:"media"`
+	FileDelivery        FileDeliveryConfig               `toml:"file_delivery"`
+	PlatformFiles       PlatformFilesConfig              `toml:"platform_files"`
+	Platform            PlatformConfig                   `toml:"platform"`
+	Elnis               ElnisConfig                      `toml:"elnis"`
+	Soul                SoulConfig                       `toml:"soul"`
+	CharacterLibrary    CharacterLibraryConfig           `toml:"character_library"`
+	ImageGeneration     ImageGenerationConfig            `toml:"image_generation"`
+	GroupAnalysis       GroupAnalysisConfig              `toml:"group_analysis"`
+	AngelMemory         AngelMemoryConfig                `toml:"angel_memory"`
+	SelfLearning        SelfLearningConfig               `toml:"self_learning"`
+	ModelProfiles       map[string]ModelProfileConfig    `toml:"model_profiles"`
+	ToolProfiles        map[string]ToolProfileConfig     `toml:"tool_profiles"`
+	TurnDirectives      TurnDirectivesConfig             `toml:"turn_directives"`
+	ToolTags            ToolTagsConfig                   `toml:"-"`
+	ContextOverflow     map[string]ContextOverflowConfig `toml:"-"`
+	ConfigPath          string                           `toml:"-"`
+	ProvidersConfigPath string                           `toml:"-"`
+	ServicesConfigPath  string                           `toml:"-"`
+	StateConfigPath     string                           `toml:"-"`
+	ElnisConfigPath     string                           `toml:"-"`
+	ToolTagsConfigPath  string                           `toml:"-"`
 }
 
 type ConfigFilesConfig struct {
+	// Services points to the shared, read-only service config (LLM providers,
+	// image generation and model aliases). It is optional for backward
+	// compatibility; when empty, Providers is loaded instead.
+	Services  string `toml:"services"`
 	Providers string `toml:"providers"`
 	State     string `toml:"state"`
 	Elnis     string `toml:"elnis"`
@@ -176,8 +185,39 @@ type OpsConfig struct {
 }
 
 type ContextConfig struct {
-	CompactEnabled      bool    `toml:"compact_enabled"`
-	CompactTriggerRatio float64 `toml:"compact_trigger_ratio"`
+	CompactEnabled        bool    `toml:"compact_enabled"`
+	CompactTriggerRatio   float64 `toml:"compact_trigger_ratio"`
+	MaxPromptRatio        float64 `toml:"max_prompt_ratio"`
+	ReserveOutputTokens   int     `toml:"reserve_output_tokens"`
+	SingleMessageMaxRatio float64 `toml:"single_message_max_ratio"`
+	UserOriginalMaxRunes  int     `toml:"user_original_max_runes"`
+	OverflowMode          string  `toml:"overflow_mode"`
+}
+
+// Normalized returns a context config with safe defaults filled in.
+func (c ContextConfig) Normalized() ContextConfig {
+	if c.CompactTriggerRatio <= 0 || c.CompactTriggerRatio >= 1 {
+		c.CompactTriggerRatio = 0.8
+	}
+	if c.MaxPromptRatio <= 0 || c.MaxPromptRatio >= 1 {
+		c.MaxPromptRatio = 0.8
+	}
+	if c.SingleMessageMaxRatio <= 0 || c.SingleMessageMaxRatio >= 1 {
+		c.SingleMessageMaxRatio = 0.5
+	}
+	if c.ReserveOutputTokens < 0 {
+		c.ReserveOutputTokens = 0
+	}
+	if c.UserOriginalMaxRunes <= 0 {
+		c.UserOriginalMaxRunes = 4000
+	}
+	switch strings.ToLower(strings.TrimSpace(c.OverflowMode)) {
+	case "reject", "truncate", "summarize":
+		c.OverflowMode = strings.ToLower(strings.TrimSpace(c.OverflowMode))
+	default:
+		c.OverflowMode = "reject"
+	}
+	return c
 }
 
 type CommandsConfig struct {
@@ -191,6 +231,49 @@ type ToolsConfig struct {
 type ResidentMemoryConfig struct {
 	CoreMaxUnits   int `toml:"core_max_units"`
 	NormalMaxUnits int `toml:"normal_max_units"`
+
+	// P1/P2 guards for normal memory writes. Explicit 0 disables the
+	// corresponding rate/line/per-entry limit; nil uses the built-in default.
+	NormalWriteMinIntervalSeconds  *int  `toml:"normal_write_min_interval_seconds"`
+	NormalWriteWindowSeconds       *int  `toml:"normal_write_window_seconds"`
+	NormalWriteMaxPerWindow        *int  `toml:"normal_write_max_per_window"`
+	NormalMaxLines                 *int  `toml:"normal_max_lines"`
+	NormalMaxUnitsPerEntry         *int  `toml:"normal_max_units_per_entry"`
+	NormalBlockInstructionPatterns *bool `toml:"normal_block_instruction_patterns"`
+}
+
+// IsNormalBlockInstructionPatterns reports whether normal memory content is
+// checked against the built-in instruction-like patterns (default true).
+func (c ResidentMemoryConfig) IsNormalBlockInstructionPatterns() bool {
+	return c.NormalBlockInstructionPatterns == nil || *c.NormalBlockInstructionPatterns
+}
+
+// Effective values used by the app runtime. Explicit 0 disables the guard.
+func (c ResidentMemoryConfig) NormalWriteMinIntervalSecondsValue() int {
+	return intValueOrDefault(c.NormalWriteMinIntervalSeconds, 5)
+}
+
+func (c ResidentMemoryConfig) NormalWriteWindowSecondsValue() int {
+	return intValueOrDefault(c.NormalWriteWindowSeconds, 60)
+}
+
+func (c ResidentMemoryConfig) NormalWriteMaxPerWindowValue() int {
+	return intValueOrDefault(c.NormalWriteMaxPerWindow, 6)
+}
+
+func (c ResidentMemoryConfig) NormalMaxLinesValue() int {
+	return intValueOrDefault(c.NormalMaxLines, 20)
+}
+
+func (c ResidentMemoryConfig) NormalMaxUnitsPerEntryValue() int {
+	return intValueOrDefault(c.NormalMaxUnitsPerEntry, 80)
+}
+
+func intValueOrDefault(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 // CharacterLibraryConfig controls the folder-based character library.
@@ -204,7 +287,47 @@ func (c CharacterLibraryConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
 }
 
-// ImageGenerationConfig controls the optional image generation tool.
+// GroupAnalysisConfig controls the clean-room group analysis tool.
+type GroupAnalysisConfig struct {
+	Enabled        *bool  `toml:"enabled"`
+	MaxMessages    int    `toml:"max_messages"`
+	ReportEnabled  *bool  `toml:"report_enabled"`
+	ReportSchedule string `toml:"report_schedule"`
+	ReportPlatform string `toml:"report_platform"`
+	ReportScopeID  string `toml:"report_scope_id"`
+	ReportDays     int    `toml:"report_days"`
+}
+
+func (c GroupAnalysisConfig) IsReportEnabled() bool {
+	return c.ReportEnabled != nil && *c.ReportEnabled
+}
+
+// IsEnabled reports whether group analysis is enabled (default true).
+func (c GroupAnalysisConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// AngelMemoryConfig controls the clean-room long-memory tool and injection.
+type AngelMemoryConfig struct {
+	Enabled       *bool `toml:"enabled"`
+	RetentionDays int   `toml:"retention_days"`
+}
+
+func (c AngelMemoryConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// SelfLearningConfig controls the clean-room expression/jargon learning layer.
+type SelfLearningConfig struct {
+	Enabled       *bool `toml:"enabled"`
+	RetentionDays int   `toml:"retention_days"`
+	MinCount      int   `toml:"min_count"`
+}
+
+func (c SelfLearningConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 // ModelProfileConfig is one named model profile for the @model: directive.
 type ModelProfileConfig struct {
 	Provider string   `toml:"provider"`
@@ -216,6 +339,16 @@ type ModelProfileConfig struct {
 type ToolProfileConfig struct {
 	Tools   []string `toml:"tools"`
 	Aliases []string `toml:"aliases"`
+}
+
+// ServicesConfig is the shared, read-only service config loaded from
+// [config_files].services. It intentionally excludes runtime-written state;
+// StateConfig remains in its own file because ElBot rewrites it at runtime.
+type ServicesConfig struct {
+	Providers       map[string]ProviderConfig     `toml:"providers"`
+	ModelMetadata   *ModelMetadataConfig          `toml:"model_metadata"`
+	ModelProfiles   map[string]ModelProfileConfig `toml:"model_profiles"`
+	ImageGeneration *ImageGenerationConfig        `toml:"image_generation"`
 }
 
 // TurnDirectivesConfig controls how @model: / @image: / @use: style declarations
@@ -357,6 +490,7 @@ func (c ImageGenerationConfig) DefaultProfileName() string {
 	return strings.TrimSpace(c.DefaultProfile)
 }
 
+// ImageGenerationConfig controls the optional image generation tool.
 type ImageGenerationConfig struct {
 	Enabled                 bool                                    `toml:"enabled"`
 	DefaultProfile          string                                  `toml:"default_profile"`
@@ -450,6 +584,7 @@ type MaintenanceConfig struct {
 	SessionCleanup     MaintenanceCleanupConfig `toml:"session_cleanup"`
 	SandboxCleanup     MaintenanceCleanupConfig `toml:"sandbox_cleanup"`
 	ChatHistoryCleanup ChatHistoryCleanupConfig `toml:"chat_history_cleanup"`
+	PrivacyCleanup     MaintenanceCleanupConfig `toml:"privacy_cleanup"`
 	DailyReport        DailyReportConfig        `toml:"daily_report"`
 }
 
@@ -711,19 +846,37 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg := defaultAppConfig()
+	cfg := newLoadConfig()
 	if err := loadTOML(configPath, cfg); err != nil {
 		return nil, err
 	}
 	cfg.applyAppDefaults()
 
-	providersPath := resolveRelative(configPath, cfg.ConfigFiles.Providers)
-	providersCfg := &Config{}
-	if err := loadTOML(providersPath, providersCfg); err != nil {
-		return nil, err
+	providersPath := ""
+	if cfg.ConfigFiles.Providers != "" {
+		providersPath = resolveRelative(configPath, cfg.ConfigFiles.Providers)
+		providersCfg := &Config{}
+		if err := loadTOML(providersPath, providersCfg); err != nil {
+			return nil, err
+		}
+		cfg.mergeProviders(providersCfg)
 	}
-	cfg.mergeProviders(providersCfg)
+
+	servicesPath := ""
+	if cfg.ConfigFiles.Services != "" {
+		servicesPath = resolveRelative(configPath, cfg.ConfigFiles.Services)
+		servicesCfg := &ServicesConfig{}
+		if err := loadTOML(servicesPath, servicesCfg); err != nil {
+			return nil, err
+		}
+		cfg.mergeServices(servicesCfg)
+	}
+
 	cfg.applyProviderDefaults()
+	// The first defaults pass ran before the optional services file was
+	// merged; run it again so a services-provided [image_generation] gets the
+	// standard defaults too. All defaults are idempotent.
+	cfg.applyAppDefaults()
 	if err := cfg.resolveProviderAPIKeys(filepath.Dir(configPath)); err != nil {
 		return nil, err
 	}
@@ -759,6 +912,24 @@ func Load(path string) (*Config, error) {
 		cfg.ToolTags = *toolTagsCfg
 	}
 
+	// state.toml is rewritten by ElBot at runtime. Sharing it with any
+	// read-only config file would make SaveState overwrite that file with just
+	// the state sections.
+	for _, shared := range []struct {
+		name string
+		path string
+	}{
+		{"app", configPath},
+		{"providers", providersPath},
+		{"services", servicesPath},
+		{"elnis", elnisPath},
+		{"tool_tags", toolTagsPath},
+	} {
+		if shared.path != "" && statePath == shared.path {
+			return nil, fmt.Errorf("config_files.state must point to a dedicated writable file, but %q is also used by %s config", statePath, shared.name)
+		}
+	}
+
 	if err := cfg.validateModeModels(); err != nil {
 		return nil, err
 	}
@@ -769,6 +940,7 @@ func Load(path string) (*Config, error) {
 	cfg.Sandbox.Root = resolveRelative(configPath, cfg.Sandbox.Root)
 	cfg.ConfigPath = configPath
 	cfg.ProvidersConfigPath = providersPath
+	cfg.ServicesConfigPath = servicesPath
 	cfg.StateConfigPath = statePath
 	cfg.ElnisConfigPath = elnisPath
 	cfg.ToolTagsConfigPath = toolTagsPath
@@ -787,10 +959,16 @@ func PluginConfigDir(configPath string) string {
 }
 
 type StateConfig struct {
-	Session      StateSessionConfig        `toml:"session"`
-	ModeModels   map[string]ModelSelection `toml:"mode_models"`
-	NamingModel  ModelSelection            `toml:"naming_model"`
-	CompactModel ModelSelection            `toml:"compact_model"`
+	Session         StateSessionConfig               `toml:"session"`
+	ModeModels      map[string]ModelSelection        `toml:"mode_models"`
+	NamingModel     ModelSelection                   `toml:"naming_model"`
+	CompactModel    ModelSelection                   `toml:"compact_model"`
+	ContextOverflow map[string]ContextOverflowConfig `toml:"context_overflow,omitempty"`
+}
+
+type ContextOverflowConfig struct {
+	Chat string `toml:"chat,omitempty"`
+	Work string `toml:"work,omitempty"`
 }
 
 type StateSessionConfig struct {
@@ -826,8 +1004,17 @@ func Default() *Config {
 }
 
 func defaultAppConfig() *Config {
-	cfg := &Config{}
+	cfg := newLoadConfig()
 	cfg.applyAppDefaults()
+	return cfg
+}
+
+// newLoadConfig returns a config with only the internal defaults that must
+// exist before parsing app.toml (currently idle expiration). ConfigFiles
+// defaults are applied after parsing so app.toml can opt into services.toml
+// without inheriting the legacy providers.toml default.
+func newLoadConfig() *Config {
+	cfg := &Config{}
 	cfg.Session.IdleExpiration = defaultSessionIdleExpirationConfig()
 	return cfg
 }
@@ -872,8 +1059,39 @@ func loadTOML(path string, out any) error {
 	return nil
 }
 
+// DefaultModelSelection returns the model used by the configured default
+// session mode. It falls back to chat, work, then any configured mode so
+// auxiliary features can reuse the same default without inventing a new model
+// slot.
+func (c *Config) DefaultModelSelection() ModelSelection {
+	if c == nil {
+		return ModelSelection{}
+	}
+	mode := strings.TrimSpace(c.Session.DefaultMode)
+	if mode == "" {
+		mode = "work"
+	}
+	if selection := c.ModeModels[mode]; selection.Provider != "" && selection.Model != "" {
+		return selection
+	}
+	for _, fallback := range []string{"chat", "work"} {
+		if selection := c.ModeModels[fallback]; selection.Provider != "" && selection.Model != "" {
+			return selection
+		}
+	}
+	for _, selection := range c.ModeModels {
+		if selection.Provider != "" && selection.Model != "" {
+			return selection
+		}
+	}
+	return ModelSelection{}
+}
+
 func (c *Config) applyAppDefaults() {
-	if c.ConfigFiles.Providers == "" {
+	// New installs use services.toml as the single read-only service config.
+	// Keep the old providers.toml default only for configs that do not opt in
+	// to the services file, so existing deployments keep loading unchanged.
+	if c.ConfigFiles.Providers == "" && c.ConfigFiles.Services == "" {
 		c.ConfigFiles.Providers = "providers.toml"
 	}
 	if c.ConfigFiles.State == "" {
@@ -1027,9 +1245,7 @@ func (c *Config) applyAppDefaults() {
 		}
 		c.Providers[name] = provider
 	}
-	if c.Context.CompactTriggerRatio == 0 {
-		c.Context.CompactTriggerRatio = 0.8
-	}
+	c.Context = c.Context.Normalized()
 	if len(c.Commands.Prefixes) == 0 {
 		c.Commands.Prefixes = []string{"/*"}
 	}
@@ -1094,6 +1310,21 @@ func (c *Config) applyAppDefaults() {
 	}
 	if c.Maintenance.ChatHistoryCleanup.RetentionDays == 0 {
 		c.Maintenance.ChatHistoryCleanup.RetentionDays = 180
+	}
+	if c.Maintenance.PrivacyCleanup.Enabled && c.Maintenance.PrivacyCleanup.Schedule == "" {
+		c.Maintenance.PrivacyCleanup.Schedule = "45 4 * * *"
+	}
+	if c.GroupAnalysis.ReportSchedule == "" {
+		c.GroupAnalysis.ReportSchedule = "0 9 * * *"
+	}
+	if c.GroupAnalysis.ReportDays <= 0 {
+		c.GroupAnalysis.ReportDays = 1
+	}
+	if c.AngelMemory.RetentionDays == 0 {
+		c.AngelMemory.RetentionDays = 365
+	}
+	if c.SelfLearning.RetentionDays == 0 {
+		c.SelfLearning.RetentionDays = 365
 	}
 	if c.Sandbox.Root == "" {
 		c.Sandbox.Root = filepath.Join(platformDefaultDataDir(), "sandbox")
@@ -1191,6 +1422,14 @@ func (c *Config) applyState(state *StateConfig) {
 	if state.Session.DefaultMode != "" {
 		c.Session.DefaultMode = state.Session.DefaultMode
 	}
+	if len(state.ContextOverflow) > 0 {
+		if c.ContextOverflow == nil {
+			c.ContextOverflow = map[string]ContextOverflowConfig{}
+		}
+		for key, value := range state.ContextOverflow {
+			c.ContextOverflow[key] = value
+		}
+	}
 }
 
 func (c *Config) resolveProviderAPIKeys(configDir string) error {
@@ -1233,6 +1472,24 @@ func (c *Config) validateModeModels() error {
 func (c *Config) mergeProviders(providerCfg *Config) {
 	c.Providers = providerCfg.Providers
 	c.ModelMetadata = providerCfg.ModelMetadata
+}
+
+// mergeServices overlays the shared services config on top of the legacy
+// providers/app config. Sections that are absent from services.toml keep the
+// value loaded from the legacy files, which makes migration gradual.
+func (c *Config) mergeServices(services *ServicesConfig) {
+	if len(services.Providers) > 0 {
+		c.Providers = services.Providers
+	}
+	if services.ModelMetadata != nil {
+		c.ModelMetadata = *services.ModelMetadata
+	}
+	if len(services.ModelProfiles) > 0 {
+		c.ModelProfiles = services.ModelProfiles
+	}
+	if services.ImageGeneration != nil {
+		c.ImageGeneration = *services.ImageGeneration
+	}
 }
 
 func resolveRelative(baseFile, path string) string {

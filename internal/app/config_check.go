@@ -18,6 +18,13 @@ func CheckConfig(configPath string) (string, error) {
 	var b strings.Builder
 	b.WriteString("config OK\n")
 	b.WriteString("path: " + cfg.ConfigPath + "\n")
+	if cfg.ServicesConfigPath != "" {
+		b.WriteString("services: " + cfg.ServicesConfigPath + "\n")
+	}
+	if cfg.ProvidersConfigPath != "" {
+		b.WriteString("providers: " + cfg.ProvidersConfigPath + "\n")
+	}
+	b.WriteString("state: " + cfg.StateConfigPath + "\n")
 	b.WriteString("commands.prefixes: " + strings.Join(cfg.Commands.Prefixes, " ") + "\n")
 	b.WriteString(fmt.Sprintf("character_library: enabled=%v root=%s\n", cfg.CharacterLibrary.IsEnabled(), cfg.CharacterLibrary.Root))
 	if cfg.ImageGeneration.Enabled {

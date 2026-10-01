@@ -3,6 +3,8 @@ package protocol
 import (
 	"encoding/json"
 	"testing"
+
+	"elbot/internal/hook"
 )
 
 func TestFrameRoundTripAndIDValidation(t *testing.T) {
@@ -34,5 +36,29 @@ func TestNewRequestEncodesParams(t *testing.T) {
 	}
 	if request.Type != "request" || request.ID != "host:event" || request.Method != "event.handle" || string(request.Params) != `{"value":"ok"}` {
 		t.Fatalf("request = %#v", request)
+	}
+}
+
+func TestApplyLLMResultMergesTemporaryFields(t *testing.T) {
+	temp := 0.7
+	maxTokens := 512
+	event := hook.Event{LLM: hook.LLMPayload{SystemAppend: []string{"old"}}}
+	event = ApplyLLMResult(event, &LLMResult{
+		SystemAppend: []string{"new", " "},
+		Temperature:  &temp,
+		MaxTokens:    &maxTokens,
+		ExtraBody:    map[string]any{"reasoning_effort": "low"},
+	})
+	if len(event.LLM.SystemAppend) != 2 || event.LLM.SystemAppend[1] != "new" {
+		t.Fatalf("SystemAppend = %#v", event.LLM.SystemAppend)
+	}
+	if event.LLM.Temperature == nil || *event.LLM.Temperature != temp {
+		t.Fatalf("Temperature = %#v", event.LLM.Temperature)
+	}
+	if event.LLM.MaxTokens == nil || *event.LLM.MaxTokens != maxTokens {
+		t.Fatalf("MaxTokens = %#v", event.LLM.MaxTokens)
+	}
+	if event.LLM.ExtraBody["reasoning_effort"] != "low" {
+		t.Fatalf("ExtraBody = %#v", event.LLM.ExtraBody)
 	}
 }

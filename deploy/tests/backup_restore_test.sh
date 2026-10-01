@@ -15,6 +15,10 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
     echo "skip: 未安装 sqlite3，跳过 backup_restore_test"
     exit 0
 fi
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import tomllib' >/dev/null 2>&1; then
+    echo "skip: 没有带 tomllib 的 python3，跳过 backup_restore_test"
+    exit 0
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
@@ -23,6 +27,8 @@ DEPLOY="${TMP}/deploy"
 DATA="${DEPLOY}/data"
 mkdir -p "${DATA}/config/elbot/characters/hero" "${DATA}/elbot/media/ab" "${DATA}/run"
 cp "${DEPLOY_SRC}/backup.sh" "${DEPLOY_SRC}/restore-verify.sh" "${DEPLOY}/"
+# 测试夹具不依赖真实 Docker/镜像，固定跳过隔离启动验收。
+export RESTORE_VERIFY_START=0
 
 printf 'mode = "default"\n' >"${DATA}/config/elbot/app.toml"
 printf '[providers]\n' >"${DATA}/config/elbot/providers.toml"
@@ -40,7 +46,7 @@ if ! BACKUP_MODE=hot bash "${DEPLOY}/backup.sh" "${TMP}/backups" >"${TMP}/backup
     note "backup.sh 失败"
 else
     ARCHIVE="$(ls -1 "${TMP}"/backups/elbot-data-*.tar.gz | head -1)"
-    cut -d' ' -f3- "${ARCHIVE}.manifest" | sort >"${TMP}/from-manifest.txt"
+    awk '{print $2}' "${ARCHIVE}.manifest" | sed 's/^\*//' | sort >"${TMP}/from-manifest.txt"
     tar -tzf "${ARCHIVE}" | grep -v '/$' | sort >"${TMP}/from-archive.txt"
     diff -u "${TMP}/from-archive.txt" "${TMP}/from-manifest.txt" || note "manifest 与归档内容不一致"
     grep -q 'restore_verify: passed' "${TMP}/backup.log" || note "严格模式没有输出 passed"
@@ -72,13 +78,13 @@ if RESTORE_VERIFY_STRICT=0 bash "${DEPLOY_SRC}/restore-verify.sh" "${TMP}/broken
     note "本地媒体缺失时仍然通过"
 fi
 
-echo "== case 5: missing providers.toml =="
+echo "== case 5: missing services/providers config =="
 mkdir -p "${TMP}/stage-prov"
 tar -xzf "${ARCHIVE}" -C "${TMP}/stage-prov"
 rm -f "${TMP}/stage-prov/data/config/elbot/providers.toml"
 tar -czf "${TMP}/no-providers.tar.gz" -C "${TMP}/stage-prov" data
 if RESTORE_VERIFY_STRICT=0 bash "${DEPLOY_SRC}/restore-verify.sh" "${TMP}/no-providers.tar.gz" >"${TMP}/c5.log" 2>&1; then
-    note "缺少 providers.toml 时仍然通过"
+    note "缺少 services.toml/providers.toml 时仍然通过"
 fi
 
 echo "== case 6: invalid TOML =="
@@ -92,6 +98,38 @@ if command -v python3 >/dev/null 2>&1 && python3 -c 'import tomllib' >/dev/null 
     fi
 else
     echo "skip: 没有带 tomllib 的 python3，跳过 TOML 解析用例"
+fi
+
+echo "== case 7: strict refuses to skip TOML parser =="
+FAKE_PY="${TMP}/fake-python"
+mkdir -p "${FAKE_PY}"
+cat >"${FAKE_PY}/python3" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "${FAKE_PY}/python3"
+if env PATH="${FAKE_PY}:${PATH}" bash "${DEPLOY_SRC}/restore-verify.sh" "${ARCHIVE}" >"${TMP}/c7.log" 2>&1; then
+    note "严格模式在无法解析 TOML 时仍然通过"
+fi
+if ! grep -q 'restore_verify: failed' "${TMP}/c7.log"; then
+    note "严格模式失败时没有输出 restore_verify: failed"
+fi
+
+echo "== case 8: strict refuses non-/data media paths =="
+mkdir -p "${TMP}/stage-nondata"
+tar -xzf "${ARCHIVE}" -C "${TMP}/stage-nondata"
+sqlite3 "${TMP}/stage-nondata/data/sessions.db" "UPDATE media SET local_path='legacy/media/cdef0123' WHERE backend='local';"
+( cd "${TMP}/stage-nondata" && find data -type f -print0 | xargs -0 -r sha256sum ) >"${TMP}/nondata.tar.gz.manifest"
+tar -czf "${TMP}/nondata.tar.gz" -C "${TMP}/stage-nondata" data
+if bash "${DEPLOY_SRC}/restore-verify.sh" "${TMP}/nondata.tar.gz" >"${TMP}/c8.log" 2>&1; then
+    note "非 /data/... 媒体路径在严格模式下仍然通过"
+fi
+if ! RESTORE_VERIFY_STRICT=0 bash "${DEPLOY_SRC}/restore-verify.sh" "${TMP}/nondata.tar.gz" >"${TMP}/c8b.log" 2>&1; then
+    cat "${TMP}/c8b.log"
+    note "非严格模式不允许文件名兜底"
+fi
+if ! grep -q 'restore_verify: passed_with_skips' "${TMP}/c8b.log"; then
+    note "非严格模式带跳过项时没有输出 passed_with_skips"
 fi
 
 if [ "${fail}" -eq 0 ]; then

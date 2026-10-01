@@ -82,10 +82,11 @@ func (r *contextRuntimeState) compactSession(ctx context.Context, current *stora
 	compressor := r.compressor
 	r.mu.Unlock()
 	result, err := compressor.Compact(reqCtx, contextmgr.CompactRequest{
-		Provider:   selection.Provider,
-		Model:      selection.Model,
-		Messages:   compactMessages,
-		UserInputs: compactUserInputs(rawMessages),
+		Provider:          selection.Provider,
+		Model:             selection.Model,
+		Messages:          compactMessages,
+		UserInputs:        compactUserInputs(rawMessages),
+		UserInputMaxRunes: r.userOriginalMaxRunes(),
 	})
 	if err != nil {
 		return nil, err

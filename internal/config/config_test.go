@@ -69,7 +69,7 @@ func TestResolvePathGeneratesPlatformDefaultsWhenNoConfigExists(t *testing.T) {
 	if resolved != filepath.Clean(want) {
 		t.Fatalf("resolved path = %q, want %q", resolved, filepath.Clean(want))
 	}
-	for _, rel := range []string{"app.toml", "providers.toml", "state.toml", "SOUL.md", "memories.toml", "elnis.toml", filepath.Join("skills", "agent", "agent_skill_creator", "SKILL.md"), filepath.Join("skills", "agent", "agent_skill_creator", "ELBOT_SKILL.toml"), filepath.Join("skills", "agent", "write_elbot_hook", "SKILL.md"), filepath.Join("skills", "agent", "write_elbot_hook", "ELBOT_SKILL.toml"), filepath.Join("plugins", ".env"), ".env.example"} {
+	for _, rel := range []string{"app.toml", "services.toml", "state.toml", "SOUL.md", "memories.toml", "elnis.toml", filepath.Join("skills", "agent", "agent_skill_creator", "SKILL.md"), filepath.Join("skills", "agent", "agent_skill_creator", "ELBOT_SKILL.toml"), filepath.Join("skills", "agent", "write_elbot_hook", "SKILL.md"), filepath.Join("skills", "agent", "write_elbot_hook", "ELBOT_SKILL.toml"), filepath.Join("plugins", ".env"), ".env.example"} {
 		if _, err := os.Stat(filepath.Join(filepath.Dir(want), rel)); err != nil {
 			t.Fatalf("expected generated file %s: %v", rel, err)
 		}
@@ -450,6 +450,153 @@ prompt = "Use agent tools."
 	}
 }
 
+func TestLoadServicesConfig(t *testing.T) {
+	configDir := t.TempDir()
+	appPath := filepath.Join(configDir, "app.toml")
+	servicesPath := filepath.Join(configDir, "services.toml")
+	statePath := filepath.Join(configDir, "state.toml")
+
+	writeFile(t, appPath, `
+[config_files]
+services = "services.toml"
+state = "state.toml"
+
+# Legacy location: services.toml must override this whole section.
+[image_generation]
+enabled = false
+base_url = "https://legacy.example/v1"
+model = "legacy-image"
+`)
+	writeFile(t, servicesPath, `
+[providers.central]
+base_url = "https://central.example/v1"
+api_key_env = "CENTRAL_API_KEY"
+models = ["central-fast", "central-pro"]
+
+[model_metadata]
+default_context_window = 64000
+
+[model_profiles.fast]
+provider = "central"
+model = "central-fast"
+aliases = ["快"]
+
+[image_generation]
+enabled = true
+base_url = "https://images.example/v1"
+api_key_env = "IMAGE_API_KEY"
+model = "central-image"
+
+[image_generation.profiles.hq]
+model = "central-image-hq"
+quality = "high"
+`)
+	writeFile(t, statePath, `
+[mode_models.work]
+provider = "central"
+model = "central-pro"
+
+[mode_models.chat]
+provider = "central"
+model = "central-fast"
+`)
+
+	cfg, err := Load(appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ServicesConfigPath != filepath.Clean(servicesPath) {
+		t.Fatalf("ServicesConfigPath = %q, want %q", cfg.ServicesConfigPath, filepath.Clean(servicesPath))
+	}
+	if cfg.ProvidersConfigPath != "" {
+		t.Fatalf("ProvidersConfigPath = %q, want empty when services is used", cfg.ProvidersConfigPath)
+	}
+	provider, ok := cfg.Providers["central"]
+	if !ok {
+		t.Fatalf("central provider missing: %#v", cfg.Providers)
+	}
+	if provider.BaseURL != "https://central.example/v1" || len(provider.Models) != 2 {
+		t.Fatalf("central provider = %#v", provider)
+	}
+	if cfg.ModelMetadata.DefaultContextWindow != 64000 {
+		t.Fatalf("DefaultContextWindow = %d", cfg.ModelMetadata.DefaultContextWindow)
+	}
+	if profile := cfg.ModelProfiles["fast"]; profile.Model != "central-fast" {
+		t.Fatalf("model profile = %#v", profile)
+	}
+	if !cfg.ImageGeneration.Enabled || cfg.ImageGeneration.BaseURL != "https://images.example/v1" || cfg.ImageGeneration.Model != "central-image" {
+		t.Fatalf("image_generation = %#v", cfg.ImageGeneration)
+	}
+	if profile := cfg.ImageGeneration.Profiles["hq"]; profile.Model != "central-image-hq" || profile.Quality != "high" {
+		t.Fatalf("image profile = %#v", profile)
+	}
+}
+
+func TestLoadServicesWithoutImageKeepsLegacyImage(t *testing.T) {
+	configDir := t.TempDir()
+	appPath := filepath.Join(configDir, "app.toml")
+	servicesPath := filepath.Join(configDir, "services.toml")
+	statePath := filepath.Join(configDir, "state.toml")
+
+	writeFile(t, appPath, `
+[config_files]
+services = "services.toml"
+state = "state.toml"
+
+[image_generation]
+enabled = true
+base_url = "https://legacy.example/v1"
+model = "legacy-image"
+`)
+	writeFile(t, servicesPath, `
+[providers.central]
+base_url = "https://central.example/v1"
+api_key_env = "CENTRAL_API_KEY"
+`)
+	writeFile(t, statePath, `
+[mode_models.work]
+provider = "central"
+model = "central-fast"
+
+[mode_models.chat]
+provider = "central"
+model = "central-fast"
+`)
+
+	cfg, err := Load(appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ImageGeneration.Enabled || cfg.ImageGeneration.BaseURL != "https://legacy.example/v1" || cfg.ImageGeneration.Model != "legacy-image" {
+		t.Fatalf("legacy image_generation lost: %#v", cfg.ImageGeneration)
+	}
+}
+
+func TestLoadRejectsStateSharingServicesFile(t *testing.T) {
+	configDir := t.TempDir()
+	appPath := filepath.Join(configDir, "app.toml")
+	servicesPath := filepath.Join(configDir, "services.toml")
+
+	writeFile(t, appPath, `
+[config_files]
+services = "services.toml"
+state = "services.toml"
+`)
+	writeFile(t, servicesPath, `
+[providers.central]
+base_url = "https://central.example/v1"
+api_key_env = "CENTRAL_API_KEY"
+`)
+
+	_, err := Load(appPath)
+	if err == nil {
+		t.Fatal("expected error when state and services share a file")
+	}
+	if !strings.Contains(err.Error(), "dedicated writable") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config")
@@ -540,6 +687,78 @@ model = "deepseek-chat"
 	}
 	if cfg.Providers == nil {
 		t.Fatal("Providers map is nil")
+	}
+	if got := cfg.ResidentMemory.NormalWriteMinIntervalSecondsValue(); got != 5 {
+		t.Fatalf("normal write min interval default = %d, want 5", got)
+	}
+	if got := cfg.ResidentMemory.NormalWriteWindowSecondsValue(); got != 60 {
+		t.Fatalf("normal write window default = %d, want 60", got)
+	}
+	if got := cfg.ResidentMemory.NormalWriteMaxPerWindowValue(); got != 6 {
+		t.Fatalf("normal write max per window default = %d, want 6", got)
+	}
+	if got := cfg.ResidentMemory.NormalMaxLinesValue(); got != 20 {
+		t.Fatalf("normal max lines default = %d, want 20", got)
+	}
+	if got := cfg.ResidentMemory.NormalMaxUnitsPerEntryValue(); got != 80 {
+		t.Fatalf("normal max units per entry default = %d, want 80", got)
+	}
+	if !cfg.ResidentMemory.IsNormalBlockInstructionPatterns() {
+		t.Fatal("normal instruction pattern blocking should default to true")
+	}
+}
+
+func TestLoadResidentMemoryWritePolicy(t *testing.T) {
+	configDir := t.TempDir()
+	appPath := filepath.Join(configDir, "app.toml")
+	writeFile(t, appPath, `
+[config_files]
+state = "state.toml"
+
+[resident_memory]
+normal_write_min_interval_seconds = 0
+normal_write_window_seconds = 120
+normal_write_max_per_window = 2
+normal_max_lines = 0
+normal_max_units_per_entry = 12
+normal_block_instruction_patterns = false
+`)
+	writeFile(t, filepath.Join(configDir, "providers.toml"), `
+[providers.central]
+base_url = "https://central.example/v1"
+api_key_env = "CENTRAL_API_KEY"
+`)
+	writeFile(t, filepath.Join(configDir, "state.toml"), `
+[mode_models.work]
+provider = "central"
+model = "central-fast"
+
+[mode_models.chat]
+provider = "central"
+model = "central-fast"
+`)
+
+	cfg, err := Load(appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.ResidentMemory.NormalWriteMinIntervalSecondsValue(); got != 0 {
+		t.Fatalf("min interval = %d, want 0", got)
+	}
+	if got := cfg.ResidentMemory.NormalWriteWindowSecondsValue(); got != 120 {
+		t.Fatalf("window = %d, want 120", got)
+	}
+	if got := cfg.ResidentMemory.NormalWriteMaxPerWindowValue(); got != 2 {
+		t.Fatalf("max per window = %d, want 2", got)
+	}
+	if got := cfg.ResidentMemory.NormalMaxLinesValue(); got != 0 {
+		t.Fatalf("max lines = %d, want 0", got)
+	}
+	if got := cfg.ResidentMemory.NormalMaxUnitsPerEntryValue(); got != 12 {
+		t.Fatalf("max units per entry = %d, want 12", got)
+	}
+	if cfg.ResidentMemory.IsNormalBlockInstructionPatterns() {
+		t.Fatal("instruction pattern blocking should be disabled")
 	}
 }
 

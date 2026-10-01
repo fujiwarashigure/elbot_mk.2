@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [v0.6.3 - 2026-10-01]
+
+### Added
+
+- Local Windows container deployment: `deploy/windows/elbot.ps1` and `elbot.cmd` wrap the existing `deploy/docker-compose.yml`, `Dockerfile`, and `.env`, and support `init`, `start`, `recreate`, `stop`, `down`, `restart`, `logs`, `shell`, and `compose`. A logon scheduled task named `ElBot-Docker` can keep the service running after Windows sign-in.
+- Windows command-line status and diagnostics: `status` / `health` read the built-in `/live`, `/ready`, and `/healthz` endpoints; `tasks` / `metrics` / `diagnostics` read `/tasks`, `/metrics`, and `/diagnostics` with automatic `ELBOT_OPS_TOKEN` handling; `doctor` runs the same `elbot doctor` inside the container. `backup` / `restore-verify` / `upgrade` / `rollback` reuse `deploy/*.sh` through Git for Windows `bash.exe`. Added `deploy/windows/README.md` with the complete guide.
+- `image_generate` now accepts `character_ids`, `reference_images`, and `count`. By default all `@char` / `character_ids` characters are drawn into one image; only `count > 1` (maximum 4) generates multiple images, each containing all characters. Multi-character reference images are sent as a data URL array to `reference_field`.
+- Added pre-send long-message protection: prompt budget is estimated from the model context window, `max_prompt_ratio`, `reserve_output_tokens`, and `single_message_max_ratio`. The default `reject` mode does not call the model and sends an alert in the group; `truncate` / `summarize` can be configured globally or per chat. The `/*overflow` command lets Bot superadmins and current group owners/admins change the chat/work policy, persisted in `state.toml` under `context_overflow`.
+- Added `[context] user_original_max_runes` (default `4000`): during compaction each historical user original is capped first so that a single oversized message cannot overflow the summarization request again.
+- `deploy/restore-verify.sh` gained optional isolated startup verification: `RESTORE_VERIFY_START=1` (or `required`) starts a one-off instance with `--network none` using `RESTORE_VERIFY_IMAGE` / the current `elbot` image and waits for `/ready`; `auto` (default) does this when Docker and the image are available, otherwise it skips.
+- Added `deploy/tests/upgrade_script_test.sh`, `deploy/tests/backup_restart_test.sh`, and `deploy/tests/restore_verify_start_test.sh`, and extended `deploy/tests/watchdog_redaction_test.sh` and `deploy/tests/backup_restore_test.sh` to cover the regressions above. Added `deploy/tests/windows_script_test.sh` to verify the Windows entry BOM, CRLF wrapper, and version references.
+
+### Changed
+
+- Version raised to `0.6.3`; `deploy/VERSION`, the Compose default image, build/offline scripts, and all README / deployment examples were updated.
+- Added a Windows local container deployment chapter to `README.md`, `README.zh-CN.md`, and `deploy/README.md`; `.gitattributes` now pins `*.ps1` to LF and `*.cmd` to CRLF.
+
+### Fixed
+
+- Fixed `deploy/upgrade.sh` `ELBOT_GIT_REF` detection: the script previously assumed `.git` lived under `deploy/` and treated the normal `repo/.git + repo/deploy/upgrade.sh` layout as a non-git worktree; it now resolves the repository root with `git -C "$DEPLOY_DIR" rev-parse --show-toplevel` and runs `fetch` / `checkout` there.
+- Fixed `deploy/upgrade.sh` passing `elbot` twice during the new-image config check: the image ENTRYPOINT is already `tini -- /usr/local/bin/elbot`, so the old command became `.../elbot elbot config check`; it now passes only `config check`.
+- Fixed stop-the-world backups reporting success when the container failed to restart: `deploy/backup.sh` now includes `compose up` failures and post-restart health-check timeouts/errors in the final exit code, waiting up to 60 seconds by default (`BACKUP_RESTART_READY_TIMEOUT`).
+- Fixed `deploy/restore-verify.sh` strict mode still being able to print `passed` after skipping required checks: missing `python3` with `tomllib`, media `local_path` values that are not `/data/...`, and similar cases now fail immediately in strict mode. Non-strict runs print `restore_verify: passed_with_skips` and report manifest / toml / database / media_paths / start separately.
+- Fixed `deploy/elbot-watchdog.sh` treating "idempotent repeated sed" as "no secrets": idempotence rechecks, independent credential pattern detection, and literal checks of current environment secrets are now separated; failures in `mktemp` / `cp` / `sed` and similar tools return non-zero, and the diagnostics directory is created with `umask 077`.
+- Media cleanup no longer holds the global `m.objects` lock for the whole cleanup. It now uses per-media-ID locking and deletes at most four objects concurrently; import / `PresignGet` for the same ID use the same object lock, avoiding overlap with deletion.
+
+## [v0.6.2 - 2026-10-01]
+
+### Fixed
+
+- Fixed `deploy/elbot-watchdog.sh` `redact_diagnostics()`: the sed arguments contained literal `\n` and control bytes, so sed failed with `can't read n` on every run (swallowed by `|| true`), and the `Bearer` / `api_key=` rules wrote a 0x01 control byte where they should have written backreference `\1`. Rules now run per file and also cover JSON credentials, Telegram bot tokens, and URL userinfo. A second idempotence recheck writes `REDACTION-FAILED`, alerts, and returns non-zero when redaction fails, with a `--redact-dir` manual entry point and a `deploy/tests/watchdog_redaction_test.sh` self-test.
+- Fixed `deploy/backup.sh` `write_manifest()`: the same literal `\n` broke the `find | xargs sha256sum` pipeline while the error was swallowed. The manifest is now generated from the packaged archive, covers every `data/` file in the archive, and generation failure marks the backup as failed.
+- `deploy/backup.sh` now passes an explicit `-f <compose file>` and runs from `deploy/` (overridable with `ELBOT_COMPOSE_FILE`), so calls from cron or other directories cannot hit another Compose project or package live data as cold data.
+- `deploy/restore-verify.sh` defaults to strict mode: manifest + sha256sum, SQLite `integrity_check` and schema, `app.toml` / `providers.toml`, TOML parsing (when the host has a `tomllib`-capable `python3`), and local media exact paths must all pass. Missing dependencies or any failure no longer print `passed`; use `RESTORE_VERIFY_STRICT=0` to downgrade. Local media verification now uses exact `/data/... -> data/...` paths instead of filename lookup, and SQL query failures no longer fall back to zero.
+- `deploy/upgrade.sh` gained a version guard: it refuses to run when the target version differs from `deploy/VERSION`, avoiding "just tag the current code with a new version"; `ELBOT_GIT_REF=vX.Y.Z` can switch source automatically. After rebuild it waits for health checks and runs `elbot doctor --no-model`, printing the rollback command and exiting non-zero on failure.
+- Platform / model `last_error` values and the latest restart reason are redacted before being written into health snapshots, preventing upstream tokens (for example Telegram bot tokens appearing directly in request URLs) from leaking through `/healthz`, `/metrics`, and `/diagnostics`.
+
+### Changed
+
+- `deploy/watchdog.env.example` gained `WATCHDOG_READY_ALERT_THRESHOLD` / `WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`: when `/live` is healthy but `/ready` fails repeatedly, a single `not_ready` alert is sent (a webhook is required) and it never becomes a restart trigger; restart decisions still depend only on `/live`.
+- Version raised to `0.6.2`; `deploy/VERSION`, the Compose default image, and deployment / offline examples were updated.
+
+## [v0.6.1 - 2026-10-01]
+
+### Fixed
+
+- Fixed only one startup heartbeat when no platform is enabled, which made `/live` expire after about 90 seconds and could cause the watchdog to restart repeatedly; the empty-platform mode now keeps sending scheduler heartbeats.
+- `/live` now only means the process is still running; `/ready` no longer fails because a platform is disconnected or a model API is unhealthy. Platform and model state moved to the `degraded` status and separate arrays in `/healthz`, while scheduler heartbeat freshness remains an independent `/ready` check.
+- Group rate limiting changed from "hit either the group limit or the user limit" to checking the user quota first and then the group quota, so one active member cannot exhaust the whole group budget while the group cap still protects overall resources.
+- Added configuration thresholds, user/group rejection counters, the latest rejection reason, and the timestamp to `/metrics.rate_limit` to distinguish "one user flooding" from "the whole group overheating".
+- Fixed the diagnostics bundle writing full environment variables from `docker inspect` and potentially leaking provider API keys / tokens; it now captures only container State/Ports and applies generic credential redaction to logs and JSON files.
+
+### Changed
+
+- Provider fallback now has explicit semantics: the default `fallback_mode = "circuit"` switches only after the circuit breaker opens; `fallback_mode = "on_error"` (or the compatible `fallback_on_error = true`) switches on the first pre-stream failure.
+- Added `fallback_timeout_seconds` to bound one provider attempt and prevent a single request from being dragged through several upstream retries.
+- Shell / Go Skill subprocesses no longer inherit environment variables whose names contain `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or `PRIVATE`; parent-process tools such as web search, image generation, and media download can still read `.env` credentials.
+- `/tasks` and `/metrics` support `ELBOT_OPS_TOKEN`; when listening on a non-loopback address without a token the startup log warns explicitly. The watchdog can send the same token with `WATCHDOG_OPS_TOKEN`.
+- `deploy/backup.sh` now runs the new `restore-verify.sh` in an isolated directory by default and treats a backup as successful only after SQLite integrity, configuration files, character assets, and local media references pass; `BACKUP_VERIFY=0` explicitly skips this.
+- Version raised to `0.6.1`.
+
+### Added
+
+- `/tasks` gained `queued_by_kind` and `pending_by_kind`, exposing the wait queues bounded by concurrency limits and requests that already hold slots.
+- Added `provider.FallbackTimeoutSeconds` / `fallback_timeout_seconds` and the `ProviderConfig.UsesFallbackOnError()` configuration entry point.
+- Added `deploy/restore-verify.sh`: independently verify any backup in isolation without touching production `data`.
+- Added the `elbot doctor` deployment acceptance command: checks configuration, health port, platform state, and model calls; with `--e2e` it performs a real CLI remote-protocol message round trip and reports `config_ok` and `e2e_ok` separately.
+- Added the `/diagnostics` aggregate diagnostics endpoint; `/tasks` gained queue/timeout counters, the health snapshot gained the latest restart reason, and `/metrics` / `/diagnostics` show circuit-breaker, rate-limit, and restart information.
+- Character asset metadata gained `version` / `source`, and `Store.Manifest` / `WriteManifest` produce sha256 manifests; the backup script generates manifests for character and media files and verifies them during restore.
+- Added `deploy/upgrade.sh` / `deploy/rollback.sh`: upgrades take a config check, data snapshot, and previous-image snapshot first, and rollback verifies the data snapshot before restoring it.
 
 ## [v0.6.0 - 2026-10-01]
 

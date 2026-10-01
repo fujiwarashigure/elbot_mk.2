@@ -4,10 +4,12 @@
 
 部署模式：**Docker 单容器常驻 + systemd 开机自启 + 宝塔 Nginx 反向代理 + HTTPS**。
 
+> 本地 Windows 10/11 + Docker Desktop 部署请看 [`windows/README.md`](windows/README.md)。
+
 > **不想在服务器上编译 Go？**
 > 仓库**不提交**预编译 / 离线产物，`deploy/dist/` 默认不存在；需要时先在本地或 CI 运行
 > `deploy/pack/prepare-offline.sh` 生成，再上传服务器。生成方式见 [`pack/README-OFFLINE.md`](pack/README-OFFLINE.md)：
-> - `deploy/dist/elbot-0.6.2-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
+> - `deploy/dist/elbot-0.6.3-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
 > - `deploy/dist/offline-amd64/`：预编译二进制 + Debian 运行时，服务器只需拉约 30MB debian 基础镜像，功能完整；
 > - 如果从仓库里找不到 `deploy/dist/`，属于正常现象，请先自行生成。
 
@@ -36,6 +38,12 @@ deploy/
 ├── elbot-watchdog.service    # systemd 一次性执行单元
 ├── elbot-watchdog.timer      # 每分钟触发 watchdog
 ├── watchdog.env.example      # watchdog 阈值 / webhook 模板
+├── windows/                  # 本地 Windows Docker Desktop 部署与后台控制
+│   ├── elbot.ps1             # Windows 命令行入口
+│   ├── elbot.cmd             # cmd.exe 包装
+│   └── README.md             # Windows 本地部署指南
+├── portainer/                # 可选：Portainer 浏览器 Docker 管理界面
+│   └── portainer-compose.yml # 仅绑定 127.0.0.1:9443，本地 / 云共用
 ├── VERSION                   # 版本号单点来源（build-push.sh / prepare-offline.sh 默认读它）
 └── README.md                 # 本文档
 ```
@@ -43,8 +51,9 @@ deploy/
 > 说明：仓库本身没有官方 Dockerfile，本目录是本次新增的部署封装。
 >
 > **行尾（CRLF）**：`deploy/` 下的 `.sh` / `.service` / `.timer` / `.conf` / `.yml` / `.env.example`
-> 已在 `.gitattributes` 中强制 `eol=lf`。请勿用其它工具写回 CRLF；否则 Linux 上会出现
-> `bad interpreter: /usr/bin/env bash^M`、systemd unit 解析失败等问题。
+> 已在 `.gitattributes` 中强制 `eol=lf`；Windows 入口 `.ps1` 固定 LF、`.cmd` 固定 CRLF。
+> 请勿用其它工具写回 CRLF；否则 Linux 上会出现 `bad interpreter: /usr/bin/env bash^M`、
+> systemd unit 解析失败等问题。
 
 ---
 
@@ -149,7 +158,7 @@ chmod 600 /opt/elbot/deploy/.env
 TZ=Asia/Shanghai
 DEEPSEEK_API_KEY=sk-xxxx
 OPENAI_API_KEY=sk-xxxx
-# 可选：生图服务（[image_generation]）的 API Key
+# 可选：生图服务（services.toml 的 [image_generation]）的 API Key
 IMAGE_API_KEY=sk-xxxx
 ELBOT_CLI_LOCAL_TOKEN=请换成随机长字符串
 ELNIS_HOME_TOKEN=请换成随机长字符串
@@ -186,8 +195,8 @@ docker compose logs -f --tail=200
 ```
 deploy/data/config/elbot/
 ├── app.toml
-├── providers.toml
-├── state.toml
+├── services.toml       # 大模型 Provider、生图、模型别名；只读共享
+├── state.toml          # ElBot 运行态模型选择；会被回写
 ├── SOUL.md
 ├── memories.toml
 ├── elnis.toml
@@ -196,6 +205,8 @@ deploy/data/config/elbot/
 ├── skills/
 └── long_memory/
 ```
+
+> 旧部署继续使用 `[config_files].providers` 时，目录中还会有 `providers.toml`，读取逻辑保持不变。
 
 运行数据（SQLite、日志、sandbox）在：
 
@@ -214,20 +225,21 @@ deploy/data/cache/
 ```
 
 > **首次启动后先做一次配置核对**：
-> 1. 确认 `app.toml`、`providers.toml`、`state.toml` 都已生成在 `deploy/data/config/elbot/`；
-> 2. `providers.toml` 里的 `api_key_env` 必须与 `.env` 的变量名逐个对应；
-> 3. `state.toml` / `providers.toml` 里的 `provider`、`model` 必须互相匹配，且模型名是 Provider 实际支持的；
+> 1. 确认 `app.toml`、`services.toml`、`state.toml` 都已生成在 `deploy/data/config/elbot/`；旧部署则确认 `providers.toml`；
+> 2. `services.toml`（旧部署 `providers.toml`）里的 `api_key_env` 必须与 `.env` 的变量名逐个对应；
+> 3. `state.toml` 里的 `provider`、`model` 必须和 `services.toml`（旧部署 `providers.toml`）互相匹配，且模型名是 Provider 实际支持的；
 > 4. 如启用 CLI / OneBot / Elnis / 生图，继续按下面小节检查对应监听地址、工具权限和额度。
 >
 > 可以用下面的命令快速查看：
 > ```bash
 > cd /opt/elbot/deploy
-> grep -nE '^\[providers|api_key_env|models|proxy' data/config/elbot/providers.toml
+> grep -nE '^\[providers|api_key_env|models|proxy' data/config/elbot/services.toml
 > grep -nE 'default_mode|provider|model' data/config/elbot/state.toml
 > grep -nE 'enabled|listen|user_max_tool_risk|superadmins|api_key_env|superadmin_only' data/config/elbot/app.toml
+> # 旧部署把 services.toml 换成 providers.toml
 > ```
 
-### 4.1 `providers.toml`
+### 4.1 `services.toml`（旧部署为 `providers.toml`）
 
 确认 Provider 的 `api_key_env` 和 `.env` 中的变量名一致：
 
@@ -248,7 +260,7 @@ models = ["gpt-4o-mini"]
 
 ### 4.2 `state.toml`
 
-默认生成的模型名可能不存在，请改成你 Provider 实际支持的模型，并确保 `provider` 是 `providers.toml` 中已存在的 Provider（可先用 `/models` 查看）：
+默认生成的模型名可能不存在，请改成你 Provider 实际支持的模型，并确保 `provider` 是 `services.toml`（旧部署 `providers.toml`）中已存在的 Provider（可先用 `/models` 查看）：
 
 ```toml
 [session]
@@ -487,7 +499,7 @@ systemctl reload elbot-compose      # 重新 up -d
 `deploy/elbot-watchdog.sh` 只依据独立 `/live` 判断进程是否还能响应，不会因为 CPU 高、模型 API 暂时失败、平台重连或队列瞬时堆积就杀进程：
 
 1. `curl /live` 连续失败达到 `WATCHDOG_FAILURE_THRESHOLD` 次才开始处置；
-2. 重启前收集容器 State/Ports、logs/stats、`/live`、`/ready`、`/healthz`、磁盘和 data 大小到 `diagnostics/`；诊断输出会过滤 `docker inspect` 的完整环境变量，并用一组规则（`sk-` / `Bearer` / `api_key=` / JSON 凭据 / Telegram bot token / URL userinfo）逐文件脱敏，然后再复检一遍；脱敏或复检失败会写 `REDACTION-FAILED` 标记、打日志并推送 `diagnostics_unredacted` 告警，该诊断包在确认前不要外发；
+2. 重启前收集容器 State/Ports、logs/stats、`/live`、`/ready`、`/healthz`、磁盘和 data 大小到 `diagnostics/`；诊断输出会过滤 `docker inspect` 的完整环境变量，并用一组规则（`sk-` / `Bearer` / `api_key=` / JSON 凭据 / Telegram bot token / URL userinfo）逐文件脱敏，然后做三层复检：同一组规则必须幂等、独立模式检测原始令牌/URL/JWT 形态、当前进程敏感变量值必须不再以字面量出现。检查器自身失败或发现残留都会写 `REDACTION-FAILED` 标记、打日志并推送 `diagnostics_unredacted` 告警，该诊断包在确认前不要外发；诊断目录从创建时使用 `umask 077`；
 3. 启用 `WATCHDOG_COOLDOWN_SECONDS` 冷却时间；
 4. 在 `WATCHDOG_WINDOW_SECONDS` 内最多自动重启 `WATCHDOG_MAX_RESTARTS` 次；
 5. 超过上限后写入 `watchdog-state/paused` 并停止自动重启，保留现场，等待人工处理。
@@ -530,7 +542,7 @@ bash /opt/elbot/deploy/tests/watchdog_redaction_test.sh
 - Shell、Hook、AgentSkill / Go Skill 在支持平台上会在超时或取消时终止整个子进程树；图片压缩 / 缩放通过同一二进制的隐藏 worker 子进程执行，超时或取消时终止整个 worker 进程树。
 - `[storage]` 的 `disk_warn_ratio` / `disk_critical_ratio` / `disk_min_free_bytes` 提供磁盘分级保护；critical 时拒绝非必要媒体写入，保护 SQLite 和配置写入。
 - `[ops]` 还可开启 Provider 熔断并配置 `fallback_provider` / `fallback_model`；默认 `fallback_mode = "circuit"` 只在熔断后切备用，`fallback_mode = "on_error"` 可在首个预流式失败请求切换，`fallback_timeout_seconds` 可限制单次 Provider 尝试总时长。模型 API 熔断只让 `/healthz` 变 `degraded`，不会触发本机重启。
-- `[image_generation]` 的 `max_concurrent` / `queue_size` / `queue_timeout_seconds` 用于限制生图并发；`/metrics` 会显示 `image_limit.active` 和 `image_limit.waiting`。
+- `services.toml` 的 `[image_generation]` 中，`max_concurrent` / `queue_size` / `queue_timeout_seconds` 用于限制生图并发；`/metrics` 会显示 `image_limit.active` 和 `image_limit.waiting`。
 - 告警系统可以轮询 `/metrics` 与 `/healthz`，但自动重启只应由 `elbot-watchdog` 根据 `/live` 触发。
 
 ---
@@ -542,7 +554,7 @@ bash /opt/elbot/deploy/tests/watchdog_redaction_test.sh
 清单是从**打包好的归档内容**里解压出来算的（不是从仍在变化的 `data/`），并且覆盖归档内所有 `data/` 文件；清单生成失败会直接判定这次备份失败，不会打印“完成”。所有 `docker compose` 调用都显式带 `-f <compose 文件>` 并在 `deploy/` 下执行，所以从 cron 或任意目录调用都不会命中别的 Compose 项目；Compose 文件路径可用 `ELBOT_COMPOSE_FILE` 覆盖。
 
 - 宿主机有 `sqlite3`：对 SQLite 数据库（`*.db` / `*.sqlite` / `*.sqlite3`）执行 `.backup`，其余文件归档，不中断服务；
-- 没有 `sqlite3`：短暂停止 Compose 容器，打包完成后自动 `up -d`；
+- 没有 `sqlite3`：短暂停止 Compose 容器，打包完成后自动 `up -d`，并等待 Docker healthcheck 变为 `healthy`（没有 healthcheck 时要求 `running`）；恢复失败或等待就绪超时会让 `backup.sh` 以非 0 退出，等待上限可用 `BACKUP_RESTART_READY_TIMEOUT`（默认 60 秒）调整；
 - 两者都不可用（例如原生部署且未装 `sqlite3`）：回退到热打包并明确警告，不建议生产环境使用。
 
 ```bash
@@ -572,24 +584,36 @@ bash /opt/elbot/deploy/backup.sh >/dev/null 2>&1
 
 ### 7.1 恢复演练（建议至少做一次）
 
-`deploy/restore-verify.sh` 默认是**严格模式**，只有全部检查通过才会输出 `restore_verify: passed`；任何一项缺失或失败都会直接失败（`backup.sh` 因此把备份判定为失败）。严格模式要求：
+`deploy/restore-verify.sh` 默认是**严格模式**，只有全部必需检查通过才会输出 `restore_verify: passed`；任何一项缺失或失败都会直接失败（`backup.sh` 因此把备份判定为失败）。严格模式要求：
 
 - 存在非空的 `*.manifest`，且宿主机有 `sha256sum`，对归档内所有文件做 `sha256sum -c`；
 - 宿主机有 `sqlite3`，对每个数据库执行 `PRAGMA integrity_check` 并确认表结构存在；
-- `app.toml`、`providers.toml` 存在且非空（`state.toml` 可选）；若 `python3` 带 `tomllib`，还会真正解析所有 `*.toml`；
-- SQLite 中 `backend='local'` 的媒体按 `/data/... -> data/...` 精确路径核对文件是否存在。
+- `app.toml` 存在且非空，并且 `services.toml` 或旧 `providers.toml` 至少有一个存在且非空（`state.toml` 可选）；宿主机必须有带 `tomllib` 的 `python3`，并真正解析所有 `*.toml`；
+- SQLite 中 `backend='local'` 的媒体按 `/data/... -> data/...` 精确路径核对文件是否存在；不是 `/data/...` 的 `media.local_path` 严格模式直接失败。
 
-缺依赖或只想看归档内容时，可以显式降级（会打印 warning，输出改为 `manifest=skipped`）：
+脚本会分别报告 `manifest` / `toml` / `database` / `media_paths` / `start` 的结果。缺依赖或只想看归档内容时，可以显式降级；非严格模式如有跳过项，会打印 warning 并输出 `restore_verify: passed_with_skips`：
 
 ```bash
 RESTORE_VERIFY_STRICT=0 bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.tar.gz
 bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.tar.gz
 ```
 
-备份链路可以用 fixture 自测（需要 `sqlite3`；会覆盖 manifest 一致性、缺 manifest、manifest 被篡改、媒体丢失、缺必需配置、TOML 语法错误这些情况）：
+需要把“恢复后的 data 真的能启动”也纳入验收时，可以启用隔离启动检查：默认 `RESTORE_VERIFY_START=auto`，只要 Docker 和当前 `elbot` 容器镜像可用，就会用 `--network none` 启动一个一次性实例并等待 `/ready`；也可以显式指定镜像或要求必须执行：
+
+```bash
+RESTORE_VERIFY_START=1 RESTORE_VERIFY_IMAGE=elbot:0.6.3 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
+# 等待 /ready 的上限，默认 45 秒：
+RESTORE_VERIFY_START_TIMEOUT=90 ...
+# 关闭隔离启动检查：
+RESTORE_VERIFY_START=0 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
+```
+
+备份链路可以用 fixture 自测（需要 `sqlite3` 和带 `tomllib` 的 `python3`；会覆盖 manifest 一致性、缺 manifest、manifest 被篡改、媒体丢失、缺必需配置、TOML 语法错误、严格模式拒绝跳过 TOML、非 `/data/...` 媒体路径这些情况）：
 
 ```bash
 bash /opt/elbot/deploy/tests/backup_restore_test.sh
+# 需要真实 Docker 时才做隔离启动验收；上面的 fixture 用假 docker 自测启动路径：
+bash /opt/elbot/deploy/tests/restore_verify_start_test.sh
 ```
 
 手工恢复步骤如下：
@@ -651,7 +675,7 @@ bash rollback.sh
 `upgrade.sh` 只从**当前工作区**构建镜像，不会自动切换代码，所以它有两条硬性保护：
 
 - `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免“只给旧代码贴新版本号”；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
-- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.2 bash upgrade.sh`），脚本会 `git fetch --tags` + `checkout --detach` 后再校验一次版本。
+- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.3 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
 
 重建之后 `upgrade.sh` 会等待容器 healthcheck 变成 `healthy`，再在容器内执行 `elbot doctor --no-model` 作为验收；任一步失败都会提示回滚命令并以非 0 退出。需要跳过或加严：
 
@@ -661,6 +685,13 @@ ELBOT_UPGRADE_E2E=1 bash upgrade.sh           # 额外做一次真实消息往�
 ```
 
 `upgrade.sh` 会把回滚所需信息写入 `deploy/rollback/rollback.env`，包括上一版镜像 tar、数据快照路径和版本信息。回滚前仍会调用 `restore-verify.sh` 校验数据快照；如果要跳过交互确认可使用 `ROLLBACK_CONFIRM=1 bash rollback.sh`。
+
+升级和停机备份的回归 fixture 不需要真实 Docker 引擎：
+
+```bash
+bash deploy/tests/upgrade_script_test.sh   # ELBOT_GIT_REF 根目录检测 + 镜像 ENTRYPOINT 参数
+bash deploy/tests/backup_restart_test.sh   # 停机备份恢复失败会影响退出码
+```
 
 ### 8.2 查看日志
 
@@ -713,14 +744,14 @@ s3_secret_key_env = "ELBOT_S3_SECRET_ACCESS_KEY"
 
 ```bash
 docker login registry.cn-hangzhou.aliyuncs.com
-bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.2
+bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3
 ```
 
 ### 9.2 腾讯云 TCR
 
 ```bash
 docker login ccr.ccs.tencentyun.com
-bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.2
+bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.3
 ```
 
 ### 9.3 服务器使用远端镜像
@@ -728,7 +759,7 @@ bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.2
 编辑 `deploy/.env`：
 
 ```dotenv
-ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.2
+ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3
 ```
 
 服务器登录私有仓库后：
@@ -752,7 +783,7 @@ Dockerfile 的 `VERSION` 构建参数只影响镜像内的版本字符串与 OCI
 
 ```bash
 PLATFORM=linux/amd64,linux/arm64 \
-  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.2
+  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3
 ```
 
 多平台只能 `--push`（buildx 限制），脚本已处理。Dockerfile 的构建阶段固定在
@@ -840,7 +871,7 @@ systemctl enable --now elbot
 
 ### 11.2 生图接口额度
 
-- 默认保持 `[image_generation] superadmin_only = true`；如果改为 `false`，普通用户还要 `security.user_max_tool_risk >= "medium"` 才能调用。
+- 默认保持 `services.toml` 的 `[image_generation] superadmin_only = true`；如果改为 `false`，普通用户还要 `security.user_max_tool_risk >= "medium"` 才能调用。
 - 建议在中转站 / 上游按 Key 设置 **额度、限速和每日上限**，并使用和 LLM 分开的 `IMAGE_API_KEY`；不要把无限额度的主 Key 注入面向群聊的进程。
 - 详细说明见 [生图服务](../docs/image-generation.md#权限与费用)。
 
@@ -864,8 +895,8 @@ docker compose exec -T elbot sh -c 'test -w /data && test -w /data/config && tes
 ### 12.2 首次配置检查
 
 ```bash
-ls -l data/config/elbot/{app,providers,state}.toml
-grep -nE '^\[providers|api_key_env|models' data/config/elbot/providers.toml
+ls -l data/config/elbot/{app,services,state}.toml
+grep -nE '^\[providers|api_key_env|models' data/config/elbot/services.toml
 grep -nE 'default_mode|provider|model' data/config/elbot/state.toml
 grep -nE 'enabled|listen|user_max_tool_risk|superadmins|superadmin_only' data/config/elbot/app.toml
 ```
@@ -918,7 +949,39 @@ docker compose exec -T elbot elbot doctor --e2e --json
 
 ---
 
-## 13. 常见问题
+## 13. 本地 Windows 容器部署（Docker Desktop）
+
+除云服务器外，`deploy/windows/` 提供本地 Windows 部署入口，并复用同一套 `docker-compose.yml`、`Dockerfile`、`.env`、`data/` 和内置运维接口。
+
+```powershell
+.\deploy\windows\elbot.ps1 init
+notepad .\deploy\.env
+.\deploy\windows\elbot.ps1 start
+.\deploy\windows\elbot.ps1 status
+.\deploy\windows\elbot.ps1 health
+.\deploy\windows\elbot.ps1 doctor --no-model
+.\deploy\windows\elbot.ps1 logs -Follow -Tail 200
+.\deploy\windows\elbot.ps1 install-service
+```
+
+| 能力 | Windows 命令 | 复用的已有能力 |
+| --- | --- | --- |
+| 后台控制 | `start` / `stop` / `restart` / `recreate` | 同一个 `docker-compose.yml` |
+| 运行状态 | `status` / `health` | `/live` `/ready` `/healthz` |
+| 任务与诊断 | `tasks` / `metrics` / `diagnostics` | `/tasks` `/metrics` `/diagnostics` + `ELBOT_OPS_TOKEN` |
+| 部署验收 | `doctor` | 容器内 `elbot doctor` |
+| 备份 / 恢复 / 升级 / 回滚 | `backup` / `restore-verify` / `upgrade` / `rollback` | `deploy/*.sh`（需要 Git for Windows `bash.exe`） |
+| 登录自启 | `install-service` | 对应 Linux 的 `elbot-compose.service` |
+
+> 必须使用 Docker Desktop 的 **WSL2 后端 + Linux containers**。Windows containers 无法运行 ElBot Linux 镜像。
+
+完整参数、排错和数据卷说明见 [`windows/README.md`](windows/README.md)。
+
+静态自测：`bash deploy/tests/windows_script_test.sh` 校验 Windows 入口 BOM / CRLF 和版本号引用；PowerShell 语法可用 Windows 上的 `Parser::ParseFile` 验证。
+
+---
+
+## 14. 常见问题
 
 | 现象 | 排查 |
 | --- | --- |
@@ -938,7 +1001,7 @@ docker compose exec -T elbot elbot doctor --e2e --json
 
 ---
 
-## 14. 一句话流程
+## 15. 一句话流程
 
 ```bash
 # 服务器

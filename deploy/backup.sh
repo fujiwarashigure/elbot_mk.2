@@ -33,14 +33,24 @@ die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
     local status=$?
+    local restart_status=0
     if [ "${STOPPED}" -eq 1 ]; then
         log "恢复 ElBot 容器"
         if ! compose up -d --remove-orphans >/dev/null 2>&1; then
             warn "容器恢复失败，请手动执行：cd ${DEPLOY_DIR} && ${COMPOSE[*]} -f ${COMPOSE_FILE} up -d --remove-orphans"
+            restart_status=1
+        elif ! wait_for_container_ready; then
+            warn "容器已启动但未在 ${BACKUP_RESTART_READY_TIMEOUT:-60}s 内就绪，请检查：cd ${DEPLOY_DIR} && ${COMPOSE[*]} -f ${COMPOSE_FILE} logs elbot"
+            restart_status=1
         fi
     fi
     if [ -n "${STAGE}" ] && [ -d "${STAGE}" ]; then
-        rm -rf "${STAGE}"
+        rm -rf "${STAGE}" 2>/dev/null || true
+    fi
+    if [ "${restart_status}" -ne 0 ]; then
+        # 停机备份必须把“服务没有恢复”作为整体失败返回，否则 cron/计划任务
+        # 会把一次备份标记为成功，即使 ElBot 仍处于停止状态。
+        exit 1
     fi
     return "${status}"
 }
@@ -62,6 +72,35 @@ detect_compose() {
 # 其他目录被调用时命中另一个 Compose 项目或丢失 .env。
 compose() {
     ( cd "${DEPLOY_DIR}" && "${COMPOSE[@]}" -f "${COMPOSE_FILE}" "$@" )
+}
+
+# 停机备份恢复容器后，必须等到 Docker healthcheck 判定就绪。
+# 没有 healthcheck 的服务只要求 running；等待超时或 unhealthy 都返回失败。
+wait_for_container_ready() {
+    local timeout="${BACKUP_RESTART_READY_TIMEOUT:-60}"
+    local deadline=$(( $(date +%s) + timeout ))
+    local cid status now
+    while :; do
+        cid="$(compose ps -q elbot 2>/dev/null || true)"
+        if [ -n "${cid}" ]; then
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${cid}" 2>/dev/null || true)"
+            case "${status}" in
+                healthy|running)
+                    return 0
+                    ;;
+                unhealthy|exited|dead|created)
+                    warn "ElBot 容器状态异常：${status}"
+                    return 1
+                    ;;
+            esac
+        fi
+        now="$(date +%s)"
+        if [ "${now}" -ge "${deadline}" ]; then
+            warn "等待 ElBot 就绪超时（最后状态：${status:-unknown}）"
+            return 1
+        fi
+        sleep 2
+    done
 }
 
 write_manifest() {

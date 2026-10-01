@@ -14,6 +14,7 @@ This is the user-facing ElBot documentation. Development plans, task breakdowns,
 6. [Elnis Listening Hub](elnis.md): Learn about Elnis, Elwisp, Elvena, and external event access.
 7. [Elnis Configuration and Usage](elnis-usage.md): Enable Elnis, configure Elwisp, and deliver events using Elvena.
 8. [Frontend API](frontend-api.md): WebSocket protocol, message types, and completion interfaces, used for writing custom frontends.
+9. [Deployment and operations](../deploy/README.md): cloud / Linux container deployment, health endpoints, watchdog, backup and restore, upgrade and rollback, plus [local Windows container deployment](../deploy/windows/README.md).
 
 ## Documentation Maintenance Conventions
 

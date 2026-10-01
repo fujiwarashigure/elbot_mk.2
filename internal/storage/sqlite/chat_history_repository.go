@@ -14,11 +14,16 @@ import (
 )
 
 type ChatHistoryStore struct {
-	db   *sql.DB
-	repo *ChatHistoryRepository
+	db       *sql.DB
+	repo     *ChatHistoryRepository
+	outbound *OutboundMessageRepository
 }
 
 type ChatHistoryRepository struct {
+	db *sql.DB
+}
+
+type OutboundMessageRepository struct {
 	db *sql.DB
 }
 
@@ -46,11 +51,15 @@ func NewChatHistory(ctx context.Context, path string) (*ChatHistoryStore, error)
 		_ = db.Close()
 		return nil, err
 	}
-	return &ChatHistoryStore{db: db, repo: &ChatHistoryRepository{db: db}}, nil
+	return &ChatHistoryStore{db: db, repo: &ChatHistoryRepository{db: db}, outbound: &OutboundMessageRepository{db: db}}, nil
 }
 
 func (s *ChatHistoryStore) Repository() storage.ChatHistoryRepository {
 	return s.repo
+}
+
+func (s *ChatHistoryStore) Outbound() storage.OutboundMessageRepository {
+	return s.outbound
 }
 
 func (s *ChatHistoryStore) Close() error {
@@ -94,6 +103,29 @@ ON chat_messages(created_at);
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE chat_messages ADD COLUMN segments TEXT NULL`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("add chat history segments: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS outbound_messages (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    platform TEXT NOT NULL,
+    platform_scope_id TEXT NOT NULL,
+    platform_message_id TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    segments TEXT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_messages_scope_seq
+ON outbound_messages(platform, platform_scope_id, seq);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_messages_scope_created_at
+ON outbound_messages(platform, platform_scope_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_messages_created_at
+ON outbound_messages(created_at);
+`); err != nil {
+		return fmt.Errorf("migrate outbound messages sqlite: %w", err)
 	}
 	return nil
 }
@@ -235,6 +267,139 @@ func (r *ChatHistoryRepository) Around(ctx context.Context, req storage.ChatHist
 	out = append(out, *target)
 	out = append(out, next...)
 	return out, nil
+}
+
+func (r *ChatHistoryRepository) ListRange(ctx context.Context, req storage.ChatHistoryRangeRequest) ([]storage.ChatMessage, error) {
+	if strings.TrimSpace(req.Platform) == "" || strings.TrimSpace(req.PlatformScopeID) == "" {
+		return nil, fmt.Errorf("chat history range platform and scope are required")
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
+	}
+	conditions := []string{"platform = ?", "platform_scope_id = ?", "(text != '' OR COALESCE(segments, '') != '')"}
+	params := []any{req.Platform, req.PlatformScopeID}
+	if req.AfterSeq > 0 {
+		conditions = append(conditions, "seq > ?")
+		params = append(params, req.AfterSeq)
+	}
+	if req.Since != nil {
+		conditions = append(conditions, "created_at >= ?")
+		params = append(params, storage.FormatTime(*req.Since))
+	}
+	if req.Until != nil {
+		conditions = append(conditions, "created_at <= ?")
+		params = append(params, storage.FormatTime(*req.Until))
+	}
+	params = append(params, limit)
+	rows, err := r.db.QueryContext(ctx, `
+SELECT seq, id, platform, platform_scope_id, scope_type, platform_message_id,
+       sender_id, sender_name, text, raw, segments, reply_to_platform_message_id, metadata, created_at
+FROM chat_messages
+WHERE `+strings.Join(conditions, " AND ")+`
+ORDER BY seq ASC
+LIMIT ?`, params...)
+	if err != nil {
+		return nil, fmt.Errorf("list chat message range: %w", err)
+	}
+	return scanChatMessages(rows)
+}
+
+func (r *OutboundMessageRepository) Append(ctx context.Context, message *storage.OutboundMessage) error {
+	if message.ID == "" {
+		message.ID = storage.NewID()
+	}
+	if message.CreatedAt.IsZero() {
+		message.CreatedAt = storage.Now()
+	}
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO outbound_messages (
+    id, platform, platform_scope_id, platform_message_id, text, segments, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    platform_message_id = excluded.platform_message_id,
+    text = excluded.text,
+    segments = excluded.segments,
+    created_at = excluded.created_at`,
+		message.ID,
+		message.Platform,
+		message.PlatformScopeID,
+		message.PlatformMessageID,
+		message.Text,
+		nullString(message.Segments),
+		storage.FormatTime(message.CreatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("append outbound message: %w", err)
+	}
+	return nil
+}
+
+func (r *OutboundMessageRepository) ListRange(ctx context.Context, req storage.OutboundMessageRangeRequest) ([]storage.OutboundMessage, error) {
+	if strings.TrimSpace(req.Platform) == "" || strings.TrimSpace(req.PlatformScopeID) == "" {
+		return nil, fmt.Errorf("outbound message range platform and scope are required")
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
+	}
+	conditions := []string{"platform = ?", "platform_scope_id = ?"}
+	params := []any{req.Platform, req.PlatformScopeID}
+	if req.AfterSeq > 0 {
+		conditions = append(conditions, "seq > ?")
+		params = append(params, req.AfterSeq)
+	}
+	if req.Since != nil {
+		conditions = append(conditions, "created_at >= ?")
+		params = append(params, storage.FormatTime(*req.Since))
+	}
+	if req.Until != nil {
+		conditions = append(conditions, "created_at <= ?")
+		params = append(params, storage.FormatTime(*req.Until))
+	}
+	params = append(params, limit)
+	rows, err := r.db.QueryContext(ctx, `
+SELECT seq, id, platform, platform_scope_id, platform_message_id, text, segments, created_at
+FROM outbound_messages
+WHERE `+strings.Join(conditions, " AND ")+`
+ORDER BY seq ASC
+LIMIT ?`, params...)
+	if err != nil {
+		return nil, fmt.Errorf("list outbound message range: %w", err)
+	}
+	defer rows.Close()
+	messages := []storage.OutboundMessage{}
+	for rows.Next() {
+		var message storage.OutboundMessage
+		var segments sql.NullString
+		var createdAt string
+		if err := rows.Scan(&message.Seq, &message.ID, &message.Platform, &message.PlatformScopeID, &message.PlatformMessageID, &message.Text, &segments, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan outbound message: %w", err)
+		}
+		message.Segments = segments.String
+		parsed, err := storage.ParseTime(createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse outbound message time: %w", err)
+		}
+		message.CreatedAt = parsed
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate outbound messages: %w", err)
+	}
+	return messages, nil
+}
+
+func (r *OutboundMessageRepository) DeleteBefore(ctx context.Context, cutoff time.Time) (int, error) {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM outbound_messages WHERE created_at < ?`, storage.FormatTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("delete old outbound messages: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("outbound messages rows affected: %w", err)
+	}
+	return int(rows), nil
 }
 
 func (r *ChatHistoryRepository) DeleteBefore(ctx context.Context, cutoff time.Time) (int, error) {

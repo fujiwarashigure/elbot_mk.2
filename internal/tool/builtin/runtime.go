@@ -1,18 +1,22 @@
 package builtin
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"time"
 
+	"elbot/internal/angelmemory"
 	"elbot/internal/character"
 	"elbot/internal/config"
 	elcron "elbot/internal/cron"
+	"elbot/internal/groupanalysis"
 	"elbot/internal/imagegen"
 	"elbot/internal/media"
 	"elbot/internal/memory/resident"
 	"elbot/internal/ops/concurrency"
 	"elbot/internal/processenv"
+	"elbot/internal/selflearning"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
 	"elbot/internal/tool/runtimeinfo"
@@ -22,6 +26,11 @@ import (
 type Runtime struct {
 	Registry            *tool.Registry
 	ResidentMemoryStore *resident.Store
+	AngelMemoryStore    *angelmemory.Store
+	AngelMemory         *angelmemory.Service
+	SelfLearningStore   *selflearning.Store
+	SelfLearning        *selflearning.Service
+	GroupAnalysis       *groupanalysis.Service
 	CharacterStore      *character.Store
 	ImageProfiles       map[string]ImageProfile
 	DefaultImageProfile string
@@ -31,21 +40,27 @@ type Runtime struct {
 }
 
 type RuntimeOptions struct {
-	ConfigDir              string
-	RuntimeInfo            runtimeinfo.Info
-	CronService            *elcron.Service
-	ChatHistory            storage.ChatHistoryRepository
-	Store                  storage.Store
-	Media                  *media.Manager
-	SandboxRoot            string
-	FileDelivery           config.FileDeliveryConfig
-	ResidentMemoryMaxUnits resident.Limits
-	CharacterEnabled       bool
-	CharacterRoot          string
-	ImageGeneration        config.ImageGenerationConfig
-	PromptRewriter         ImagePromptRewriter
-	ProcessEnv             processenv.Environment
-	ChildProcessEnv        processenv.Environment
+	ConfigDir               string
+	RuntimeInfo             runtimeinfo.Info
+	CronService             *elcron.Service
+	ChatHistory             storage.ChatHistoryRepository
+	OutboundMessages        storage.OutboundMessageRepository
+	GroupAnalysis           config.GroupAnalysisConfig
+	GroupAnalysisSummarizer groupanalysis.Summarizer
+	AngelMemory             config.AngelMemoryConfig
+	SelfLearning            config.SelfLearningConfig
+	Store                   storage.Store
+	Media                   *media.Manager
+	SandboxRoot             string
+	FileDelivery            config.FileDeliveryConfig
+	ResidentMemoryMaxUnits  resident.Limits
+	ResidentMemoryPolicy    resident.NormalWritePolicy
+	CharacterEnabled        bool
+	CharacterRoot           string
+	ImageGeneration         config.ImageGenerationConfig
+	PromptRewriter          ImagePromptRewriter
+	ProcessEnv              processenv.Environment
+	ChildProcessEnv         processenv.Environment
 }
 
 func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
@@ -68,7 +83,38 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 		childProcessEnv = opts.ProcessEnv
 	}
 	registry := tool.NewRegistry()
-	residentStore := resident.NewStoreWithLimits(filepath.Join(opts.ConfigDir, "memories.toml"), opts.ResidentMemoryMaxUnits)
+	residentStore := resident.NewStoreWithOptions(filepath.Join(opts.ConfigDir, "memories.toml"), opts.ResidentMemoryMaxUnits, opts.ResidentMemoryPolicy)
+	var angelMemoryStore *angelmemory.Store
+	if opts.AngelMemory.IsEnabled() {
+		var err error
+		angelMemoryStore, err = angelmemory.Open(context.Background(), filepath.Join(opts.ConfigDir, "angel_memory.db"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	var angelMemoryService *angelmemory.Service
+	if angelMemoryStore != nil {
+		angelMemoryService = angelmemory.NewService(angelMemoryStore)
+	}
+	var selfLearningStore *selflearning.Store
+	if opts.SelfLearning.IsEnabled() {
+		var err error
+		selfLearningStore, err = selflearning.Open(context.Background(), filepath.Join(opts.ConfigDir, "self_learning.db"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	var selfLearningService *selflearning.Service
+	if selfLearningStore != nil {
+		selfLearningService = selflearning.NewService(selfLearningStore)
+	}
+	var groupAnalysisService *groupanalysis.Service
+	if opts.ChatHistory != nil && opts.GroupAnalysis.IsEnabled() {
+		if historyRange, ok := opts.ChatHistory.(storage.ChatHistoryRangeRepository); ok {
+			groupAnalysisService = groupanalysis.NewService(historyRange, opts.OutboundMessages)
+			groupAnalysisService.Summarizer = opts.GroupAnalysisSummarizer
+		}
+	}
 	var characterStore *character.Store
 	if opts.CharacterEnabled {
 		characterStore = character.NewStore(opts.CharacterRoot)
@@ -109,22 +155,27 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	if opts.Media != nil {
 		fileManager.Media = opts.Media
 	}
-	runtime := &Runtime{Registry: registry, ResidentMemoryStore: residentStore, CharacterStore: characterStore, ImageProfiles: imageProfiles, DefaultImageProfile: imageDefaultProfile, ImageLimiter: imageLimiter, SkillManager: skillManager, FileManager: fileManager}
+	runtime := &Runtime{Registry: registry, ResidentMemoryStore: residentStore, AngelMemoryStore: angelMemoryStore, AngelMemory: angelMemoryService, SelfLearningStore: selfLearningStore, SelfLearning: selfLearningService, GroupAnalysis: groupAnalysisService, CharacterStore: characterStore, ImageProfiles: imageProfiles, DefaultImageProfile: imageDefaultProfile, ImageLimiter: imageLimiter, SkillManager: skillManager, FileManager: fileManager}
 	if err := RegisterAll(registry, RegisterOptions{
-		RuntimeInfo:         info,
-		ResidentMemoryStore: residentStore,
-		CharacterStore:      characterStore,
-		ImageProfiles:       imageProfiles,
-		DefaultImageProfile: imageDefaultProfile,
-		ImageLimiter:        imageLimiter,
-		PromptRewriter:      opts.PromptRewriter,
-		SkillManager:        skillManager,
-		CronService:         opts.CronService,
-		ChatHistory:         opts.ChatHistory,
-		LongMemoryDir:       filepath.Join(opts.ConfigDir, "long_memory"),
-		FileManager:         fileManager,
-		ProcessEnv:          opts.ProcessEnv,
-		ChildProcessEnv:     childProcessEnv,
+		RuntimeInfo:              info,
+		ResidentMemoryStore:      residentStore,
+		CharacterStore:           characterStore,
+		ImageProfiles:            imageProfiles,
+		DefaultImageProfile:      imageDefaultProfile,
+		ImageLimiter:             imageLimiter,
+		PromptRewriter:           opts.PromptRewriter,
+		SkillManager:             skillManager,
+		CronService:              opts.CronService,
+		ChatHistory:              opts.ChatHistory,
+		OutboundMessages:         opts.OutboundMessages,
+		GroupAnalysisService:     groupAnalysisService,
+		GroupAnalysisMaxMessages: opts.GroupAnalysis.MaxMessages,
+		AngelMemory:              angelMemoryService,
+		SelfLearning:             selfLearningService,
+		LongMemoryDir:            filepath.Join(opts.ConfigDir, "long_memory"),
+		FileManager:              fileManager,
+		ProcessEnv:               opts.ProcessEnv,
+		ChildProcessEnv:          childProcessEnv,
 	}); err != nil {
 		return nil, err
 	}

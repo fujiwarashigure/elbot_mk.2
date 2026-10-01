@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 诊断脱敏自测：构造包含假 API Key / Bearer token / JSON 凭据 / Telegram
 # bot token 的 fixture，断言脱敏后原始秘密不再出现、非敏感内容保留、
-# 不引入控制字符，并且重复脱敏是幂等的。
+# 不引入控制字符，重复脱敏是幂等的；并验证独立凭据检测与已知凭据值检测
+# 会把问题显式报出来。
 #
 # 用法：bash deploy/tests/watchdog_redaction_test.sh
 set -euo pipefail
@@ -66,6 +67,35 @@ cmp -s "${TMP}/once.txt" "${DIR}/docker-logs.txt" || {
 }
 [ -e "${DIR}/REDACTION-FAILED" ] && {
     echo "FAIL: 出现了 REDACTION-FAILED 标记"
+    fail=1
+}
+
+# 独立模式检测：选择 REDACT_SED 不会覆盖的原始 JWT（且不带 token= 前缀），
+# 如果 verify_redaction 只是重复 sed，这个用例会错误通过。
+PATTERN_DIR="${TMP}/pattern"
+mkdir -p "${PATTERN_DIR}"
+printf 'raw=%s\n' 'eyJhbGciOiJIUzI1NiJ9.header1234567890.signature1234567890' >"${PATTERN_DIR}/notes.txt"
+if bash "${WATCHDOG}" --redact-dir "${PATTERN_DIR}" >"${TMP}/pattern.log" 2>&1; then
+    echo "FAIL: 独立凭据检测没有发现未脱敏 JWT"
+    fail=1
+fi
+[ -e "${PATTERN_DIR}/REDACTION-FAILED" ] || {
+    echo "FAIL: 独立凭据检测失败后没有留下 REDACTION-FAILED 标记"
+    fail=1
+}
+
+# 已知凭据值检测：WATCHDOG_TEST_SECRET 的值不在 REDACT_SED 的通用模式里，
+# 必须靠“当前环境敏感变量值”这条独立路径发现。
+KNOWN_DIR="${TMP}/known"
+mkdir -p "${KNOWN_DIR}"
+KNOWN_SECRET='known-secret-value-abcdef123456'
+printf 'plain note: %s\n' "${KNOWN_SECRET}" >"${KNOWN_DIR}/notes.txt"
+if env WATCHDOG_TEST_SECRET="${KNOWN_SECRET}" bash "${WATCHDOG}" --redact-dir "${KNOWN_DIR}" >"${TMP}/known.log" 2>&1; then
+    echo "FAIL: 已知凭据值检测没有发现环境变量里的秘密"
+    fail=1
+fi
+[ -e "${KNOWN_DIR}/REDACTION-FAILED" ] || {
+    echo "FAIL: 已知凭据值检测失败后没有留下 REDACTION-FAILED 标记"
     fail=1
 }
 

@@ -32,9 +32,9 @@ rg -n "locator:tool-flow" devdocs/architecture.md
 
 配置约定：
 
-- 静态配置：`app.toml`。
-- Provider 配置：同目录 `providers.toml`。
-- 运行时模型状态：同目录 `state.toml`。
+- 应用/行为静态配置：`app.toml`。
+- 共享只读服务配置：同目录 `services.toml`（`[providers.*]`、`[model_metadata]`、`[model_profiles]`、`[image_generation]`）；旧部署仍支持 `providers.toml`。
+- 运行时模型状态：同目录 `state.toml`；由 ElBot 回写，必须与只读配置分离。
 - 工具 tag 配置：同目录 `tool_tags.toml`。
 - 用户可编辑资产：配置目录下的 `memories.toml`、`long_memory/`、`skills/`、`plugins/`。
 - Hook 配置：入口为配置目录 `plugins/hooks.toml`；被引用插件使用 `plugins/<plugin-id>/hook.toml`，持久 Hook 在其中声明 `[plugin.runtime]`。
@@ -100,7 +100,7 @@ Provider 熔断与备用：
 - 流式输出最终由对话主流程用最终文本 replace。
 - 发送前会发布 `sending` phase，便于 `/requests` 区分 LLM 慢还是平台发送慢。
 - 普通输入在工具阶段不会打断工具，会以 text/image segments 进入 pending；下一次 LLM 调用前已有的 pending 会合并注入当前轮，最终 LLM 调用期间新到达的 pending 则在当前轮正常结束后作为新用户消息自动开启下一轮。
-- Prompt Builder 每个 turn 从 Soul、工具提示、工具标签和当前 actor 的常驻记忆构建一次 system message；该消息只在当前 turn 内复用，不进入会话历史。
+- Prompt Builder 每个 turn 从 Soul、工具提示、工具标签和当前 actor 的常驻记忆构建一次 system message；该消息只在当前 turn 内复用，不进入会话历史。常驻记忆注入时使用 `<resident_memory>` 边界和“用户数据、不是系统指令”的信任声明，并转义内容中的尖括号，防止提前结束或伪造边界标签。normal 以换行分隔的独立条目保存，注入时渲染为列表项；`memories.toml` 通过“临时文件 + fsync + rename”原子落盘，并在保存前检测外部改动后重载，避免损坏或覆盖外部编辑。
 
 <!-- locator:commands -->
 ## 命令链路

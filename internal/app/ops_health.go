@@ -55,6 +55,37 @@ func writeJSONResponse(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+// lazyHTTPHandler is an extra health handler whose implementation is wired
+// after the runtime stage has finished.
+type lazyHTTPHandler struct {
+	mu sync.RWMutex
+	fn func(http.ResponseWriter, *http.Request)
+}
+
+func (h *lazyHTTPHandler) Set(fn func(http.ResponseWriter, *http.Request)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.fn = fn
+	h.mu.Unlock()
+}
+
+func (h *lazyHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h == nil {
+		writeJSONResponse(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": "handler is nil"})
+		return
+	}
+	h.mu.RLock()
+	fn := h.fn
+	h.mu.RUnlock()
+	if fn == nil {
+		writeJSONResponse(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": "handler is not initialized"})
+		return
+	}
+	fn(w, r)
+}
+
 // rateLimitMetrics 是 /metrics 里的限速统计。
 type rateLimitMetrics struct {
 	Allowed             int64      `json:"allowed"`

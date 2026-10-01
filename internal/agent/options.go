@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	agentcommands "elbot/internal/agent/commands"
+	"elbot/internal/angelmemory"
 	"elbot/internal/character"
 	"elbot/internal/config"
 	"elbot/internal/delivery"
@@ -15,6 +16,7 @@ import (
 	"elbot/internal/memory/resident"
 	"elbot/internal/platform"
 	"elbot/internal/security"
+	"elbot/internal/selflearning"
 	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
@@ -27,6 +29,7 @@ type Options struct {
 	ModeModels            map[string]config.ModelSelection
 	Providers             map[string]config.ProviderConfig
 	StatePath             string
+	ContextOverflow       map[string]config.ContextOverflowConfig
 	Store                 storage.Store
 	Media                 *media.Manager
 	CommandPrefixes       []string
@@ -35,6 +38,8 @@ type Options struct {
 	NamingNotifier        session.NamingNotifier
 	SoulPath              string
 	ResidentMemoryStore   *resident.Store
+	AngelMemory           *angelmemory.Service
+	SelfLearning          *selflearning.Service
 	CharacterStore        *character.Store
 	LLMRequestConfig      config.LLMRequestConfig
 	Ops                   config.OpsConfig

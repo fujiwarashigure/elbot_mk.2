@@ -86,7 +86,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          # latest=auto：正式版（v0.6.2）才更新 latest，预发布（-rc/-beta）不更新
+          # latest=auto：正式版（vX.Y.Z）才更新 latest，预发布（-rc/-beta）不更新
           flavor: |
             latest=auto
           tags: |

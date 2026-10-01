@@ -5,6 +5,8 @@
 # 推荐由 systemd timer 每分钟执行一次；不要和宝塔 Docker 管理器同时托管同一套 Compose。
 # 手动暂停：touch <state-dir>/paused
 set -euo pipefail
+# 诊断目录从创建时就使用严格权限；脱敏失败后再 chmod 只是兜底。
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_DIR="${WATCHDOG_COMPOSE_DIR:-${SCRIPT_DIR}}"
@@ -80,23 +82,106 @@ redact_diagnostics() {
     return "${failed}"
 }
 
-# 复检：对已脱敏文件再跑一次同样的规则。如果内容仍会变化，说明第一遍
-# 没有覆盖全部凭据，capture_diagnostics 会据此显式告警并打标记。
-verify_redaction() {
+# 复检分三层：
+#   1. 幂等复检：同一组规则再跑一遍，必须不再改动文件；
+#   2. 独立模式检测：不用 REDACT_SED，直接找仍像原始凭据的特征；
+#   3. 已知值检测：把当前进程环境里敏感变量的值逐个当字面量搜索。
+# 检查器自身失败（mktemp/cp/sed/grep 不可用或报错）必须返回非零，不能静默跳过。
+verify_redaction_idempotent() {
     local dir="$1"
     [ -d "${dir}" ] || return 0
-    command -v sed >/dev/null 2>&1 || return 1
-    local failed=0 file snapshot
-    snapshot="$(mktemp 2>/dev/null)" || return 0
+    command -v sed >/dev/null 2>&1 || {
+        warn "未找到 sed，无法执行脱敏幂等复检"
+        return 1
+    }
+    command -v cmp >/dev/null 2>&1 || {
+        warn "未找到 cmp，无法执行脱敏幂等复检"
+        return 1
+    }
+    local snapshot failed=0 file
+    snapshot="$(mktemp "${TMPDIR:-/tmp}/elbot-redact-verify.XXXXXX" 2>/dev/null)" || {
+        warn "无法创建脱敏复检临时文件"
+        return 1
+    }
     while IFS= read -r -d '' file; do
-        cp -f "${file}" "${snapshot}" 2>/dev/null || continue
-        sed -i -E "${REDACT_SED[@]}" "${file}" 2>/dev/null || true
+        if ! cp -f "${file}" "${snapshot}" 2>/dev/null; then
+            warn "脱敏幂等复检无法复制文件：${file}"
+            failed=1
+            continue
+        fi
+        if ! sed -i -E "${REDACT_SED[@]}" "${file}" 2>/dev/null; then
+            warn "脱敏幂等复检 sed 执行失败：${file}"
+            failed=1
+            continue
+        fi
         if ! cmp -s "${snapshot}" "${file}"; then
-            warn "脱敏复检未通过，仍可能包含凭据：${file}"
+            warn "脱敏幂等复检未通过，第二遍仍在改动内容：${file}"
             failed=1
         fi
     done < <(find "${dir}" -type f -print0 2>/dev/null)
-    rm -f "${snapshot}"
+    rm -f "${snapshot}" 2>/dev/null || true
+    return "${failed}"
+}
+
+detect_credential_patterns() {
+    local dir="$1" hits file failed=0
+    [ -d "${dir}" ] || return 0
+    command -v grep >/dev/null 2>&1 || {
+        warn "未找到 grep，无法执行独立凭据检测"
+        return 1
+    }
+    # 只选不会命中 [REDACTED] 占位的模式；通用 key=value/Bearer 已由
+    # REDACT_SED 负责，这里用原始令牌/URL/JWT 形态做交叉验证。
+    hits="$(grep -RIlE \
+        -e 'sk-[A-Za-z0-9_-]{12,}' \
+        -e 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' \
+        -e 'bot[0-9]+:[A-Za-z0-9_-]{20,}' \
+        -e 'https?://[^/[:space:]:@]+:[^/[:space:]@]+@[^/[:space:]]+' \
+        "${dir}" 2>/dev/null || true)"
+    if [ -n "${hits}" ]; then
+        while IFS= read -r file; do
+            [ -n "${file}" ] || continue
+            warn "独立凭据检测发现疑似未脱敏内容：${file}"
+        done <<<"${hits}"
+        failed=1
+    fi
+    return "${failed}"
+}
+
+detect_known_secrets() {
+    local dir="$1" name value hits failed=0
+    [ -d "${dir}" ] || return 0
+    command -v grep >/dev/null 2>&1 || {
+        warn "未找到 grep，无法执行已知凭据值检测"
+        return 1
+    }
+    while IFS='=' read -r name value; do
+        case "${name}" in
+            WATCHDOG_WEBHOOK_URL|WATCHDOG_OPS_TOKEN|OPS_TOKEN|ELBOT_OPS_TOKEN|*_TOKEN|*_API_KEY|*_SECRET|*_PASSWORD|*_PASSWD|*_CREDENTIAL|*_KEY)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        [ "${#value}" -ge 8 ] || continue
+        case "${value}" in
+            *$'\n'*|*$'\r'*) continue ;;
+        esac
+        hits="$(grep -RIlF -- "${value}" "${dir}" 2>/dev/null || true)"
+        if [ -n "${hits}" ]; then
+            warn "已知凭据值仍在诊断目录中（来源环境变量 ${name}）"
+            failed=1
+        fi
+    done < <(env)
+    return "${failed}"
+}
+
+verify_redaction() {
+    local dir="$1" failed=0
+    [ -d "${dir}" ] || return 0
+    verify_redaction_idempotent "${dir}" || failed=1
+    detect_credential_patterns "${dir}" || failed=1
+    detect_known_secrets "${dir}" || failed=1
     return "${failed}"
 }
 
@@ -167,6 +252,7 @@ capture_diagnostics() {
         redaction_failed=1
     fi
     if [ "${redaction_failed}" -eq 1 ] || ! verify_redaction "${dir}"; then
+        redaction_failed=1
         warn "诊断包可能仍包含凭据，请勿外发：${dir}"
         printf '%s\n' "redaction_failed_at=$(date -Is)" >>"${dir}/summary.txt" 2>/dev/null || true
         : >"${dir}/REDACTION-FAILED" 2>/dev/null || true
@@ -181,6 +267,10 @@ capture_diagnostics() {
     find "${DIAG_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
         | sort -nr | tail -n +31 | awk '{print $2}' | xargs -r rm -rf
     printf '%s\n' "${dir}"
+    if [ "${redaction_failed}" -ne 0 ]; then
+        return 1
+    fi
+    return 0
 }
 
 # 单独对已有诊断目录做脱敏 + 复检（供运维手动执行，也用于自测）。
@@ -198,6 +288,8 @@ case "${1:-}" in
             log "诊断目录脱敏通过：${target}"
         else
             warn "诊断目录脱敏未通过：${target}"
+            : >"${target}/REDACTION-FAILED" 2>/dev/null || true
+            chmod 700 "${target}" 2>/dev/null || true
         fi
         exit "${rc}"
         ;;
@@ -263,15 +355,19 @@ if [ "${restarts_in_window}" -ge "${MAX_RESTARTS}" ]; then
     mkdir -p "$(dirname "${RESTART_REASON_FILE}")" 2>/dev/null || true
     printf '%s\n' "${paused_line}" >"${RESTART_REASON_FILE}" 2>/dev/null || true
     warn "max restarts (${MAX_RESTARTS}) reached in window; pausing auto-restart"
-    capture_diagnostics >/dev/null
+    capture_diagnostics >/dev/null || warn "诊断收集/脱敏未通过，已写入 REDACTION-FAILED 标记"
     send_webhook "paused" "max restarts reached; manual intervention required"
     exit 1
 fi
 
-diag_dir="$(capture_diagnostics)"
+diag_rc=0
+diag_dir="$(capture_diagnostics)" || diag_rc=$?
 if [ "${DRY_RUN}" = "1" ]; then
     log "DRY_RUN=1: would restart ${SERVICE}; diagnostics=${diag_dir}"
-    exit 0
+    if [ "${diag_rc}" -ne 0 ]; then
+        warn "DRY_RUN=1 但诊断脱敏未通过；诊断目录已标记，请勿外发：${diag_dir}"
+    fi
+    exit "${diag_rc}"
 fi
 
 if ! detect_compose || [ ! -f "${COMPOSE_DIR}/docker-compose.yml" ]; then
@@ -291,6 +387,10 @@ if "${COMPOSE[@]}" -f "${COMPOSE_DIR}/docker-compose.yml" up -d --force-recreate
     write_int consecutive_failures 0
     send_webhook "restarted" "restarted ${SERVICE}; diagnostics=${diag_dir}"
     log "restart command completed"
+    if [ "${diag_rc}" -ne 0 ]; then
+        warn "容器已重启，但诊断包脱敏未通过；诊断目录已标记，请勿外发：${diag_dir}"
+        exit 1
+    fi
 else
     warn "restart command failed for ${SERVICE}"
     send_webhook "restart_failed" "docker compose up failed"

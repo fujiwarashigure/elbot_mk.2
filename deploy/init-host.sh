@@ -49,13 +49,13 @@ ${COMPOSE} ps
 echo
 echo "首次启动会自动生成默认配置，位置："
 echo "  ${DATA_DIR}/config/elbot/app.toml"
-echo "  ${DATA_DIR}/config/elbot/providers.toml"
+echo "  ${DATA_DIR}/config/elbot/services.toml"
 echo "  ${DATA_DIR}/config/elbot/state.toml"
 echo "  ${DATA_DIR}/config/elbot/elnis.toml"
 echo
 echo "首次启动后请核对："
-echo "  1. providers.toml 的 api_key_env 与 .env 的变量名逐个对应；"
-echo "  2. state.toml 的 provider/model 与 providers.toml 一致，且模型名真实可用；"
+echo "  1. services.toml 的 api_key_env 与 .env 的变量名逐个对应；"
+echo "  2. state.toml 的 provider/model 与 services.toml 一致，且模型名真实可用；"
 echo "  3. app.toml 的 CLI server / OneBot / Elnis / 生图 / security 配置符合实际接入方式；"
 echo "  4. data 目录属主为 ${ELBOT_UID}:${ELBOT_GID}，且不需要 root 才能写入。"
 echo

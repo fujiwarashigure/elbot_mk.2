@@ -69,7 +69,7 @@ func NewResidentMemoryTool(store *resident.Store) ResidentMemoryTool {
 func (t ResidentMemoryTool) Name() string { return ResidentMemoryToolName }
 func (t ResidentMemoryTool) Info() tool.Info {
 	return tool.NewBuilder(t.Name()).
-		Description("管理当前用户在当前平台的常驻记忆。本工具仅为入口。").
+		Description("管理当前用户在当前平台的常驻记忆入口。先用 resident_memory_read 查看；普通记忆用 resident_memory_normal（append/write/delete，低风险），核心记忆用 resident_memory_core（整体覆盖，高风险需用户确认）。").
 		Risk(tool.RiskLow).
 		DependsOn(ResidentMemoryReadToolName, ResidentMemoryNormalToolName, ResidentMemoryCoreToolName).
 		BuildInfo()
@@ -81,7 +81,7 @@ func (t ResidentMemoryTool) Call(ctx context.Context, req tool.CallRequest) (*to
 	if err := validateMemoryStore(t.Store); err != nil {
 		return nil, err
 	}
-	return &tool.Result{Content: "resident_memory 是常驻记忆管理入口。请调用 resident_memory_read、resident_memory_normal 或 resident_memory_core。"}, nil
+	return &tool.Result{Content: "resident_memory 是入口，本身不读写记忆。请先调用 resident_memory_read 查看当前记忆，然后按需调用：\n- resident_memory_normal：append/write/delete 普通记忆（低风险，可自动执行）；\n- resident_memory_core：整体覆盖核心记忆（高风险，需用户确认）。"}, nil
 }
 
 func (t ResidentMemoryReadTool) Name() string { return ResidentMemoryReadToolName }
@@ -132,7 +132,7 @@ func (t ResidentMemoryNormalTool) Info() tool.Info {
 func (t ResidentMemoryNormalTool) Schema() llm.ToolSchema {
 	return memoryBuilder(t.Name(), normalDescription(t.Store), tool.RiskLow).
 		String("action", "操作类型：append、write 或 delete。", tool.Required()).
-		String("content", "append/write 时使用。write 会覆盖完整 normal，使用前必须先调用 resident_memory_read 读取 normal 或 all。delete 不需要 content。").
+		String("content", "append/write 时使用。每条一行、一行一件事，重复条目会去重。write 会覆盖完整 normal，使用前必须先调用 resident_memory_read 读取 normal 或 all。delete 不需要 content。").
 		BuildSchema()
 }
 func (t ResidentMemoryNormalTool) Call(ctx context.Context, req tool.CallRequest) (*tool.Result, error) {
@@ -204,7 +204,22 @@ func memoryBuilder(name, description string, risk tool.RiskLevel) *tool.Builder 
 
 func normalDescription(store *resident.Store) string {
 	limits := memoryLimits(store)
-	return fmt.Sprintf("修改当前用户在当前平台的普通常驻记忆。支持 append、write、delete。write 会覆盖完整 normal，使用前必须先调用 resident_memory_read。normal 上限 %d 字数或单词。%s", limits.Normal, residentMemoryWritingRule)
+	policy := memoryNormalPolicy(store)
+	constraints := fmt.Sprintf("normal 上限 %d 字数或单词", limits.Normal)
+	if policy.MaxLines > 0 {
+		constraints += fmt.Sprintf("，最多 %d 条", policy.MaxLines)
+	}
+	if policy.MaxUnitsPerEntry > 0 {
+		constraints += fmt.Sprintf("，单条最多 %d 字数或单词", policy.MaxUnitsPerEntry)
+	}
+	return fmt.Sprintf("修改当前用户在当前平台的普通常驻记忆。支持 append、write、delete。每条一行、一行一件事，重复条目会去重；write 会覆盖完整 normal，使用前必须先调用 resident_memory_read。%s。%s", constraints, residentMemoryWritingRule)
+}
+
+func memoryNormalPolicy(store *resident.Store) resident.NormalWritePolicy {
+	if store == nil {
+		return resident.NormalWritePolicy{}
+	}
+	return store.NormalPolicy
 }
 
 func coreDescription(store *resident.Store) string {

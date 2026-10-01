@@ -145,6 +145,17 @@ type LLMPayload struct {
 	Text       string                `json:"text,omitempty"`
 	ToolCalls  []llm.ToolCallRequest `json:"tool_calls,omitempty"`
 	ElapsedMS  int64                 `json:"elapsed_ms,omitempty"`
+
+	// SystemAppend adds temporary system-context blocks before the current
+	// request is sent. The blocks are never persisted to session history.
+	SystemAppend []string `json:"system_append,omitempty"`
+	// Temperature and MaxTokens let trusted hooks adjust one request. Nil keeps
+	// the provider defaults.
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens   *int     `json:"max_tokens,omitempty"`
+	// ExtraBody is merged into the current request with the highest priority.
+	// Hooks that expose it should be treated as privileged.
+	ExtraBody map[string]any `json:"extra_body,omitempty"`
 }
 
 type ToolPayload struct {

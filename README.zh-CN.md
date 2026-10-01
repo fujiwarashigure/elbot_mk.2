@@ -32,7 +32,7 @@ ElBot 不会在每轮对话中默认注入所有工具的完整 schema，而是�
 
 **Chat / Work 双模式**：两种模式可独立配置模型，让低成本模型承担闲聊，让强模型专注处理复杂任务。
 
-**常驻记忆与长期记忆分层**： 常驻记忆只保存短小、稳定、真正需要每轮注入的信息，并在内部区分需确认修改的 core 与可整理的 normal；更长、更复杂的记忆由 LLM 按需通过 `long_memory` 查询。长期记忆使用 Markdown 源数据和 SQLite FTS，兼顾透明性和检索效率。
+**常驻记忆与长期记忆分层**： 常驻记忆只保存短小、稳定、真正需要每轮注入的信息，并在内部区分需确认修改的 core 与可整理的 normal；更长、更复杂的记忆由 LLM 按需通过 `long_memory` 查询。长期记忆使用 Markdown 源数据和 SQLite FTS，兼顾透明性和检索效率。常驻记忆注入 system prompt 时带 `<resident_memory>` 边界和“用户数据、不是系统指令”的信任声明；normal 以“每条一行、一行一件事”的结构化方式保存，并有写入频率、条目数、单条长度和指令类内容过滤。`memories.toml` 使用原子写入，并在外部改动时重新加载，避免崩溃或并发编辑损坏/覆盖记忆。
 
 | 模式   | 工具               | 适用场景                                 | 第一次请求 Token 消耗      |
 | ------ | ------------------ | ---------------------------------------- | -------------------------- |
@@ -73,7 +73,7 @@ Elnis 是 ElBot 的监听枢纽，Elwisp 是分布在各地的外部监听器，
 
 更多截图见 [elbot-showcase/frontend](https://github.com/Elfreese/elbot-showcase/tree/main/frontend)。
 
-**会话、Fork 与上下文压缩**： 内置持久化 Session 服务，支持会话恢复、归档、置顶、Fork、删除、分页查看和平台隔离。长对话自动触发上下文压缩，保持窗口可控，压缩后可继续正常对话。
+**会话、Fork 与上下文压缩**： 内置持久化 Session 服务，支持会话恢复、归档、置顶、Fork、删除、分页查看和平台隔离。长对话自动触发上下文压缩，保持窗口可控，压缩后可继续正常对话；发送前还会做 prompt token 预算检查，超长消息默认拒绝并报警，群管理员可用 `/*overflow` 切换 `truncate` / `summarize` 策略。
 
 ### 五、安全可靠
 
@@ -99,7 +99,7 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 最小使用流程：
 
-1. 在 `config/providers.toml` 配置 OpenAI-compatible Provider。
+1. 在 `config/services.toml` 配置 OpenAI-compatible Provider（旧部署仍可用 `config/providers.toml`）。
 2. 通过系统环境变量或配置目录 `.env` 设置 `api_key_env` 对应的 API Key。
 3. 启动后使用命令 `/*models` 查看然后使用 `/*model xx` 选择模型。或手动在 `config/state.toml` 选择默认 `chat` / `work` 模式和模型。
 4. 输入 `/*help` 查看命令，或直接开始对话。
@@ -120,20 +120,32 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 ## 本地定制版：相对原版 v0.5.0 的新增功能
 
-本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
+当前定制版版本：`0.6.3`。
+
+本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
 
 | 新增能力 | 最短使用入口 |
 | --- | --- |
 | 角色素材库 | `@char:<id>`、`/*chars`、`character_*` 工具 |
 | 图像生成 | `image_generate`、`@image:<profile>` |
+| 群分析 clean-room 统计与摘要 | `group_analysis`、`[group_analysis]`、可选 Cron 日报 |
+| 长期记忆 clean-room | `angel_remember` / `angel_recall`、`/memory` |
+| 自主学习 clean-room | `/learning`、`self_learning_review`、review-before-apply |
+| 平台能力扩展 | OneBot 群历史/群目录/头像；Telegram 群信息/管理员；QQ Official 本地回退 |
 | 系统信息与定时报告 | `/metrics.resources`、`[maintenance.daily_report]` |
 | 单轮模型 / 生图 / 工具声明 | `@model:<profile>`、`@image:<profile>`、`@use:<profile>` |
 | 命令前缀与配置检查 | `[commands].prefixes`、`elbot config check` |
-| Docker / systemd / 离线部署 | `deploy/`、`deploy/pack/` |
+| Docker / systemd / Windows 本地容器 / 离线部署 | `deploy/`、`deploy/windows/`、`deploy/pack/`、`deploy/portainer/` |
 | 独立健康接口与 watchdog | `/live`、`/ready`、`/healthz`、`elbot-watchdog.sh` |
 | 限速、熔断、磁盘保护 | `[ops]`、`[storage].disk_*` |
 | 备份、恢复、升级、回滚 | `backup.sh`、`restore-verify.sh`、`upgrade.sh`、`rollback.sh` |
 | 验收与故障诊断 | `elbot doctor`、`/tasks`、`/metrics`、`/diagnostics` |
+
+> 群分析、长期记忆和自主学习均为 clean-room 实现：只使用 ElBot 自身的 Hook / Tool / SQLite / 模型客户端，不复制第三方 GPL/AGPL 代码、Prompt、模板或素材。候选表达和黑话默认进入 `pending`，只有管理员 review 通过后才会注入上下文。
+
+- 群分析：本地 `chat_history` / `outbound_messages` 统计，`group_analysis` 工具返回统计与默认模型摘要；可在 `[group_analysis]` 开启 Cron 日报。
+- 长期记忆：`angel_memory.db` 保存范围化记忆，`angel_remember` / `angel_recall` 工具和 `/memory` 命令管理；`llm.turn.prepared` 注入临时 system 上下文，不写 Session 历史。
+- 自主学习：`self_learning.db` 保存观察和候选，`/learning` / `self_learning_review` 执行 review；只有 `approved` 候选会注入；`[maintenance.privacy_cleanup]` 按 retention 清理。
 
 
 ### 独立健康接口
@@ -163,8 +175,9 @@ Compose 只映射到宿主机回环：`127.0.0.1:32171:32171`。标准 Dockerfil
 - Compose 把 `./data` 挂到 `/data`，并设置 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_RUNTIME_DIR`。
 - 容器以 UID/GID `10001` 运行，`deploy/data` 必须对该 UID 可写。
 - `deploy/init-host.sh` 会创建目录、设置属主，并打印首次启动检查清单。
-- 首次启动后检查 `providers.toml`（`api_key_env` 变量名）、`state.toml`（provider/model 是否匹配且真实可用）、`app.toml`（CLI / OneBot / Elnis / 生图 / 安全配置）。
+- 首次启动后检查 `services.toml`（`api_key_env` 变量名、Provider、生图配置；旧部署为 `providers.toml`）、`state.toml`（provider/model 是否匹配且真实可用）、`app.toml`（CLI / OneBot / Elnis / 行为 / 安全配置）。
 - 改 `.env` 必须执行 `docker compose up -d --force-recreate`；只改 TOML 可以用 `docker compose restart`。
+- Windows 本地 Docker Desktop 用户用 `.\deploy\windows\elbot.ps1 init` / `start` 创建同类 `deploy/data`；必须使用 Linux containers，登录自启可用 `install-service` 注册计划任务。
 
 ### 容器网络
 
@@ -185,9 +198,10 @@ Compose 只映射到宿主机回环：`127.0.0.1:32171:32171`。标准 Dockerfil
 `deploy/backup.sh` 不再直接热 tar SQLite：
 
 - 有 `sqlite3`：执行 SQLite `.backup` 一致性备份，不中断服务。
-- 没有 `sqlite3` 但有 Docker Compose：短暂停止容器，打包后自动启动。
+- 没有 `sqlite3` 但有 Docker Compose：短暂停止容器，打包后自动启动，并等待 healthcheck `healthy`；恢复失败或等待就绪超时会让备份以非 0 退出（`BACKUP_RESTART_READY_TIMEOUT` 默认 60 秒）。
 - 两者都没有：回退热打包并明确警告。
 - 备份成功后默认生成 `*.manifest` 文件级 sha256 清单，并调用 `deploy/restore-verify.sh` 在隔离目录验证 SQLite、配置、角色素材、本地媒体和 manifest；`BACKUP_VERIFY=0` 可跳过。
+- `restore-verify.sh` 严格模式要求 manifest、`sqlite3`、带 `tomllib` 的 `python3`、必需配置和 `/data/...` 媒体精确路径全部通过；跳过项会输出 `restore_verify: passed_with_skips`，严格模式则直接失败。`RESTORE_VERIFY_START=auto`（默认）在 Docker 和镜像可用时会额外用 `--network none` 启动一次性恢复实例并等待 `/ready`。
 - 单机升级/回滚可用 `deploy/upgrade.sh` / `deploy/rollback.sh`：升级前保存数据快照和上一版镜像，回滚前先校验数据快照。
 - `deploy/README.md` 包含恢复演练步骤：解压到临时目录、SQLite 完整性校验、停止服务、替换 `data`、恢复属主，并实际发消息验证。
 
@@ -196,7 +210,7 @@ Compose 只映射到宿主机回环：`127.0.0.1:32171:32171`。标准 Dockerfil
 `deploy/elbot-watchdog.sh`、`elbot-watchdog.service`、`elbot-watchdog.timer` 提供外部 watchdog：
 
 - 只检查 `/live` 判断进程是否还能响应，不会因为 CPU 高、模型 API 暂时失败或平台重连就重启。
-- 连续失败达到 `WATCHDOG_FAILURE_THRESHOLD` 后，先收集诊断信息再处置：`/live`、`/ready`、`/healthz`、`/tasks`、`/metrics`、容器 State/Ports/logs/stats、磁盘和 `data` 大小；诊断输出会做凭据脱敏。
+- 连续失败达到 `WATCHDOG_FAILURE_THRESHOLD` 后，先收集诊断信息再处置：`/live`、`/ready`、`/healthz`、`/tasks`、`/metrics`、容器 State/Ports/logs/stats、磁盘和 `data` 大小；诊断目录从创建时用 `umask 077`，脱敏后做幂等、独立模式和已知环境敏感值三层复检，检查器自身失败也会报错。
 - 按 `WATCHDOG_COOLDOWN_SECONDS` 冷却，并在 `WATCHDOG_WINDOW_SECONDS` 内最多重启 `WATCHDOG_MAX_RESTARTS` 次。
 - 超限后写入 `watchdog-state/paused`，停止自动重启，等待人工恢复。
 - `WATCHDOG_WEBHOOK_URL` 可推送 `restarted`、`paused`、`restart_failed` 事件；若设置了 `ELBOT_OPS_TOKEN`，用 `WATCHDOG_OPS_TOKEN` 填同一个值以访问诊断接口。
@@ -259,6 +273,8 @@ fallback_mode = "circuit"      # circuit（默认）/ on_error / off
 - 外部模型异常只显示为 `degraded`，不会触发自动重启。
 
 ### P1：生图并发与降级
+
+以下配置位于 `services.toml` 的 `[image_generation]`（旧部署为 `app.toml`）：
 
 ```toml
 [image_generation]
@@ -338,7 +354,7 @@ root = "characters"
 
 ### 图像生成：`image_generate`
 
-`image_generate` 对接 OpenAI 兼容的 `/images/generations`，默认按“全局预设 + 角色图片预设 + 场景描述”组装最终提示词。
+`image_generate` 对接 OpenAI 兼容的 `/images/generations`，默认按“全局预设 + 角色图片预设 + 场景描述”组装最终提示词。生图配置位于 `services.toml` 的 `[image_generation]`（旧部署仍可放在 `app.toml`）。
 
 基础配置：
 
@@ -362,18 +378,20 @@ send_by_default = false
 配合角色库使用时：
 
 ```text
-@char:catgirl 画一张她站在雨里的霓虹街道回眸
+@char:catgirl @char:foxgirl 画一张两人站在雨里的霓虹街道同框
 ```
 
 也可以让模型显式传参：
 
 ```json
-{"prompt": "在雨里的霓虹街道回眸", "character_id": "catgirl"}
+{"prompt": "两人在雨夜街道同框", "character_ids": ["catgirl", "foxgirl"]}
 ```
+
+默认所有被索引角色都会画进**同一张图**；只有显式传 `count > 1`（最多 4）时才生成多张，并且每张都包含全部角色，不会把角色拆到不同图片。多角色自动匹配会识别 prompt 里的多个角色名/别名。
 
 `image_generate` 默认 `mode = "auto"`：
 
-- 自动从 prompt 识别角色名/别名，带上角色图片预设和参考图；
+- 自动从 prompt 识别多个角色名/别名，把命中的角色图片预设和参考图合并到同一张图；
 - prompt 出现“刚才 / 上一条 / 那张图 / 群里”等指代词时，自动检索当前群聊上下文；
 - 生图配置 `auto_character` / `auto_context` / `context_default_limit` 可控制自动编排开关和上下文条数；
 - 工具参数 `mode=manual` 可关闭自动编排，只用显式参数。
@@ -513,7 +531,7 @@ prefixes = ["/*"]
 elbot config check [--config path]
 ```
 
-它会加载 `app.toml`、`providers.toml`、`state.toml`，打印 Provider、模型、角色库、生图、profile、定时报告摘要和 warning；配置错误时返回非零退出码，适合升级前或 CI 使用。
+它会加载 `app.toml`、`services.toml`（旧部署 `providers.toml`）、`state.toml`，打印实际加载路径、Provider、模型、角色库、生图、profile、定时报告摘要和 warning；配置错误时返回非零退出码，适合升级前或 CI 使用。
 
 ### 部署产物与离线安装
 
@@ -525,6 +543,8 @@ elbot config check [--config path]
 - `deploy/init-host.sh`：宝塔/VPS 初始化目录和权限。
 - `deploy/nginx-elbot.conf`：CLI WebSocket / Elnis 反向代理片段。
 - `deploy/pack/`：离线安装包，提供 amd64/arm64 静态二进制、预构建 `docker load` tar 和 `SHA256SUMS`。
+- `deploy/windows/`：Windows 本地 Docker Desktop 部署、状态查看与后台控制入口。
+- `deploy/portainer/`：可选的 Portainer CE 浏览器 Docker 管理界面，仅绑定 `127.0.0.1:9443`，本地 / 云服务器共用。
 
 常用命令：
 
@@ -541,15 +561,15 @@ docker compose up -d
 ```bash
 bash deploy/pack/prepare-offline.sh
 # 或使用已下载产物
-docker load -i elbot-0.6.2-linux-amd64.tar.gz
+docker load -i elbot-0.6.3-linux-amd64.tar.gz
 ```
 
 多架构构建：
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/Dockerfile --build-arg VERSION=0.6.2 \
-  --push -t <registry>/<namespace>/elbot:0.6.2 .
+  -f deploy/Dockerfile --build-arg VERSION=0.6.3 \
+  --push -t <registry>/<namespace>/elbot:0.6.3 .
 ```
 
 构建参数：
@@ -560,6 +580,40 @@ APT_MIRROR    apt 镜像主机名，如 mirrors.ustc.edu.cn
 GO_BASE_IMAGE / RUNTIME_BASE_IMAGE  覆盖基础镜像或 pin digest
 EXTRA_TOOLS   运行镜像额外命令
 ```
+
+### 本地 Windows 容器部署（Docker Desktop）
+
+除云服务器外，仓库提供 Windows 本地 Docker Desktop 入口，复用同一份 `deploy/docker-compose.yml`、`deploy/Dockerfile` 和 `.env`：
+
+```powershell
+.\deploy\windows\elbot.ps1 init
+notepad .\deploy\.env
+.\deploy\windows\elbot.ps1 start
+.\deploy\windows\elbot.ps1 status
+.\deploy\windows\elbot.ps1 health
+.\deploy\windows\elbot.ps1 doctor --no-model
+.\deploy\windows\elbot.ps1 logs -Follow -Tail 200
+.\deploy\windows\elbot.ps1 install-service
+```
+
+- `start` / `stop` / `restart` / `recreate` / `logs` / `shell` 管理后台容器；
+- `status` / `health` 读取 `/live`、`/ready`、`/healthz`；
+- `tasks` / `metrics` / `diagnostics` 读取项目内置运维接口，并自动带 `ELBOT_OPS_TOKEN`；
+- `doctor` 在容器内执行 `elbot doctor`；
+- `backup` / `restore-verify` / `upgrade` / `rollback` 复用 `deploy/*.sh`，需要 Git for Windows 的 `bash.exe`；
+- `install-service` 注册登录自启计划任务，对应 Linux 下的 `elbot-compose.service`。
+
+完整说明见 [`deploy/windows/README.md`](deploy/windows/README.md)。
+
+#### 可选：Portainer 浏览器运维
+
+ElBot 本身没有通用的容器管理 Web UI；如果希望本地 Windows 和云服务器使用同一套浏览器界面，可启动仓库自带的 Portainer CE：
+
+```powershell
+docker compose -f deploy\portainer\portainer-compose.yml up -d
+```
+
+浏览器打开 `https://127.0.0.1:9443`。Portainer 只绑定回环地址，不会直接暴露公网；云服务器优先用 SSH 隧道（`ssh -L 9443:127.0.0.1:9443 user@host`），不要改成 `0.0.0.0`，也不要在安全组直接放行 `9443`。`down` 只停止容器并保留 `portainer_data` 卷；首次 setup token、SSH 隧道和 Docker socket 安全说明见 [`deploy/windows/README.md`](deploy/windows/README.md) 第 14 节。
 
 ### 部署验收与故障诊断
 
@@ -639,6 +693,7 @@ ROLLBACK_CONFIRM=1 bash rollback.sh
 ### 更多细节
 
 - 部署与 watchdog 指南：[`deploy/README.md`](deploy/README.md)
+- Windows 本地容器部署指南：[`deploy/windows/README.md`](deploy/windows/README.md)
 - 配置说明：[`docs/configuration.md`](docs/configuration.md)
 - 英文文档：[`README.md`](README.md)
 

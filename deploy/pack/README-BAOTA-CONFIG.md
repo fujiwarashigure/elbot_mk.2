@@ -1,5 +1,8 @@
 # 宝塔面板改配置速查（ElBot）
 
+> 本文只针对宝塔 Linux 面板；本地 Windows 10/11 + Docker Desktop 部署见 [`../windows/README.md`](../windows/README.md)。
+
+
 本文对应离线包里的 `data/config/elbot/`。宝塔面板只负责"改文件 / 重启 / 看日志"，配置本身还是 TOML。
 
 ## 1. 宝塔里对应哪些操作
@@ -37,6 +40,8 @@ docker compose up -d
 ```text
 config OK
 path: /data/config/elbot/app.toml
+services: /data/config/elbot/services.toml
+state: /data/config/elbot/state.toml
 commands.prefixes: /*
 character_library: enabled=true root=/data/config/elbot/characters
 image_generation: model=gpt-image-2.5 profiles=2 default_profile="fast"
@@ -51,7 +56,7 @@ warnings: none
 
 ## 3. 可直接粘贴的配置片段
 
-把需要的段**追加到 `app.toml` 末尾**。注意：同一个 `[section]` 只能出现一次，改已有配置就直接改那一段，不要重复粘贴。
+把**行为/平台/安全**相关的段追加到 `app.toml` 末尾；把 **Provider、生图、模型别名**相关的段追加到 `services.toml` 末尾。注意：同一个 `[section]` 只能出现一次，改已有配置就直接改那一段，不要重复粘贴。
 
 ### 3.1 命令前缀
 
@@ -68,7 +73,7 @@ enabled = true
 root = "characters"
 ```
 
-### 3.3 生图基础配置 + 多端点
+### 3.3 生图基础配置 + 多端点（写入 `services.toml`）
 
 ```toml
 [image_generation]
@@ -182,7 +187,7 @@ qqonebot = ["只填信任的QQ号"]
 
 - 不要给普通用户开放含 `shell` / 文件写入 / 外部请求的 `tool_tags`；
 - 外部 Skill 与 Hook 不经过 ElBot 的风险确认，只安装可信来源；
-- 生图建议保持 `[image_generation] superadmin_only = true`，或在上游 / 中转站按 Key 设置额度、限速和每日上限；
+- 生图建议保持 `services.toml` 的 `[image_generation] superadmin_only = true`，或在上游 / 中转站按 Key 设置额度、限速和每日上限；
 - CLI / Elnis 继续只映射到宿主机 `127.0.0.1`，公网走 HTTPS/WSS 反向代理，并使用强随机 token。
 
 ### 3.7 QQ OneBot 容器地址
@@ -210,5 +215,5 @@ send_file_mode = "base64"      # 不共享文件系统时保持 base64
 | `/healthz` 为 `degraded` | 模型 API / 中转站可能异常；先查上游，不要直接重启容器 |
 | 报告没收到 | 检查 `[security.superadmins]` 是否配了当前平台用户 ID，以及 `docker compose logs` 里的 warning |
 | 生图 404 | `base_url` 少/多了 `/v1`；用 `endpoint` 直接写全路径 |
-| 模型 profile 声明无效 | `provider` 必须是 `providers.toml` 里存在的名字，`config check` 会给出 warning |
+| 模型 profile 声明无效 | `provider` 必须是 `services.toml`（旧部署 `providers.toml`）里存在的名字，`config check` 会给出 warning |
 | 权限提示"仅超级管理员" | 你的平台用户 ID 不在 `[security.superadmins]` |

@@ -16,6 +16,7 @@ import (
 	elcron "elbot/internal/cron"
 	"elbot/internal/delivery"
 	"elbot/internal/elvena"
+	"elbot/internal/groupanalysis"
 	"elbot/internal/hook"
 	hookbuiltin "elbot/internal/hook/builtin"
 	hookcontrol "elbot/internal/hook/control"
@@ -26,6 +27,7 @@ import (
 	"elbot/internal/processenv"
 	"elbot/internal/security"
 	"elbot/internal/session"
+	"elbot/internal/storage"
 	"elbot/internal/tool/builtin"
 	"elbot/internal/tool/runtimeinfo"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -91,6 +93,12 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		foundation.Maintenance.Media = mediaCenter
 	}
 	imageRewriter := buildImagePromptRewriter(cfg, req.Models)
+	var groupAnalysisSummarizer groupanalysis.Summarizer
+	if selection := cfg.DefaultModelSelection(); selection.Provider != "" && selection.Model != "" {
+		if client := req.Models.ByProvider[selection.Provider]; client != nil {
+			groupAnalysisSummarizer = groupanalysis.LLMSummarizer{Client: client, Model: selection.Model}
+		}
+	}
 	toolRuntime, err := builtin.NewRuntime(builtin.RuntimeOptions{
 		ConfigDir: filepath.Dir(cfg.ConfigPath),
 		RuntimeInfo: runtimeinfo.Info{
@@ -98,22 +106,87 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 			SandboxRoot:  cfg.Sandbox.Root,
 			FileDelivery: cfg.FileDelivery,
 		},
-		CronService:            cronService,
-		ChatHistory:            foundation.ChatHistory,
-		Store:                  foundation.Store,
-		Media:                  mediaCenter,
-		ResidentMemoryMaxUnits: resident.Limits{Core: cfg.ResidentMemory.CoreMaxUnits, Normal: cfg.ResidentMemory.NormalMaxUnits},
-		CharacterEnabled:       cfg.CharacterLibrary.IsEnabled(),
-		CharacterRoot:          cfg.CharacterLibrary.Root,
-		ImageGeneration:        cfg.ImageGeneration,
-		PromptRewriter:         imageRewriter,
-		ProcessEnv:             credentialEnv,
-		ChildProcessEnv:        shellProcessEnv,
+		CronService:             cronService,
+		ChatHistory:             foundation.ChatHistory,
+		OutboundMessages:        foundation.OutboundMessages,
+		GroupAnalysis:           cfg.GroupAnalysis,
+		GroupAnalysisSummarizer: groupAnalysisSummarizer,
+		AngelMemory:             cfg.AngelMemory,
+		SelfLearning:            cfg.SelfLearning,
+		Store:                   foundation.Store,
+		Media:                   mediaCenter,
+		ResidentMemoryMaxUnits:  resident.Limits{Core: cfg.ResidentMemory.CoreMaxUnits, Normal: cfg.ResidentMemory.NormalMaxUnits},
+		ResidentMemoryPolicy: resident.NormalWritePolicy{
+			MinInterval:              time.Duration(cfg.ResidentMemory.NormalWriteMinIntervalSecondsValue()) * time.Second,
+			Window:                   time.Duration(cfg.ResidentMemory.NormalWriteWindowSecondsValue()) * time.Second,
+			MaxWrites:                cfg.ResidentMemory.NormalWriteMaxPerWindowValue(),
+			MaxLines:                 cfg.ResidentMemory.NormalMaxLinesValue(),
+			MaxUnitsPerEntry:         cfg.ResidentMemory.NormalMaxUnitsPerEntryValue(),
+			BlockInstructionPatterns: cfg.ResidentMemory.IsNormalBlockInstructionPatterns(),
+		},
+		CharacterEnabled: cfg.CharacterLibrary.IsEnabled(),
+		CharacterRoot:    cfg.CharacterLibrary.Root,
+		ImageGeneration:  cfg.ImageGeneration,
+		PromptRewriter:   imageRewriter,
+		ProcessEnv:       credentialEnv,
+		ChildProcessEnv:  shellProcessEnv,
 	})
 	if err != nil {
 		return nil, err
 	}
 	req.Profiler.Mark("builtin tools register")
+	if cfg.GroupAnalysis.IsReportEnabled() && toolRuntime.GroupAnalysis != nil {
+		if err := foundation.CronManager.RegisterHandler("group_analysis.report", func(ctx context.Context, job storage.CronJob) error {
+			days := cfg.GroupAnalysis.ReportDays
+			if days <= 0 {
+				days = 1
+			}
+			now := time.Now()
+			report, err := toolRuntime.GroupAnalysis.Analyze(ctx, groupanalysis.Request{
+				Platform: cfg.GroupAnalysis.ReportPlatform,
+				ScopeID:  cfg.GroupAnalysis.ReportScopeID,
+				Since:    now.AddDate(0, 0, -days),
+				Until:    now,
+			})
+			if err != nil {
+				return err
+			}
+			text := report.FormatText()
+			if summary, summaryErr := toolRuntime.GroupAnalysis.Summarize(ctx, report); summaryErr == nil && strings.TrimSpace(summary) != "" {
+				text = "摘要：" + strings.TrimSpace(summary) + "\n\n" + text
+			}
+			target := delivery.Target{Platform: cfg.GroupAnalysis.ReportPlatform, ScopeID: cfg.GroupAnalysis.ReportScopeID}
+			if target.Empty() {
+				target.Superadmins = true
+			}
+			_, err = sendNotice(ctx, target, []delivery.Output{delivery.Text(text)})
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		if _, err := foundation.CronManager.UpsertJob(ctx, elcron.UpsertJobRequest{
+			Name:     "system.group_analysis.report",
+			Handler:  "group_analysis.report",
+			Schedule: cfg.GroupAnalysis.ReportSchedule,
+			Enabled:  true,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if foundation.Maintenance != nil {
+		if toolRuntime.AngelMemory != nil {
+			foundation.Maintenance.RegisterRetentionCleanup("angel_memory", func(ctx context.Context, cutoff time.Time) error {
+				_, err := toolRuntime.AngelMemory.DeleteBefore(ctx, cutoff)
+				return err
+			})
+		}
+		if toolRuntime.SelfLearning != nil {
+			foundation.Maintenance.RegisterRetentionCleanup("self_learning", func(ctx context.Context, cutoff time.Time) error {
+				_, _, err := toolRuntime.SelfLearning.DeleteBefore(ctx, cutoff)
+				return err
+			})
+		}
+	}
 	toolRuntime.SkillManager.StartDelayedReload(ctx, time.Second)
 	req.Profiler.Mark("skill reload scheduled")
 
@@ -255,15 +328,18 @@ func buildHookService(
 ) *hookcontrol.Service {
 	cfg := foundation.Config
 	hookOpts := hookbuiltin.Options{
-		ConfigDir:       config.PluginConfigDir(cfg.ConfigPath),
-		Tools:           toolRuntime.Registry,
-		Logger:          foundation.Logger,
-		Audit:           auditFunc(foundation.Logs),
-		Notify:          notifyHookIssue,
-		Send:            sendNotice,
-		PlatformCallers: hookPlatformCallerResolver{runtimes: platforms.Runtimes},
-		Runtime:         hookRuntime,
-		ProcessEnv:      hookProcessEnv,
+		ConfigDir:        config.PluginConfigDir(cfg.ConfigPath),
+		Tools:            toolRuntime.Registry,
+		Logger:           foundation.Logger,
+		Audit:            auditFunc(foundation.Logs),
+		Notify:           notifyHookIssue,
+		Send:             sendNotice,
+		PlatformCallers:  hookPlatformCallerResolver{runtimes: platforms.Runtimes},
+		Runtime:          hookRuntime,
+		ProcessEnv:       hookProcessEnv,
+		OutboundMessages: foundation.OutboundMessages,
+		AngelMemory:      toolRuntime.AngelMemory,
+		SelfLearning:     toolRuntime.SelfLearning,
 	}
 
 	loadHooks := func(registrar hook.Registrar) (hook.ReloadReport, []hookruntime.Config, error) {
@@ -355,6 +431,7 @@ func buildAgent(
 		ModeModels:            cfg.ModeModels,
 		Providers:             cfg.Providers,
 		StatePath:             cfg.StateConfigPath,
+		ContextOverflow:       cfg.ContextOverflow,
 		Store:                 foundation.Store,
 		Media:                 toolRuntime.FileManager.Media,
 		CommandPrefixes:       cfg.Commands.Prefixes,
@@ -363,6 +440,8 @@ func buildAgent(
 		NamingNotifier:        namingLogger{logger: foundation.Logger},
 		SoulPath:              cfg.Soul.Path,
 		ResidentMemoryStore:   toolRuntime.ResidentMemoryStore,
+		AngelMemory:           toolRuntime.AngelMemory,
+		SelfLearning:          toolRuntime.SelfLearning,
 		CharacterStore:        toolRuntime.CharacterStore,
 		LLMRequestConfig:      cfg.LLMRequest,
 		Ops:                   cfg.Ops,

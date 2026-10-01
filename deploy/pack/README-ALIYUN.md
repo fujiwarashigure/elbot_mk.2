@@ -1,5 +1,8 @@
 # 阿里云轻量应用服务器部署 ElBot
 
+> 本地 Windows 10/11 + Docker Desktop 部署见 [`../windows/README.md`](../windows/README.md)。
+
+
 > 先澄清：本项目提供的是 **Docker 镜像归档**（`docker save` 格式），**不是 Nginx 镜像**，
 > 也**不能导入到阿里云轻量控制台的“系统镜像 / 应用镜像”**里。正确流程是：
 > 进入服务器操作系统 → 安装 Docker → `docker load` 或 `docker build` → `docker compose up`。
@@ -69,13 +72,13 @@ bash deploy/pack/prepare-offline.sh
 
 生成 `deploy/dist/` 后，再把对应文件传到服务器，例如 `/opt/elbot`：
 
-- **宝塔文件管理器**：直接上传 `elbot-0.6.2-offline-amd64.tar.gz` 到 `/opt/elbot`。
+- **宝塔文件管理器**：直接上传 `elbot-0.6.3-offline-amd64.tar.gz` 到 `/opt/elbot`。
 - **SCP**（本地执行）：
 
 ```bash
-scp elbot-0.6.2-offline-amd64.tar.gz root@<公网IP>:/opt/elbot/
+scp elbot-0.6.3-offline-amd64.tar.gz root@<公网IP>:/opt/elbot/
 # 如果要用 docker load 方案，再传：
-scp elbot-0.6.2-linux-amd64.tar.gz root@<公网IP>:/opt/elbot/
+scp elbot-0.6.3-linux-amd64.tar.gz root@<公网IP>:/opt/elbot/
 ```
 
 - **阿里云 OSS**：先传到 OSS，服务器上用带签名的 URL `wget`。
@@ -87,7 +90,7 @@ scp elbot-0.6.2-linux-amd64.tar.gz root@<公网IP>:/opt/elbot/
 
 ```bash
 mkdir -p /opt/elbot && cd /opt/elbot
-tar -xzf elbot-0.6.2-offline-amd64.tar.gz
+tar -xzf elbot-0.6.3-offline-amd64.tar.gz
 cd offline-amd64
 
 # 首次运行会生成 .env 并提示你填写，然后退出
@@ -100,7 +103,7 @@ chmod 600 .env
 # 再执行
 bash deploy.sh                 # 推荐：预编译二进制 + Debian 运行时，功能完整
 # 或完全离线（scratch 镜像，无 shell 工具）：
-# bash deploy.sh --load ../elbot-0.6.2-linux-amd64.tar.gz
+# bash deploy.sh --load ../elbot-0.6.3-linux-amd64.tar.gz
 ```
 
 脚本会做：架构检测 → Docker 检查 → 创建并 `chown 10001:10001` 数据目录 → 构建/加载镜像 → `docker compose up -d`。
@@ -119,14 +122,14 @@ docker compose logs -f --tail=200
 
 ```
 offline-amd64/data/config/elbot/app.toml
-offline-amd64/data/config/elbot/providers.toml
+offline-amd64/data/config/elbot/services.toml
 offline-amd64/data/config/elbot/state.toml
 offline-amd64/data/config/elbot/elnis.toml
 ```
 
 按仓库 `deploy/README.md` 第 4 节改：
 
-- `providers.toml`：确认 `api_key_env` 与 `.env` 变量名一致；大陆机器访问 OpenAI 需要配 `proxy`，或换 DeepSeek 等国内 Provider。
+- `services.toml`：确认 `api_key_env` 与 `.env` 变量名一致；大陆机器访问 OpenAI 需要配 `proxy`，或换 DeepSeek 等国内 Provider。旧包若只有 `providers.toml`，读取逻辑仍兼容。
 - `state.toml`：把模型名改成你 Provider 实际支持的。
 - `app.toml`：启用 CLI 远程服务端：
   ```toml
@@ -197,4 +200,4 @@ curl -sS http://127.0.0.1:32170/healthz
 | Nginx 502 | 容器没起、端口没映射、或 app 监听在 127.0.0.1（容器内要监听 0.0.0.0） |
 | 拉取 debian 很慢/失败 | 配阿里云镜像加速，或 `docker compose build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim` |
 | 磁盘不够（40G） | 不要用源码构建；定期 `docker system prune -af`、`docker builder prune -f`；日志/媒体见 `deploy/README.md` 第 8 节 |
-| 想用阿里云容器镜像服务 ACR | 本地/CI `bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.2`，服务器 `docker login` 后 `docker compose pull && up -d` |
+| 想用阿里云容器镜像服务 ACR | 本地/CI `bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3`，服务器 `docker login` 后 `docker compose pull && up -d` |

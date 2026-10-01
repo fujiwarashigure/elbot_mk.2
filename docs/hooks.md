@@ -87,8 +87,8 @@ text = "你好呀"
 | `platform.connected` | 平台连接完成 | `platform` | 无 | 是 |
 | `platform.message.received` | 收到用户消息，命令和 LLM 前 | `platform`、`actor`、`message` | `message.text/segments` | 是 |
 | `agent.input.prepared` | 输入写入会话前 | `session`、`message` | `message.text/segments` | 否 |
-| `llm.turn.prepared` | 整轮 LLM 调用前 | `session`、当前用户 `message.segments`、只读 `llm.messages`、tools/provider/model | `message.segments` 或 `llm.latest_user_text` | 否 |
-| `llm.request.prepared` | 每次实际模型请求前 | 同上；仅工具流程中新到达的 pending 提供 `message` | pending 的 `message.segments` 或 `llm.latest_user_text` | 否 |
+| `llm.turn.prepared` | 整轮 LLM 调用前 | `session`、当前用户 `message.segments`、只读 `llm.messages`、tools/provider/model | `message.segments`、`llm.latest_user_text`、`llm.system_append`、`llm.temperature/max_tokens/extra_body` | 否 |
+| `llm.request.prepared` | 每次实际模型请求前 | 同上；仅工具流程中新到达的 pending 提供 `message` | pending 的 `message.segments`、`llm.latest_user_text`、`llm.system_append`、`llm.temperature/max_tokens/extra_body` | 否 |
 | `llm.response.received` | 模型响应完成 | `llm.text/source_text/tool_calls/usage` | `llm.text` | 是 |
 | `tool.call.prepared` | 工具调用前 | `session`、`tool` | `tool.arguments` | 否 |
 | `tool.call.completed` | 工具实际执行后 | `session`、`message.segments`、`tool.name/result/error/risk` | `tool.result` 或进程响应 `message.segments` | 否 |
@@ -386,6 +386,9 @@ Hook 返回处理结果：
 | `result` / `error` | 一次性 | 写入 `{{actions.<name>.result/error}}` 的文本。 |
 | `message.text` | 全部 | 一次性 Hook 覆写 action 的 `field`，Worker Hook 覆写当前消息文本；空字符串表示清空，省略表示不改，已有媒体保留。 |
 | `message.segments` | 全部 | 替换当前消息的完整 segments；支持文本和图片，显式空数组表示清空。与 `message.text` 同时出现时优先。 |
+| `llm.system_append` | 全部 | 仅 `llm.turn.prepared` / `llm.request.prepared` 消费；追加临时 system 上下文，不写入 Session 历史；字符串数组。 |
+| `llm.temperature` / `llm.max_tokens` | 全部 | 仅 `llm.turn.prepared` / `llm.request.prepared` 消费；覆盖本次模型请求的对应参数。 |
+| `llm.extra_body` | 全部 | 仅 `llm.turn.prepared` / `llm.request.prepared` 消费；合并进本次请求 JSON，优先级最高，应只由可信 Hook 使用。 |
 | `consume` / `stop_propagation` | 一次性 | 为 `true` 时设置对应控制字段。 |
 | `conversation_id` | Worker | `waiting` 时必填的非空不透明 ID。 |
 | `expires_at` | Worker | `waiting` 时必填的 RFC 3339 时间，不得超过 `max_wait_seconds`。 |

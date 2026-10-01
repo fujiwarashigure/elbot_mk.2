@@ -62,8 +62,9 @@ func (defaultFoundationFactory) Build(ctx context.Context, req FoundationRequest
 	lifecycle.chatHistoryStore = chatHistoryStore
 	req.Profiler.Mark("chat history sqlite.New")
 	chatHistory := chatHistoryStore.Repository()
+	outboundMessages := chatHistoryStore.Outbound()
 
-	maint := maintenance.NewServiceWithConfig(logs, store, chatHistory, cfg, logger)
+	maint := maintenance.NewServiceWithConfig(logs, store, chatHistory, outboundMessages, cfg, logger)
 	cronManager := elcron.NewManager(store.CronJobs(), logger)
 	lifecycle.cronManager = cronManager
 	if err = maint.RegisterCronHandlers(cronManager); err != nil {
@@ -79,6 +80,7 @@ func (defaultFoundationFactory) Build(ctx context.Context, req FoundationRequest
 		Store:            store,
 		ChatHistoryStore: chatHistoryStore,
 		ChatHistory:      chatHistory,
+		OutboundMessages: outboundMessages,
 		CronManager:      cronManager,
 		StartCron:        lifecycle.startCron,
 		Lifecycle:        lifecycle,
@@ -89,6 +91,7 @@ func logStartupConfiguration(logger *slog.Logger, opts Options, cfg *config.Conf
 	logger.Info("elbot started",
 		"version", opts.Version,
 		"config_path", cfg.ConfigPath,
+		"services_config_path", cfg.ServicesConfigPath,
 		"providers_config_path", cfg.ProvidersConfigPath,
 		"state_config_path", cfg.StateConfigPath,
 		"elnis_config_path", cfg.ElnisConfigPath,
@@ -105,7 +108,11 @@ func logStartupConfiguration(logger *slog.Logger, opts Options, cfg *config.Conf
 func validateWorkModel(cfg *config.Config) error {
 	workModel := cfg.ModeModels["work"]
 	if workModel.Provider == "" || workModel.Model == "" {
-		fmt.Fprintf(os.Stderr, "elbot: no work model configured. Set [mode_models.work] provider/model in %s or %s\n", cfg.ProvidersConfigPath, cfg.StateConfigPath)
+		providerConfigPath := cfg.ServicesConfigPath
+		if providerConfigPath == "" {
+			providerConfigPath = cfg.ProvidersConfigPath
+		}
+		fmt.Fprintf(os.Stderr, "elbot: no work model configured. Set [mode_models.work] provider/model in %s or %s\n", providerConfigPath, cfg.StateConfigPath)
 		return fmt.Errorf("no work model configured")
 	}
 	if _, ok := cfg.Providers[workModel.Provider]; !ok {

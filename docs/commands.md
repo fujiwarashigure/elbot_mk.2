@@ -146,6 +146,27 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 
 - 自动压缩由 `[context] compact_enabled` 和 `compact_trigger_ratio` 控制。
 - 压缩会保留历史用户原话、忽略工具返回值，成功后创建并切换到独立的 `原标题 compacted-N` Session；旧 Session 不修改。
+- 压缩时每条历史用户原话最多保留 `[context] user_original_max_runes` 个字符，避免超长消息撑爆摘要。
+
+## 长消息保护
+
+发送前会估算 prompt token；如果总输入超过模型窗口预算，或单条用户消息超过单条上限，会触发长消息保护。
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*overflow` | 查看当前群的 chat/work 长消息策略。 |
+| `/*overflow --chat <策略>` | 设置 chat 模式策略。 |
+| `/*overflow --work <策略>` | 设置 work 模式策略。 |
+| `/*overflow --all <策略>` | 同时设置 chat/work。 |
+| `/*overflow reset [--chat|--work|--all]` | 恢复对应模式的全局默认。 |
+
+策略：
+
+- `reject`：默认。不调用模型，在群里返回报警，原文不写入 Session。
+- `truncate`：保留能放下的一段，追加截断标记后继续。
+- `summarize`：使用 compact 模型（未配置时回退当前模式模型）摘要后继续。
+
+权限：Bot 超级管理员和当前群群主/管理员可用。策略覆盖持久化在 `state.toml` 的 `context_overflow` 表。
 
 ## 工具与 Skill
 
@@ -217,6 +238,24 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 - `Description` 会显示在列表和详情里；规则细节只在详情里显示。
 - `reload` 会重新读取 `hooks.toml` 和各插件 `hook.toml`，并重建 Hook 注册、替换受影响的持久进程。
 - `/*hooks` 为超级管理员命令。
+
+## 长期记忆与自主学习
+
+| 命令 | 作用 |
+| --- | --- |
+| `/memory status` | 查看当前平台/会话的长期记忆条数。 |
+| `/memory recall [关键词]` | 按关键词检索当前范围的长期记忆。 |
+| `/learning status` | 查看待审和已批准的表达/黑话候选数量。 |
+| `/learning mine` | 从最近消息中挖掘待审候选。 |
+| `/learning review [pending\|approved\|rejected]` | 列出候选。 |
+| `/learning approve <id> [含义]` | 批准候选；批准后才会注入上下文。 |
+| `/learning reject <id>` | 拒绝候选。 |
+
+说明：
+
+- `/memory` 对应 `angel_memory` SQLite；
+- `/learning` 对应 `self_learning` SQLite；所有 review 类操作仅超级管理员可用；
+- 只有 `approved` 的表达/黑话会通过 `llm.turn.prepared` 注入当前请求。
 
 ## 日志和审计
 

@@ -44,6 +44,7 @@ func newContextRuntimeState(store storage.Store, sessions *session.Service, requ
 }
 
 func (r *contextRuntimeState) configure(ctxCfg config.ContextConfig, metadata config.ModelMetadataConfig, providers map[string]config.ProviderConfig, compactModel config.ModelSelection, clientFor contextmgr.ClientProvider) {
+	ctxCfg = ctxCfg.Normalized()
 	r.mu.Lock()
 	r.config = ctxCfg
 	r.modelMetadata = metadata

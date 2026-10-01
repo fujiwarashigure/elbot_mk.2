@@ -6,6 +6,10 @@
 #   docker compose build
 #   docker compose up -d
 #
+# Windows 本地 Docker Desktop 用户可改用：
+#   .\deploy\windows\elbot.ps1 init
+#   .\deploy\windows\elbot.ps1 start
+#
 # 说明：
 # - 只映射到宿主机 127.0.0.1，公网访问统一走宝塔 Nginx 反向代理。
 # - 数据持久化在 ./data，备份直接打包该目录即可。
@@ -13,14 +17,14 @@
 
 services:
   elbot:
-    image: ${ELBOT_IMAGE:-elbot:0.6.2}
+    image: ${ELBOT_IMAGE:-elbot:0.6.3}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
       target: ${ELBOT_BUILD_TARGET:-runtime}   # runtime 或 go-runtime
       args:
         GO_VERSION: ${GO_VERSION:-1.26}
-        VERSION: ${ELBOT_VERSION:-0.6.2}
+        VERSION: ${ELBOT_VERSION:-0.6.3}
         # 基础镜像（可覆盖成国内加速路径 / pin digest）。默认值必须非空，
         # 否则 ${VAR:-} 展开成空串会把 FROM 变成 ":1.26-bookworm" 而直接报错。
         GO_BASE_IMAGE: ${GO_BASE_IMAGE:-golang}

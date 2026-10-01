@@ -387,6 +387,7 @@ func (w *worker) handle(ctx context.Context, event hook.Event, continuation bool
 			return event, fmt.Errorf("decode hook event response: %w", err)
 		}
 	}
+	event = hookprotocol.ApplyLLMResult(event, result.LLM)
 	switch result.Status {
 	case "", "completed":
 	case "waiting":

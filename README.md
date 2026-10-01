@@ -112,7 +112,9 @@ Development plan and task decomposition: [devdocs](devdocs/).
 
 ## Local Fork: Deployment & Operations Enhancements
 
-This fork keeps the upstream Agent/Chatbot core and adds a production-oriented Docker deployment and operations layer for VPS / BaoTa environments. The goal is to avoid the "container is healthy, but the bot is already stuck" failure mode, without ever implementing "kill the process whenever CPU is high".
+Current fork version: `0.6.3`.
+
+This fork keeps the upstream Agent/Chatbot core and adds a production-oriented Docker deployment and operations layer for VPS / BaoTa Linux environments and local Windows Docker Desktop. The goal is to avoid the "container is healthy, but the bot is already stuck" failure mode, without ever implementing "kill the process whenever CPU is high".
 
 ### Independent Health Endpoints
 
@@ -147,6 +149,31 @@ Compose maps the port only to the host loopback: `127.0.0.1:32171:32171`. The st
 - Keep `send_file_mode = "base64"` unless ElBot and OneBot share a filesystem.
 - Remote CLI server must listen on `0.0.0.0:32172` inside the container; the host still binds only `127.0.0.1` and exposes it through HTTPS/WSS reverse proxy.
 - `32170` is the Elnis entry. Elnis is disabled by default; `/healthz` on that port is only meaningful when Elnis is enabled and does not prove ElBot / model / OneBot health.
+
+### Windows Local Container Deployment (Docker Desktop)
+
+For local Windows 10/11 machines, `deploy/windows/` wraps the same `deploy/docker-compose.yml`,
+`deploy/Dockerfile`, `.env`, and `elbot doctor`; it does not introduce a second Compose stack.
+
+```powershell
+.\deploy\windows\elbot.ps1 init
+notepad .\deploy\.env
+.\deploy\windows\elbot.ps1 start
+.\deploy\windows\elbot.ps1 status
+.\deploy\windows\elbot.ps1 health
+.\deploy\windows\elbot.ps1 doctor --no-model
+.\deploy\windows\elbot.ps1 logs -Follow -Tail 200
+.\deploy\windows\elbot.ps1 install-service
+```
+
+- `start` / `stop` / `restart` / `recreate` / `logs` / `shell` control the background container;
+- `status` / `health` read `/live`, `/ready`, `/healthz`;
+- `tasks` / `metrics` / `diagnostics` read the built-in operations endpoints and automatically attach `ELBOT_OPS_TOKEN`;
+- `doctor` runs the same `elbot doctor` inside the container;
+- `backup` / `restore-verify` / `upgrade` / `rollback` reuse the existing `deploy/*.sh` scripts through Git for Windows `bash.exe`;
+- `install-service` registers the `ElBot-Docker` logon scheduled task, the Windows counterpart of `elbot-compose.service`.
+
+See [`deploy/windows/README.md`](deploy/windows/README.md) for the full guide.
 
 ### Security
 
@@ -255,6 +282,7 @@ disk_min_free_bytes = 0
 ### More Details
 
 - Deployment and watchdog guide: [`deploy/README.md`](deploy/README.md)
+- Windows local container guide: [`deploy/windows/README.md`](deploy/windows/README.md)
 - Operational config: [`docs.en/configuration.md`](docs.en/configuration.md)
 - Chinese docs: [`README.zh-CN.md`](README.zh-CN.md)
 

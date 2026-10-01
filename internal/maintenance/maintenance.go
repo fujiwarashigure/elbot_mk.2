@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"elbot/internal/config"
@@ -21,26 +22,60 @@ type Service struct {
 	logs               *logging.Manager
 	store              storage.Store
 	chatHistory        storage.ChatHistoryRepository
+	outboundMessages   storage.OutboundMessageRepository
 	sessionCleanup     config.MaintenanceCleanupConfig
 	chatHistoryCleanup config.ChatHistoryCleanupConfig
+	privacyCleanup     config.MaintenanceCleanupConfig
 	sandboxRoot        string
 	sandboxCleanup     config.MaintenanceCleanupConfig
 	report             config.DailyReportConfig
 	logger             *slog.Logger
 
+	angelMemoryRetentionDays  int
+	selfLearningRetentionDays int
+	retentionCleanups         []retentionCleanup
+
 	// Report delivers the daily report text (wired to superadmins by app).
 	Report func(ctx context.Context, text string) error
+}
+
+type retentionCleanup struct {
+	name string
+	fn   func(context.Context, time.Time) error
 }
 
 func NewService(logs *logging.Manager, store storage.Store, sessionCleanup config.MaintenanceCleanupConfig, logger *slog.Logger) *Service {
 	return &Service{logs: logs, store: store, sessionCleanup: sessionCleanup, logger: logger}
 }
 
-func NewServiceWithConfig(logs *logging.Manager, store storage.Store, chatHistory storage.ChatHistoryRepository, cfg *config.Config, logger *slog.Logger) *Service {
+func NewServiceWithConfig(logs *logging.Manager, store storage.Store, chatHistory storage.ChatHistoryRepository, outboundMessages storage.OutboundMessageRepository, cfg *config.Config, logger *slog.Logger) *Service {
 	if cfg == nil {
 		return NewService(logs, store, config.MaintenanceCleanupConfig{}, logger)
 	}
-	return &Service{logs: logs, store: store, chatHistory: chatHistory, sessionCleanup: cfg.Maintenance.SessionCleanup, chatHistoryCleanup: cfg.Maintenance.ChatHistoryCleanup, sandboxRoot: cfg.Sandbox.Root, sandboxCleanup: cfg.Maintenance.SandboxCleanup, report: cfg.Maintenance.DailyReport, logger: logger}
+	return &Service{
+		logs:                      logs,
+		store:                     store,
+		chatHistory:               chatHistory,
+		outboundMessages:          outboundMessages,
+		sessionCleanup:            cfg.Maintenance.SessionCleanup,
+		chatHistoryCleanup:        cfg.Maintenance.ChatHistoryCleanup,
+		privacyCleanup:            cfg.Maintenance.PrivacyCleanup,
+		sandboxRoot:               cfg.Sandbox.Root,
+		sandboxCleanup:            cfg.Maintenance.SandboxCleanup,
+		report:                    cfg.Maintenance.DailyReport,
+		logger:                    logger,
+		angelMemoryRetentionDays:  cfg.AngelMemory.RetentionDays,
+		selfLearningRetentionDays: cfg.SelfLearning.RetentionDays,
+	}
+}
+
+// RegisterRetentionCleanup adds a feature-owned cleanup callback. The callback
+// is called by maintenance.privacy_cleanup with its own cutoff.
+func (s *Service) RegisterRetentionCleanup(name string, fn func(context.Context, time.Time) error) {
+	if s == nil || fn == nil {
+		return
+	}
+	s.retentionCleanups = append(s.retentionCleanups, retentionCleanup{name: strings.TrimSpace(name), fn: fn})
 }
 
 func (s *Service) RegisterCronHandlers(manager *elcron.Manager) error {
@@ -75,6 +110,11 @@ func (s *Service) RegisterCronHandlers(manager *elcron.Manager) error {
 	}); err != nil {
 		return err
 	}
+	if err := manager.RegisterHandler("maintenance.privacy_cleanup", func(ctx context.Context, job storage.CronJob) error {
+		return s.RunPrivacyCleanup(ctx)
+	}); err != nil {
+		return err
+	}
 	if err := manager.RegisterHandler("maintenance.daily_report", func(ctx context.Context, job storage.CronJob) error {
 		return s.RunDailyReport(ctx)
 	}); err != nil {
@@ -100,6 +140,9 @@ func SetupCron(ctx context.Context, manager *elcron.Manager, cfg *config.Config)
 		return err
 	}
 	if err := upsertOrDisable(ctx, manager, true, "system.maintenance.media_cleanup", "maintenance.media_cleanup", cfg.Maintenance.SandboxCleanup.Schedule); err != nil {
+		return err
+	}
+	if err := upsertOrDisable(ctx, manager, cfg.Maintenance.PrivacyCleanup.Enabled, "system.maintenance.privacy_cleanup", "maintenance.privacy_cleanup", cfg.Maintenance.PrivacyCleanup.Schedule); err != nil {
 		return err
 	}
 	if err := upsertOrDisable(ctx, manager, cfg.Maintenance.DailyReport.Enabled, "system.maintenance.daily_report", "maintenance.daily_report", cfg.Maintenance.DailyReport.Schedule); err != nil {
@@ -151,12 +194,53 @@ func (s *Service) RunChatHistoryCleanup(ctx context.Context) error {
 		s.warn("maintenance chat history cleanup failed", "error", err, "retention_days", s.chatHistoryCleanup.RetentionDays)
 		return err
 	}
+	outboundDeleted := 0
+	if s.outboundMessages != nil {
+		var err error
+		outboundDeleted, err = s.outboundMessages.DeleteBefore(ctx, cutoff)
+		if err != nil {
+			s.warn("maintenance outbound message cleanup failed", "error", err, "retention_days", s.chatHistoryCleanup.RetentionDays)
+			return err
+		}
+	}
 	if s.Media != nil {
 		if err := s.Media.ReconcileHistory(ctx); err != nil {
 			return err
 		}
 	}
-	s.info("maintenance chat history cleanup completed", "deleted", deleted, "retention_days", s.chatHistoryCleanup.RetentionDays)
+	s.info("maintenance chat history cleanup completed", "deleted", deleted, "outbound_deleted", outboundDeleted, "retention_days", s.chatHistoryCleanup.RetentionDays)
+	return nil
+}
+
+func (s *Service) RunPrivacyCleanup(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	now := time.Now()
+	deleted := map[string]int{}
+	for _, cleanup := range s.retentionCleanups {
+		cutoff := now
+		switch {
+		case strings.Contains(cleanup.name, "angel"):
+			if s.angelMemoryRetentionDays <= 0 {
+				continue
+			}
+			cutoff = now.AddDate(0, 0, -s.angelMemoryRetentionDays)
+		case strings.Contains(cleanup.name, "learning"):
+			if s.selfLearningRetentionDays <= 0 {
+				continue
+			}
+			cutoff = now.AddDate(0, 0, -s.selfLearningRetentionDays)
+		default:
+			cutoff = now.AddDate(0, 0, -180)
+		}
+		if err := cleanup.fn(ctx, cutoff); err != nil {
+			s.warn("maintenance privacy cleanup failed", "feature", cleanup.name, "error", err)
+			continue
+		}
+		deleted[cleanup.name]++
+	}
+	s.info("maintenance privacy cleanup completed", "features", len(deleted), "angel_memory_retention_days", s.angelMemoryRetentionDays, "self_learning_retention_days", s.selfLearningRetentionDays)
 	return nil
 }
 

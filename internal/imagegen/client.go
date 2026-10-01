@@ -124,12 +124,19 @@ func (c Config) Normalize() Config {
 	return c
 }
 
+// Reference is one input image passed to the generation endpoint.
+type Reference struct {
+	Data     []byte
+	MIMEType string
+}
+
 // Request is one image generation request.
 type Request struct {
 	Prompt        string
 	Size          string
 	Quality       string
 	N             int
+	References    []Reference
 	ReferenceData []byte
 	ReferenceMIME string
 }
@@ -244,9 +251,26 @@ func (c *Client) Generate(ctx context.Context, req Request) (*Result, error) {
 	if format := strings.TrimSpace(c.cfg.ResponseFormat); format != "" {
 		payload["response_format"] = format
 	}
-	if c.cfg.SupportsReference && len(req.ReferenceData) > 0 {
-		mime := firstNonEmpty(req.ReferenceMIME, "image/png")
-		payload[c.cfg.ReferenceField] = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(req.ReferenceData)
+	references := req.References
+	if len(references) == 0 && len(req.ReferenceData) > 0 {
+		references = []Reference{{Data: req.ReferenceData, MIMEType: req.ReferenceMIME}}
+	}
+	if c.cfg.SupportsReference && len(references) > 0 {
+		values := make([]string, 0, len(references))
+		for _, reference := range references {
+			if len(reference.Data) == 0 {
+				continue
+			}
+			mime := firstNonEmpty(reference.MIMEType, "image/png")
+			values = append(values, "data:"+mime+";base64,"+base64.StdEncoding.EncodeToString(reference.Data))
+		}
+		switch len(values) {
+		case 0:
+		case 1:
+			payload[c.cfg.ReferenceField] = values[0]
+		default:
+			payload[c.cfg.ReferenceField] = values
+		}
 	}
 	for key, value := range c.cfg.ExtraPayload {
 		payload[key] = value

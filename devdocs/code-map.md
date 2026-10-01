@@ -47,7 +47,7 @@ rg -n "func Run|service run|completion|--client|RunCron" cmd internal/app intern
 常用搜索：
 
 ```bash
-rg -n "ELBOT_CONFIG_FILE|providers.toml|state.toml|tool_tags.toml|TextHandler|audit" internal/config internal/logging docs/configuration.md
+rg -n "ELBOT_CONFIG_FILE|services.toml|providers.toml|state.toml|tool_tags.toml|TextHandler|audit" internal/config internal/logging docs/configuration.md
 ```
 
 <!-- locator:health-ops -->
@@ -58,7 +58,7 @@ rg -n "ELBOT_CONFIG_FILE|providers.toml|state.toml|tool_tags.toml|TextHandler|au
 先看：
 
 - `internal/health/`：健康状态、`/live`、`/ready`、`/healthz`、extra handler token；`state.go` 区分进程存活、readiness、调度心跳、平台和模型状态。
-- `internal/app/health.go`、`ops_health.go`、`health_llm.go`、`health_handler.go`：启动健康接口、读取 `ELBOT_HEALTH_*` / `ELBOT_OPS_TOKEN` / 重启原因文件、组装 `/metrics` 与 `/diagnostics`。
+- `internal/app/health.go`、`ops_health.go`、`health_llm.go`、`health_handler.go`：启动健康接口、读取 `ELBOT_HEALTH_*` / `ELBOT_OPS_TOKEN` / 重启原因文件、组装 `/metrics`、`/diagnostics` 以及只读插件状态 `/plugins/memory`、`/plugins/learning`。
 - `internal/app/doctor.go`、`internal/launcher/cli.go`、`cmd/elbot/main.go`：`elbot doctor` 配置/端口/平台/模型验收与 `--e2e` CLI 真实消息往返。
 - `internal/character/store.go`、`write.go`：角色/图片 `version`、`source` 与 `Manifest`/`WriteManifest` 备份清单。
 - `internal/app/breaker_llm.go`、`internal/app/models.go`、`internal/llm/breaker/`：Provider 熔断、`fallback_mode` / `fallback_on_error`、备用 Provider 和总超时。
@@ -160,6 +160,13 @@ rg -n "Phase|Request|Cancel|pending|confirm|runtime status|sending" internal/req
 - `internal/tool/runtimeinfo/`：工具运行期常用信息入口，如配置路径、sandbox、文件发送配置、时间源和规则卡转发。
 - `internal/toolrun/`：工具调用中间层、工具视图、命名解析、风险确认，以及实际执行前的 Session 工具参数媒体引用。
 - `internal/tool/builtin/`：内置工具。
+- `internal/tool/builtin/group_analysis.go`：`group_analysis` 工具，读取本地历史并输出群统计，可选 LLM 摘要。
+- `internal/tool/builtin/angel_memory.go`：`angel_remember` / `angel_recall` 工具。
+- `internal/tool/builtin/self_learning.go`：`self_learning_review` 工具。
+- `internal/groupanalysis/`：群分析 clean-room 统计与可选 `Summarizer`；只依赖 `chat_history` / `outbound_messages`。
+- `internal/angelmemory/`：clean-room SQLite 长期记忆、召回和上下文构造。
+- `internal/selflearning/`：clean-room 观察、候选挖掘、review-before-apply 和上下文构造。
+- `internal/agent/commands/memory_learning.go`：`/memory`、`/learning` 管理命令。
 - `internal/tool/builtin/file_tools_ast.go`：`read_file` 的 Go/Shell AST 名称搜索与结果渲染。
 - `internal/agent/tools.go`：Agent 工具运行态和命令依赖适配。
 - `internal/agent/toolrun_*.go`：Agent 到 ToolRun 的桥接。
@@ -269,7 +276,9 @@ rg -n "Output|SendChat|SendNotice|Stream|Reasoning|emoticon|receipt" internal/de
 
 先看：
 
-- `internal/platform/platform.go`：平台抽象。
+- `internal/platform/platform.go`：平台抽象，以及可选的群历史/群目录/头像/群素材能力接口。
+- `internal/platform/qq-onebot/capabilities.go`：OneBot 可选群历史、群信息、成员列表和头像 URL 能力。
+- `internal/platform/telegram/capabilities.go`：Telegram 可选群信息和管理员列表能力；历史与全量成员回退本地历史。
 - `internal/platform/media.go`：Chat History 原始有序 segments 编解码与敏感来源清洗。
 - `internal/platform/refcontext/`：按输出索引、Chat History、平台兜底恢复引用；自己 Session 的最后一条 assistant 自动 Resume，较早 assistant 自动 Fork。
 - `internal/platform/config.go`：平台配置解码。
@@ -352,9 +361,9 @@ rg -n "ChatCompletion|Stream|SSE|reasoning|usage|ToolCall|MessageSegment|Models"
 
 先看：
 
-- `internal/storage/storage.go`：领域模型和 repository interfaces；Message 使用 `content` 作为纯文本快速路径，`segments` 保存可选多模态正文。
+- `internal/storage/storage.go`：领域模型和 repository interfaces；Message 使用 `content` 作为纯文本快速路径，`segments` 保存可选多模态正文；可选 `ChatHistoryRangeRepository` 提供批量历史，`OutboundMessageRepository` 保存实际发送的 assistant 消息。
 - `internal/storage/id.go`、`internal/storage/time.go`：通用 ID/时间 helper。
-- `internal/storage/sqlite/`：SQLite store、migration 和 repository 实现。
+- `internal/storage/sqlite/`：SQLite store、migration 和 repository 实现；`chat_history_repository.go` 内含 `outbound_messages` 表。
 
 常用搜索：
 

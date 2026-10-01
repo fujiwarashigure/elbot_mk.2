@@ -164,6 +164,38 @@ type ChatMessage struct {
 	CreatedAt                time.Time
 }
 
+// OutboundMessage is an assistant message that was actually sent to a platform.
+// It is kept separately from inbound chat history so learning and analysis can
+// reconstruct user -> assistant pairs without polluting the normal history.
+type OutboundMessage struct {
+	Seq               int64
+	ID                string
+	Platform          string
+	PlatformScopeID   string
+	PlatformMessageID string
+	Text              string
+	Segments          string
+	CreatedAt         time.Time
+}
+
+type ChatHistoryRangeRequest struct {
+	Platform        string
+	PlatformScopeID string
+	Since           *time.Time
+	Until           *time.Time
+	AfterSeq        int64
+	Limit           int
+}
+
+type OutboundMessageRangeRequest struct {
+	Platform        string
+	PlatformScopeID string
+	Since           *time.Time
+	Until           *time.Time
+	AfterSeq        int64
+	Limit           int
+}
+
 type Media struct {
 	Deleting       bool
 	ID             string
@@ -444,6 +476,20 @@ type ChatHistoryRepository interface {
 	GetByPlatformMessage(ctx context.Context, platform, scopeID, platformMessageID string) (*ChatMessage, error)
 	Search(ctx context.Context, req ChatHistorySearchRequest) ([]ChatMessage, error)
 	Around(ctx context.Context, req ChatHistoryAroundRequest) ([]ChatMessage, error)
+	DeleteBefore(ctx context.Context, cutoff time.Time) (int, error)
+}
+
+// ChatHistoryRangeRepository is an optional capability for bulk, time-windowed
+// history access. It is separate from ChatHistoryRepository so existing fakes
+// and adapters keep compiling while implementations opt in.
+type ChatHistoryRangeRepository interface {
+	ListRange(ctx context.Context, req ChatHistoryRangeRequest) ([]ChatMessage, error)
+}
+
+// OutboundMessageRepository stores assistant messages that were actually sent.
+type OutboundMessageRepository interface {
+	Append(ctx context.Context, message *OutboundMessage) error
+	ListRange(ctx context.Context, req OutboundMessageRangeRequest) ([]OutboundMessage, error)
 	DeleteBefore(ctx context.Context, cutoff time.Time) (int, error)
 }
 

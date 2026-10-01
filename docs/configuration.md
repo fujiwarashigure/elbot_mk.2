@@ -1,6 +1,6 @@
 # 配置说明
 
-ElBot 使用一个主配置入口加载应用配置、Provider 配置和运行态状态。默认配置由程序内置 assets 生成到平台配置目录；已有配置文件不会被覆盖。
+ElBot 使用一个主配置入口加载应用配置和运行态状态；LLM Provider、生图等稳定服务配置默认集中到只读的 `services.toml`。默认配置由程序内置 assets 生成到平台配置目录；已有配置文件不会被覆盖。
 
 ## 配置文件职责
 
@@ -8,8 +8,11 @@ ElBot 使用一个主配置入口加载应用配置、Provider 配置和运行�
 
 | 文件或目录 | 职责 |
 | --- | --- |
+| `app.toml` | 主配置入口，保存行为、平台、工具、安全、维护等应用配置，并记录各独立配置文件的相对路径。 |
+| `services.toml` | 共享只读服务配置：`[providers.*]`、`[model_metadata]`、`[model_profiles]`、`[image_generation]`。多个服务可以挂载同一个文件；密钥仍只放在 `.env`。 |
+| `providers.toml` | 旧版 LLM Provider 配置；仍兼容，只有 `[config_files].providers` 指定时才读取。新部署建议统一使用 `services.toml`。 |
 | `elnis.toml` | Elnis 监听枢纽配置，保存 HTTP、token、delivery、allowed_tools 和 Elwisp 策略。 |
-| `state.toml` | 运行态状态，例如默认 Session 模式、chat/work/compact/naming 模型选择。 |
+| `state.toml` | 运行态状态，例如默认 Session 模式、chat/work/compact/naming 模型选择。 **该文件会被 ElBot 运行时回写，不能和 `services.toml` 共用。** |
 | `tool_tags.toml` | 给工具添加 tag 和 prompt 的配置文件。 |
 | `SOUL.md` | Agent 的 System Prompt 来源文件。 |
 | `.env` | 可选，本地密钥文件，不建议提交；首次自动生成的是 `.env.example`，不会直接生成 `.env`。 |
@@ -44,7 +47,9 @@ go run ./cmd/elbot
 
 ```toml
 [config_files]
-providers = "providers.toml"
+services = "services.toml"
+# providers 仅用于兼容旧部署；services 存在时不再读取 providers.toml。
+# providers = "providers.toml"
 state = "state.toml"
 elnis = "elnis.toml"
 
@@ -125,6 +130,73 @@ systemd 用户服务没有显式设置 PATH 时，ElBot 使用服务管理器提
 
 配置根 `.env` 或 systemd 环境在重启 ElBot 后生效。`plugins/.env` 和插件 `.env` 在启动及 `/*hooks reload` 时重新读取，reload 会按新环境重建 Worker；文件不存在时视为空配置。
 
+
+## 共享服务配置 services.toml
+
+`services.toml` 是只读的集中服务配置，适合 ElBot 与其他服务读取同一份端点定义。`app.toml` 通过 `[config_files].services` 指向它：
+
+```toml
+[config_files]
+services = "services.toml"
+state = "state.toml"
+```
+
+文件内容按 section 划分，当前支持：
+
+```toml
+# LLM Provider：与旧 providers.toml 的 [providers.*] 完全兼容
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-4o-mini"]
+
+[model_metadata]
+default_context_window = 256000
+
+# 可选：@model: 命名 profile 也可以集中在这里
+[model_profiles.fast]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+aliases = ["快"]
+
+# 生图基础配置与命名 profile
+[image_generation]
+enabled = false
+base_url = "https://your-relay.example.com/v1"
+api_key_env = "IMAGE_API_KEY"
+model = "gpt-image-2.5"
+
+[image_generation.profiles.fast]
+quality = "medium"
+```
+
+说明：
+
+- 读取优先级：`services.toml` 中存在该 section 时覆盖旧 `providers.toml` / `app.toml` 中的同名配置；不存在时保留旧文件的值，便于逐步迁移。
+- `state.toml` 不能和 `services.toml` 共用。`state.toml` 会被 ElBot 运行时回写，共用会导致 `SaveState` 把其他静态配置覆盖掉；ElBot 加载时也会直接拒绝这种配置。
+- 密钥不要写入 `services.toml`。继续使用 `api_key_env` 指向进程环境或配置根 `.env`。
+- 其他服务可以只读挂载同一个文件，只读取自己需要的 section；建议使用 `:ro`。例如：
+
+```yaml
+services:
+  elbot:
+    volumes:
+      - ./data/config/elbot/services.toml:/data/config/elbot/services.toml:ro
+      - ./data/config/elbot/state.toml:/data/config/elbot/state.toml
+
+  image-adapter:
+    volumes:
+      - ./data/config/elbot/services.toml:/etc/elbot/services.toml:ro
+```
+
+- 修改 `services.toml` 后需要重启或 recreate ElBot 容器；当前不热加载该文件。
+- 旧部署不配置 `[config_files].services`、继续使用 `[config_files].providers = "providers.toml"` 时，行为与旧版本一致。
+
+
 ## 运维健康接口
 
 设置 `ELBOT_HEALTH_ADDR`（进程环境或配置根 `.env`）后，ElBot 会启动一个**不依赖 Elnis** 的独立 HTTP 健康接口：
@@ -166,13 +238,35 @@ ELBOT_HEALTH_LIVE_STALE_SECONDS=90
 [resident_memory]
 core_max_units = 200
 normal_max_units = 300
+
+# P1/P2 normal 写入保护；显式写 0 可关闭对应限制。
+normal_write_min_interval_seconds = 5
+normal_write_window_seconds = 60
+normal_write_max_per_window = 6
+normal_max_lines = 20
+normal_max_units_per_entry = 80
+normal_block_instruction_patterns = true
 ```
 
-长度单位 `units` 可以近似理解为“中文按字数、英文按单词”：中日韩字符按单字计数，英文/数字连续片段按一个词计数。core 是高风险核心记忆，普通用户修改自己的 core 时也必须由本人确认。normal 是可直接整理的低风险普通记忆，不需要确认；注入 Prompt 时两段会合并成一段自然文本。
+长度单位 `units` 可以近似理解为“中文按字数、英文按单词”：中日韩字符按单字计数，英文/数字连续片段按一个词计数。core 是高风险核心记忆，普通用户修改自己的 core 时也必须由本人确认。normal 是可直接整理的低风险普通记忆，不需要确认；注入 Prompt 时 core 与 normal 会分行展示，normal 的每条记忆渲染为一条 `-` 列表项，并包在 `<resident_memory>` 边界内，同时声明为用户数据而非系统指令。记忆内容中的尖括号会被转义，防止内容提前结束或伪造边界标签。
+
+normal 以“每条一行、一行一件事”的结构化方式保存：写入时会去掉 `-` / `*` / `1.` 等列表前缀、去掉空行、合并多余空白、按大小写不敏感去重，再用换行连接。`resident_memory_read` 返回的 normal 就是这种一行一条的形式。
+
+normal 写入还有服务端保护：
+
+- `normal_write_min_interval_seconds`：同一平台、同一 actor 两次 normal 写入的最小间隔；0 关闭。
+- `normal_write_window_seconds` + `normal_write_max_per_window`：窗口内最多写入次数；任一项为 0 关闭。
+- 校验失败、内容被拒绝的写入不会消耗写入次数。
+- `normal_max_lines`：normal 最大条目数（每条一行）；0 关闭。
+- `normal_max_units_per_entry`：单条 normal 的最大长度；0 关闭。
+- `normal_block_instruction_patterns`：逐条拒绝明显的指令类内容（默认 true）；false 只关闭模式匹配，控制字符、条目数和单条长度检查仍生效。
+- 这些限制只作用于 normal；core 仍由 high risk + 确认流程控制。
+
+`memories.toml` 采用原子写入：先写同目录临时文件并 `fsync`，再 `rename` 覆盖目标文件，最后尽力 `fsync` 目录。崩溃或断电时只会留下完整的旧文件或完整的新文件，不会出现被截断的记忆文件。写入前还会比对文件状态；如果检测到外部（例如手工编辑或恢复脚本）在读取和写入之间修改了 `memories.toml`，会重新加载后再应用本次修改，避免覆盖外部改动。
 
 ## Provider 配置
 
-Provider 写在 `providers.toml`：
+Provider 写在 `services.toml`（旧部署仍可写在 `providers.toml`，由 `[config_files].providers` 指定）：
 
 ```toml
 [providers.deepseek]
@@ -204,6 +298,7 @@ default_context_window = 256000
 - `[providers.<name>.model_configs."<model>"]` 为特定模型配置 `context_window` 和 `extra_payload`，两者都是可选的。
 - `extra_payload` 会合并到 LLM 请求 JSON 中，模型级覆盖 Provider 级。
 - `[model_metadata]` 的 `default_context_window` 是全局回退值，默认 `256000`，没有在 `model_configs` 里配 `context_window` 时使用。
+- 新部署建议把本节所有内容放进 `services.toml`；如果保留旧 `providers.toml`，只有 `[config_files].providers` 指定时才读取。
 
 ## 内置 Web 工具配置
 
@@ -505,13 +600,27 @@ retention_days = 180
 [context]
 compact_enabled = true
 compact_trigger_ratio = 0.8
+
+# 发送前 prompt 预算：max_prompt_ratio 限制输入占模型窗口的比例。
+max_prompt_ratio = 0.8
+# 为模型输出预留的 token；0 表示根据窗口自动计算。
+reserve_output_tokens = 0
+# 单条用户消息占模型窗口的比例上限；超过会触发长消息保护。
+single_message_max_ratio = 0.5
+# 压缩上下文时，每条历史用户原话保留的最大字符数。
+user_original_max_runes = 4000
+# 默认长消息策略：reject / truncate / summarize。
+overflow_mode = "reject"
 ```
 
 - 开启后，Session 上下文接近窗口上限时会触发压缩。
 - 也可以通过 `/*compact` 手动压缩当前 Session。
 - 压缩成功后会切换到独立的新 Session，不修改原 Session 的历史。
+- 发送前会估算 system prompt、历史、当前用户消息和工具 schema 的总 token。超过 `max_prompt_ratio` 或单条消息超过 `single_message_max_ratio` 时触发长消息保护。
+- `reject` 默认不调用模型，直接在群里返回报警；`truncate` 保留能放下的一段并继续；`summarize` 使用 compact 模型（未配置时回退当前模式模型）自动摘要后继续。
+- 群管理员可用 `/*overflow --chat <策略>`、`/*overflow --work <策略>` 或 `/*overflow --all <策略>` 覆盖当前群设置，`/*overflow reset ...` 恢复全局默认。该覆盖写入 `state.toml` 的 `context_overflow` 表。
 
-模型窗口在 `providers.toml` 的 `model_configs` 中配置：
+模型窗口在 `services.toml`（旧部署为 `providers.toml`）的 `model_configs` 中配置：
 
 ```toml
 [providers.deepseek.model_configs."deepseek-chat"]
@@ -554,7 +663,7 @@ cli = ["local"]
 - 超级管理员的确认阈值由 `superadmin_confirm_risk` 配置。
 - CLI 默认本地用户 `local` 是超级管理员。
 - `tool_tags.toml` 用来配置 `@tool:<tag>` 可注入的工具组，以及 tag 激活后追加到 system prompt 的工具使用策略。
-- 如果向普通用户开放生图，建议保持 `[image_generation] superadmin_only = true`，或在中转站按 Key 设置额度、限速和每日上限；详见[生图服务](image-generation.md#权限与费用)。
+- 如果向普通用户开放生图，建议保持 `services.toml` 的 `[image_generation] superadmin_only = true`，或在中转站按 Key 设置额度、限速和每日上限；详见[生图服务](image-generation.md#权限与费用)。
 
 ### `tool_tags.toml`
 
@@ -681,7 +790,7 @@ image_keywords = ["image", "img", "生图", "出图"]
 tool_keywords = ["use", "工具", "用工具"]
 ```
 
-**每个 profile 可以配中文/短别名**，声明时就不用打全名：
+**每个 profile 可以配中文/短别名**，声明时就不用打全名。推荐把 `[model_profiles.*]` 和 `[image_generation.*]` 放进 `services.toml`，把 `[tool_profiles.*]` 和 `[turn_directives]` 留在 `app.toml`：
 
 ```toml
 # 模型 profile：默认模型仍是 state.toml 的 mode_models.*
@@ -732,6 +841,75 @@ aliases = ["高清", "fast"]
 - `#生图:` 只影响 `image_generate`；也可以直接给工具传 `profile` 参数。
 - `#工具:` 注入的工具仍要经过原有的角色/风险校验，不会绕过安全策略。
 
+## 群分析
+
+```toml
+[group_analysis]
+enabled = true
+max_messages = 5000
+report_enabled = false
+report_schedule = "0 9 * * *"
+# report_platform = "qqonebot"
+# report_scope_id = "group:123456"
+report_days = 1
+```
+
+- `enabled`：默认 `true`；为 `false` 时不注册 `group_analysis` 工具。
+- `max_messages`：单次统计最多读取多少条本地历史消息，默认 5000。工具参数 `limit` 不能超过它。
+- `report_enabled`：默认 `false`；开启后注册 Cron 日报，把统计和可选 LLM 摘要发送到 `report_platform` / `report_scope_id`。
+- `report_schedule`：Cron 表达式，默认 `0 9 * * *`。
+- `report_days`：日报统计最近多少天，默认 1。
+- 摘要使用当前默认 Session 模式对应的默认模型（`state.toml` 的 `mode_models` / `session.default_mode`）；不再单独引入 work 模型 slot。
+- 当前实现只读取本地 `chat_history` 与 `outbound_messages`，不复制第三方群分析插件的模板、图片或 Prompt。
+- OneBot 适配器额外实现可选 `get_group_msg_history` / `get_group_info` / `get_group_member_list` 能力；Telegram 实现群信息和管理员列表；平台不提供时调用方回退到本地历史。
+
+## 长期记忆
+
+```toml
+[angel_memory]
+enabled = true
+retention_days = 365
+```
+
+- 使用本地 SQLite `angel_memory.db`；
+- 提供 `angel_remember` / `angel_recall` 工具；
+- `llm.turn.prepared` 会按当前平台/会话检索记忆并追加临时 system 上下文，不写入 Session 历史；
+- `retention_days <= 0` 时不做时间清理。
+
+## 自主学习
+
+```toml
+[self_learning]
+enabled = true
+retention_days = 365
+min_count = 3
+```
+
+- 使用本地 SQLite `self_learning.db`；
+- 观察消息并生成表达/黑话候选；
+- 候选先进入 `pending`，只有管理员通过 `/learning` 或 `self_learning_review` 批准为 `approved` 后才会注入上下文；
+- `/learning` 和 `self_learning_review` 仅超级管理员可用。
+
+## 隐私清理
+
+```toml
+[maintenance.privacy_cleanup]
+enabled = true
+schedule = "45 4 * * *"
+```
+
+- 按 `[angel_memory].retention_days` 和 `[self_learning].retention_days` 清理对应 SQLite；
+- 具体保留策略由各功能 section 控制。
+
+启用 `ELBOT_HEALTH_ADDR` 后，额外提供只读管理 API（和 `/tasks`、`/metrics` 一样受 `ELBOT_OPS_TOKEN` 保护）：
+
+```text
+GET /plugins/memory?platform=qqonebot&scope_id=group:123456
+GET /plugins/learning?platform=qqonebot&scope_id=group:123456
+```
+
+返回指定范围的记忆条数、待审/已批准候选数量。
+
 ## 角色素材库
 
 ```toml
@@ -746,6 +924,8 @@ root = "characters"
 目录结构、可见性、工具和 `@char:<id>` 用法见 [角色素材库](character-library.md)。
 
 ## 生图服务
+
+生图配置放在 `services.toml` 的 `[image_generation]`（旧部署仍可放在 `app.toml`）：
 
 ```toml
 [image_generation]

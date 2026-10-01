@@ -10,13 +10,19 @@ set -euo pipefail
 ARCHIVE="${1:-}"
 TMP_DIR=""
 STRICT="${RESTORE_VERIFY_STRICT:-1}"
+START_MODE="${RESTORE_VERIFY_START:-auto}"
+START_IMAGE="${RESTORE_VERIFY_IMAGE:-}"
+VERIFY_CONTAINER=""
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; printf 'restore_verify: failed\n' >&2; exit 1; }
 
 cleanup() {
     local status=$?
+    if [ -n "${VERIFY_CONTAINER}" ] && command -v docker >/dev/null 2>&1; then
+        docker rm -f "${VERIFY_CONTAINER}" >/dev/null 2>&1 || true
+    fi
     if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
         rm -rf "${TMP_DIR}"
     fi
@@ -32,15 +38,19 @@ log "解压备份到隔离目录 ${TMP_DIR}"
 tar -xzf "${ARCHIVE}" -C "${TMP_DIR}"
 
 CHECK_MANIFEST="skipped"
+CHECK_TOML="skipped"
+CHECK_DATABASE="skipped"
+CHECK_MEDIA_PATHS="skipped"
+CHECK_START="skipped"
 MANIFEST="${ARCHIVE}.manifest"
 if [ ! -f "${MANIFEST}" ] || [ ! -s "${MANIFEST}" ]; then
     if [ "${STRICT}" = "1" ]; then
-        die "缺少备份清单 ${MANIFEST}，无法校验文件完整性；确认不需要时可用 RESTORE_VERIFY_STRICT=0 降级"
+        die "缺少备份清单 ${MANIFEST}，严格模式拒绝跳过文件完整性校验；确认不需要时可用 RESTORE_VERIFY_STRICT=0 降级"
     fi
     warn "备份没有清单，跳过文件级校验"
 elif ! command -v sha256sum >/dev/null 2>&1; then
     if [ "${STRICT}" = "1" ]; then
-        die "备份带有 manifest，但宿主机没有 sha256sum，无法校验文件完整性"
+        die "备份带有 manifest，但宿主机没有 sha256sum，严格模式拒绝跳过文件完整性校验"
     fi
     warn "备份带有 manifest，但未安装 sha256sum，跳过文件级校验"
 else
@@ -62,33 +72,106 @@ for candidate in "${DATA_DIR}/config/elbot" "${DATA_DIR}/config"; do
     fi
 done
 [ -n "${CONFIG_DIR}" ] || die "备份中找不到 config/elbot/app.toml，配置无法恢复"
-# app.toml 与 providers.toml 是启动必需文件（缺失会直接加载失败），state.toml 可选。
-for required in app.toml providers.toml; do
-    [ -s "${CONFIG_DIR}/${required}" ] || die "缺少必需的配置文件 ${required}（或文件为空），恢复后无法启动"
-done
+# app.toml 必需；服务配置既可能是新的 services.toml，也可能是旧 providers.toml。
+[ -s "${CONFIG_DIR}/app.toml" ] || die "缺少必需的主配置 app.toml（或文件为空），恢复后无法启动"
+if [ ! -s "${CONFIG_DIR}/services.toml" ] && [ ! -s "${CONFIG_DIR}/providers.toml" ]; then
+    die "缺少必需的服务配置 services.toml 或 providers.toml（或文件为空），恢复后无法启动"
+fi
 for optional in state.toml; do
     [ -s "${CONFIG_DIR}/${optional}" ] || warn "缺少配置文件 ${optional}，将使用内置默认值"
 done
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import tomllib' >/dev/null 2>&1; then
-    if ! python3 - "${CONFIG_DIR}" <<'PYTOML'
-import pathlib, sys, tomllib
+    if ! python3 - "${CONFIG_DIR}" "${DATA_DIR}" <<'PYTOML'
+import os
+import pathlib
+import sys
+import tomllib
+
 root = pathlib.Path(sys.argv[1])
+data_root = pathlib.Path(sys.argv[2])
 bad = []
-for path in sorted(root.glob("*.toml")):
+
+
+def parse(path):
     with path.open("rb") as fh:
-        try:
-            tomllib.load(fh)
-        except Exception as exc:  # noqa: BLE001
-            bad.append(f"{path.name}: {exc}")
+        return tomllib.load(fh)
+
+
+def normalize(value):
+    value = str(value)
+    # 容器内绝对路径 /data/... 映射回恢复出来的 data 目录。放在 isabs 之前，
+    # 这样在 Windows 上做脚本自测时也能正确识别。
+    if value == "/data":
+        return os.path.normpath(str(data_root))
+    if value.startswith("/data/"):
+        return os.path.normpath(os.path.join(str(data_root), value[len("/data/") :]))
+    if os.path.isabs(value):
+        return os.path.normpath(value)
+    return os.path.normpath(os.path.join(str(root), value))
+
+
+for path in sorted(root.glob("*.toml")):
+    try:
+        parse(path)
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"{path.name}: {exc}")
+
+# app.toml 引用的服务配置必须存在；state.toml 必须和只读配置分离。
+try:
+    app = parse(root / "app.toml")
+except Exception as exc:  # noqa: BLE001
+    bad.append(f"app.toml: {exc}")
+    app = {}
+if not isinstance(app, dict):
+    app = {}
+config_files = app.get("config_files") or {}
+if not isinstance(config_files, dict):
+    config_files = {}
+services = str(config_files.get("services") or "")
+providers = str(config_files.get("providers") or "")
+state = str(config_files.get("state") or "")
+
+service_path = normalize(services) if services else ""
+provider_path = normalize(providers) if providers else ""
+if services:
+    if not os.path.isfile(service_path) or os.path.getsize(service_path) == 0:
+        bad.append(f"config_files.services 指向的文件不存在或为空: {service_path}")
+elif providers:
+    if not os.path.isfile(provider_path) or os.path.getsize(provider_path) == 0:
+        bad.append(f"config_files.providers 指向的文件不存在或为空: {provider_path}")
+else:
+    default_provider = normalize("providers.toml")
+    if not os.path.isfile(default_provider) or os.path.getsize(default_provider) == 0:
+        bad.append("app.toml 未配置 config_files.services/providers，且默认 providers.toml 不存在或为空")
+
+if state:
+    shared = {"app": normalize("app.toml")}
+    if services:
+        shared["services"] = service_path
+    if providers:
+        shared["providers"] = provider_path
+    for key in ("elnis", "tool_tags"):
+        value = str(config_files.get(key) or "")
+        if value:
+            shared[key] = normalize(value)
+    state_path = normalize(state)
+    for name, shared_path in shared.items():
+        if state_path == shared_path:
+            bad.append(f"config_files.state 不能与 {name} 共用同一个文件: {state_path}")
+
 if bad:
-    print("TOML 解析失败: " + "; ".join(bad), file=sys.stderr)
+    print("配置检查失败: " + "; ".join(bad), file=sys.stderr)
     sys.exit(1)
 PYTOML
     then
-        die "配置 TOML 解析失败：${CONFIG_DIR}"
+        die "配置检查失败：${CONFIG_DIR}"
     fi
-    log "配置 TOML 解析通过"
+    CHECK_TOML="passed"
+    log "配置解析与引用检查通过"
 else
+    if [ "${STRICT}" = "1" ]; then
+        die "未找到带 tomllib 的 python3，严格模式拒绝跳过 TOML 解析检查；确认不需要时可用 RESTORE_VERIFY_STRICT=0 降级"
+    fi
     warn "未找到带 tomllib 的 python3，跳过 TOML 解析检查"
 fi
 
@@ -99,12 +182,10 @@ done < <(find "${DATA_DIR}" -type f \( -name '*.db' -o -name '*.sqlite' -o -name
 [ "${#DBS[@]}" -gt 0 ] || die "备份中没有任何 SQLite 数据库文件，不能视为可恢复数据"
 
 SQLITE_AVAILABLE=0
-DB_VERIFY_RESULT="files_present"
 if command -v sqlite3 >/dev/null 2>&1; then
     SQLITE_AVAILABLE=1
-    DB_VERIFY_RESULT="passed"
 elif [ "${STRICT}" = "1" ]; then
-    die "未安装 sqlite3，无法验证 SQLite 完整性；确认不需要时可用 RESTORE_VERIFY_STRICT=0 降级"
+    die "未安装 sqlite3，严格模式拒绝跳过 SQLite 完整性检查；确认不需要时可用 RESTORE_VERIFY_STRICT=0 降级"
 else
     warn "未安装 sqlite3，跳过 SQLite integrity_check 与表结构检查"
 fi
@@ -119,6 +200,7 @@ if [ "${SQLITE_AVAILABLE}" -eq 1 ]; then
     done
     log "SQLite integrity_check = ok（${#DBS[@]} 个数据库）"
     DB_STRICT_OK=1
+    CHECK_DATABASE="passed"
 else
     log "SQLite 文件存在（${#DBS[@]} 个）；未做严格校验"
 fi
@@ -150,21 +232,23 @@ else
 fi
 
 # 如果 SQLite 中记录了本地媒体，恢复路径可能从容器 /data 变成临时目录；
-# 这里按文件名检查媒体文件是否仍然存在，确保数据库和媒体文件一起可用。
+# 这里按 exact path 检查媒体文件是否仍然存在，确保数据库和媒体文件一起可用。
+MEDIA_PATHS_APPLICABLE=0
+MEDIA_PATHS_FALLBACK=0
 if [ "${DB_STRICT_OK}" -eq 1 ]; then
     for db in "${DBS[@]}"; do
         has_media_table="$(sqlite3 "${db}" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media';" 2>&1)" || die "查询 media 表是否存在失败：${db}: ${has_media_table}"
         [ "${has_media_table}" = "1" ] || continue
         local_count="$(sqlite3 "${db}" "SELECT COUNT(*) FROM media WHERE backend='local';" 2>&1)" || die "查询本地媒体数量失败：${db}: ${local_count}"
         [ "${local_count}" = "0" ] && continue
+        MEDIA_PATHS_APPLICABLE=1
         [ -n "${MEDIA_DIR}" ] || die "数据库 ${db} 记录了 ${local_count} 个本地媒体，但备份中没有 media/ 目录"
         missing=0
         media_rows="$(sqlite3 "${db}" "SELECT local_path FROM media WHERE backend='local' AND local_path IS NOT NULL AND local_path<>'';" 2>&1)" || die "读取本地媒体引用失败：${db}: ${media_rows}"
-        media_fallback=0
         while IFS= read -r local_path; do
             [ -n "${local_path}" ] || continue
             # 容器内路径形如 /data/elbot/media/<xx>/<rest>，备份中的对应路径是
-            # ${DATA_DIR}/elbot/media/...，因此优先按精确路径核对；前缀未知时才退回按文件名。
+            # ${DATA_DIR}/elbot/media/...，因此严格模式只接受这个映射。
             case "${local_path}" in
                 /data/*)
                     if [ ! -f "${DATA_DIR}/${local_path#/data/}" ]; then
@@ -172,22 +256,103 @@ if [ "${DB_STRICT_OK}" -eq 1 ]; then
                     fi
                     ;;
                 *)
-                    media_fallback=1
+                    if [ "${STRICT}" = "1" ]; then
+                        die "数据库 $(basename "${db}") 中有 media.local_path 不是 /data/... 形式（${local_path}），严格模式拒绝按文件名兜底；确认不需要时可用 RESTORE_VERIFY_STRICT=0 降级"
+                    fi
+                    MEDIA_PATHS_FALLBACK=1
                     if ! find "${MEDIA_DIR}" -type f -name "$(basename "${local_path}")" -print -quit | grep -q .; then
                         missing=$((missing + 1))
                     fi
                     ;;
             esac
         done <<<"${media_rows}"
-        if [ "${media_fallback}" -eq 1 ]; then
-            warn "$(basename "${db}") 中有 media.local_path 不是 /data/... 形式，该部分按文件名检查"
-        fi
         if [ "${missing}" -gt 0 ]; then
             die "数据库 ${db} 有 ${missing} 个本地媒体文件在备份 media/ 中找不到"
         fi
         log "本地媒体引用检查通过：$(basename "${db}")（${local_count} 条）"
     done
+    if [ "${MEDIA_PATHS_APPLICABLE}" -eq 0 ] || [ "${MEDIA_PATHS_FALLBACK}" -eq 0 ]; then
+        CHECK_MEDIA_PATHS="passed"
+    else
+        warn "部分 media.local_path 不是 /data/... 形式，媒体路径检查记为 skipped"
+        CHECK_MEDIA_PATHS="skipped"
+    fi
+else
+    warn "SQLite 严格校验已跳过，媒体路径检查同步跳过"
 fi
 
-log "恢复验证通过：manifest=${CHECK_MANIFEST} config=passed database=${DB_VERIFY_RESULT} characters=${CHARACTER_DIR:+present} media=${MEDIA_DIR:+present}"
-printf 'restore_verify: passed\n'
+# 可选的隔离启动验收：用真实镜像 + 恢复出的 data 启动一个
+# --network none 的一次性实例，并等待 /ready。默认 auto：只有 Docker 和镜像
+# 都可用时才执行；设为 1/required 时缺少前置条件会直接失败。
+case "${START_MODE}" in
+    1|true|yes|require) START_MODE="required" ;;
+    0|false|no|off) START_MODE="off" ;;
+    auto) ;;
+    *) die "未知 RESTORE_VERIFY_START=${START_MODE}（可用 auto / 1 / 0）" ;;
+esac
+if [ "${START_MODE}" != "off" ]; then
+    if [ -z "${START_IMAGE}" ]; then
+        START_IMAGE="$(docker inspect --format '{{.Config.Image}}' "${ELBOT_SERVICE:-elbot}" 2>/dev/null || true)"
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+        if [ "${START_MODE}" = "required" ]; then
+            die "RESTORE_VERIFY_START=${START_MODE} 但未找到 docker"
+        fi
+        warn "未找到 docker，跳过隔离启动验收"
+    elif [ -z "${START_IMAGE}" ]; then
+        if [ "${START_MODE}" = "required" ]; then
+            die "RESTORE_VERIFY_START=${START_MODE} 但未找到可用镜像；请设置 RESTORE_VERIFY_IMAGE"
+        fi
+        warn "未找到可用的 ElBot 镜像，跳过隔离启动验收"
+    elif ! docker image inspect "${START_IMAGE}" >/dev/null 2>&1; then
+        if [ "${START_MODE}" = "required" ]; then
+            die "RESTORE_VERIFY_START=${START_MODE} 但镜像不存在：${START_IMAGE}"
+        fi
+        warn "镜像不存在，跳过隔离启动验收：${START_IMAGE}"
+    else
+        VERIFY_CONTAINER="elbot-restore-verify-$$-$(date +%s)"
+        START_TIMEOUT="${RESTORE_VERIFY_START_TIMEOUT:-45}"
+        START_DEADLINE=$(( $(date +%s) + START_TIMEOUT ))
+        START_UID="$(id -u 2>/dev/null || printf '0')"
+        START_GID="$(id -g 2>/dev/null || printf '0')"
+        # 用调用者 UID/GID 运行，避免 root 写出的临时 data 让宿主用户无法清理。
+        log "启动隔离实例做恢复验收（network=none，镜像 ${START_IMAGE}）"
+        if ! docker run -d --name "${VERIFY_CONTAINER}" --network none --user "${START_UID}:${START_GID}" \
+            -v "${DATA_DIR}:/data" \
+            -e XDG_CONFIG_HOME=/data/config \
+            -e XDG_DATA_HOME=/data \
+            -e XDG_RUNTIME_DIR=/data/run \
+            "${START_IMAGE}" service run >/dev/null; then
+            die "隔离实例启动失败：${START_IMAGE}"
+        fi
+        START_STATE=""
+        while :; do
+            START_STATE="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${VERIFY_CONTAINER}" 2>/dev/null || true)"
+            case "${START_STATE}" in
+                exited|dead)
+                    die "隔离实例提前退出（${START_STATE}）"
+                    ;;
+            esac
+            if docker exec "${VERIFY_CONTAINER}" curl -fsS --max-time 3 http://127.0.0.1:32171/ready >/dev/null 2>&1; then
+                CHECK_START="passed"
+                log "隔离实例 /ready 通过"
+                break
+            fi
+            if [ "$(date +%s)" -ge "${START_DEADLINE}" ]; then
+                die "等待隔离实例 /ready 超时（最后状态：${START_STATE:-unknown}）"
+            fi
+            sleep 1
+        done
+    fi
+fi
+
+CHARACTER_STATE="missing"
+[ -n "${CHARACTER_DIR}" ] && CHARACTER_STATE="present"
+MEDIA_STATE="missing"
+[ -n "${MEDIA_DIR}" ] && MEDIA_STATE="present"
+log "恢复验证结果：manifest=${CHECK_MANIFEST} toml=${CHECK_TOML} database=${CHECK_DATABASE} media_paths=${CHECK_MEDIA_PATHS} start=${CHECK_START} characters=${CHARACTER_STATE} media=${MEDIA_STATE}"
+if [ "${CHECK_MANIFEST}" = "skipped" ] || [ "${CHECK_TOML}" = "skipped" ] || [ "${CHECK_DATABASE}" = "skipped" ] || [ "${CHECK_MEDIA_PATHS}" = "skipped" ]; then
+    printf 'restore_verify: passed_with_skips\n'
+else
+    printf 'restore_verify: passed\n'
+fi

@@ -1,9 +1,63 @@
-# Changelog
+## Unreleased
 
-All notable changes to ElBot will be documented in this file.
+### Added
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+- 新增 clean-room `group_analysis` 工具与 `internal/groupanalysis/` 统计服务：只读取本地 `chat_history` / `outbound_messages`，按天统计群消息量、活跃成员和活跃时段，不复制第三方群分析插件的模板、图片、Prompt 或素材。
+- Hook 事件新增请求级临时字段：`llm.system_append`、`llm.temperature`、`llm.max_tokens`、`llm.extra_body`；Go Hook 与 `hook.v2` 进程 Hook 均可返回，Agent 只作用于当前 LLM 请求，不写入 Session 历史。
+- Chat History 新增可选 `ChatHistoryRangeRepository` 批量时间窗查询；新增 `OutboundMessageRepository` 和 `outbound_messages` 表，记录实际发送的 assistant 文本，供学习和群分析复用。
+- 新增可选平台能力接口：`GroupHistoryProvider`、`GroupDirectoryProvider`、`UserAvatarProvider`、`GroupAssetProvider`；OneBot 适配器已实现群历史、群信息、成员列表和头像 URL 的 best-effort 能力。
+- 新增 `[group_analysis]` 配置：`enabled`、`max_messages` 和可选 Cron 日报 `report_*`；维护任务清理 chat history 时会同步清理过期 outbound messages。
+- `group_analysis` 支持可选 LLM `Summarizer`，摘要使用默认 Session 模式对应模型；Cron 日报可发送统计和摘要到指定平台会话。
+- 新增 clean-room `[angel_memory]`：本地 SQLite 长期记忆、`angel_remember` / `angel_recall` 工具，以及 `llm.turn.prepared` 临时 system 上下文注入。
+- 新增 clean-room `[self_learning]`：消息观察、表达/黑话候选挖掘、`/learning` 与 `self_learning_review` 的 review-before-apply，只有 approved 内容会注入上下文。
+- 新增 `/memory` / `/learning` 管理命令，新增 `[maintenance.privacy_cleanup]` 按功能 retention 清理 angel memory 与 self learning 数据。
+- 健康/运维 HTTP 服务新增只读 `/plugins/memory` 和 `/plugins/learning` 状态接口，受 `ELBOT_OPS_TOKEN` 保护。
+- Telegram 适配器新增可选群信息和管理员列表能力；QQ Official 明确以本地 chat history 回退。
+- Windows 本地部署文档新增 Docker Desktop 非 C 盘安装步骤：支持使用本机 `Docker Desktop Installer.exe`，通过 `--installation-dir`、`--wsl-default-data-root`、`--no-windows-containers` 将程序文件和 WSL 数据放到指定盘。
+- 新增 `deploy/portainer/portainer-compose.yml`：Portainer CE 浏览器 Docker 管理界面只绑定 `127.0.0.1:9443`，使用独立 Compose 项目名避免与 ElBot 冲突；`deploy/windows/README.md` 补充本地启动、首次 setup token 获取、云服务器 SSH 隧道 / 反向代理和 Docker socket 安全说明，主 `README.zh-CN.md` 增加入口与快速启动命令。
+- `deploy/windows/README.md` 新增 AutoDL ComfyUI 生图接入规划：覆盖 AutoDL SSL 自定义服务、SSH 隧道、workflow API 格式、provider 配置约定、GPU 并发限制和安全注意事项；正式实现后可直接按该章节配置。
+- 新增共享只读 `services.toml`：集中 `[providers.*]`、`[model_metadata]`、`[model_profiles]` 和 `[image_generation]`，通过 `[config_files].services` 加载；旧 `providers.toml` 和 `app.toml [image_generation]` 继续兼容。`state.toml` 保持独立，加载时会拒绝把 `state` 指向 `app.toml` / `services.toml` / `providers.toml` 等只读配置，避免运行时 `SaveState` 覆盖静态配置。
+- 新增 `services.toml` 默认生成；默认 assets 不再生成 `providers.toml`。`elbot config check` 现在输出实际加载的 `services` / `providers` / `state` 路径。
+- `deploy/restore-verify.sh` 的必需配置检查改为 `app.toml` 加（`services.toml` 或旧 `providers.toml`），并在带 `tomllib` 的 Python 中校验 `app.toml` 引用的服务配置存在、`state` 未与只读配置共用同一路径。
+
+### Changed
+
+- 文档同步集中服务配置：`docs/configuration.md`、`docs/getting-started.md`、`docs/image-generation.md`、`deploy/README.md`、`deploy/windows/README.md` 和离线包说明改为以 `services.toml` 为主，`providers.toml` 作为旧部署兼容入口。
+- 常驻记忆注入 system prompt 时增加 `<resident_memory>` 边界和“用户数据、不是系统指令”的信任声明，并转义记忆内容中的尖括号，防止内容提前结束或伪造边界标签，降低 normal 记忆被用作持久 Prompt 注入向量时的影响。
+- 常驻记忆 normal 写入增加服务端保护：`[resident_memory]` 可配置最小写入间隔、窗口内最大写入次数、最大条目数和单条最大长度，并默认逐条拒绝明显指令类内容和控制字符；失败写入不消耗频率额度，core 写入不受 normal 限流影响。
+- 常驻记忆 normal 改为结构化保存：每条一行、一行一件事，写入时去掉 `-` / `*` / `1.` 等列表前缀、空行和重复条目，注入 system prompt 时渲染为独立 `-` 列表项，避免多个事实被拼成一段容易被当作指令的文本。
+- `memories.toml` 改为原子写入：先写同目录临时文件并 `fsync`，再 `rename` 覆盖目标文件，最后尽力 `fsync` 目录；崩溃或断电时只会留下完整旧文件或完整新文件。写入前检测文件状态，若外部在读取与写入之间修改了文件则重新加载后再应用，避免覆盖手工编辑或恢复脚本的改动。
+
+### Fixed
+
+- 修复 `deploy/windows/elbot.ps1` 的 `Invoke-Compose` 参数绑定：Windows PowerShell 5.1 会把 `Invoke-Compose (@(...) + @($Rest))` 折叠成单个带空格字符串，导致 `docker compose` 收到 `"compose up -d --remove-orphans"` 这类错误参数；现在改为普通 `[string[]]` 参数，并把 `Invoke-Compose @doctorArgs` / `@logArgs` / `@Rest` 调用改为直接传数组。
+
+## [v0.6.3 - 2026-10-01]
+
+### Added
+
+- 新增本地 Windows 容器部署：`deploy/windows/elbot.ps1` 与 `elbot.cmd` 复用现有 `deploy/docker-compose.yml`、`Dockerfile` 和 `.env`，支持 `init`、`start`、`recreate`、`stop`、`down`、`restart`、`logs`、`shell`、`compose` 等后台控制，并可注册 `ElBot-Docker` 登录自启计划任务。
+- 新增 Windows 命令行运行状态查看：`status` / `health` 读取内置 `/live`、`/ready`、`/healthz`；`tasks` / `metrics` / `diagnostics` 读取 `/tasks`、`/metrics`、`/diagnostics` 并自动携带 `ELBOT_OPS_TOKEN`；`doctor` 在容器内运行同一套 `elbot doctor`。
+- 新增 Windows 运维入口：`backup` / `restore-verify` / `upgrade` / `rollback` 复用 `deploy/*.sh`（需要 Git for Windows 的 `bash.exe`），并新增 `deploy/windows/README.md` 完整说明本地部署、排错及与云服务器部署的对照。
+- `image_generate` 支持同时索引多个角色：新增 `character_ids`、`reference_images` 和 `count` 参数。默认所有 `@char` / `character_ids` 角色都会写进同一张图；只有显式 `count > 1`（最多 4）时才生成多张，且每张都包含全部角色。多角色参考图以 data URL 数组发送到 `reference_field`。
+- 新增发送前长消息保护：按模型窗口、`max_prompt_ratio`、`reserve_output_tokens`、`single_message_max_ratio` 估算 prompt 预算。超限时默认 `reject`，不调用模型并在群里返回报警；可全局或按群设置 `truncate` / `summarize`。新增 `/*overflow` 命令，Bot 超级管理员与当前群群主/管理员可修改 chat/work 策略，覆盖持久化在 `state.toml` 的 `context_overflow`。
+- 上下文压缩新增 `[context] user_original_max_runes`（默认 4000）：压缩时每条历史用户原话先限长，避免超长单条消息让摘要自身再次超窗口。
+- `deploy/restore-verify.sh` 新增可选隔离启动验收：`RESTORE_VERIFY_START=1`（或 `required`）时使用 `RESTORE_VERIFY_IMAGE` / 当前 `elbot` 容器镜像，以 `--network none` 启动一次性实例并等待 `/ready`；`auto`（默认）在 Docker 和镜像都可用时执行，否则跳过。
+- 新增 `deploy/tests/upgrade_script_test.sh`、`deploy/tests/backup_restart_test.sh`、`deploy/tests/restore_verify_start_test.sh`，并扩展 `deploy/tests/watchdog_redaction_test.sh`、`deploy/tests/backup_restore_test.sh` 覆盖上述回归。 新增 `deploy/tests/windows_script_test.sh` 校验 Windows 入口的 BOM、CRLF 包装和版本号引用。
+
+### Changed
+
+- 版本号提升到 `0.6.3`；`deploy/VERSION`、Compose 默认镜像、构建/离线脚本以及所有 README / 部署文档中的版本示例同步更新。
+- 仓库 `README.md`、`README.zh-CN.md`、`deploy/README.md` 增加 Windows 本地容器部署章节；`.gitattributes` 新增 `*.ps1` 固定 LF、`*.cmd` 固定 CRLF。
+
+### Fixed
+
+- 修复 `deploy/upgrade.sh` 的 `ELBOT_GIT_REF` 检测：原先假设 `.git` 位于 `deploy/`，会把正常仓库结构 `仓库/.git + 仓库/deploy/upgrade.sh` 误判为非 git 工作区；现在通过 `git -C "$DEPLOY_DIR" rev-parse --show-toplevel` 获取仓库根目录，并在根目录执行 `fetch` / `checkout`。
+- 修复 `deploy/upgrade.sh` 用新镜像做配置检查时重复传入 `elbot`：镜像 ENTRYPOINT 已经是 `tini -- /usr/local/bin/elbot`，原命令会展开成 `.../elbot elbot config check`；现在只传 `config check`。
+- 修复停机备份后容器恢复失败仍返回成功的问题：`deploy/backup.sh` 现在把 `compose up` 失败或恢复后健康检查超时/异常计入最终退出码，默认最多等待 60 秒（`BACKUP_RESTART_READY_TIMEOUT` 可调）。
+- 修复 `deploy/restore-verify.sh` 严格模式仍可能跳过必需检查后输出 `passed` 的问题：缺少带 `tomllib` 的 `python3`、media.local_path 不是 `/data/...` 形式等情况下，严格模式现在直接失败；非严格模式的跳过项会输出 `restore_verify: passed_with_skips`，并分别报告 manifest / toml / database / media_paths / start 的结果。
+- 修复 `deploy/elbot-watchdog.sh` 把“重复 sed 幂等”误当成“没有秘密”的复检：现在拆分幂等复检、独立凭据模式检测和当前环境敏感变量值的字面量检测；`mktemp` / `cp` / `sed` 等检查器自身失败会返回非 0，诊断目录从创建起使用 `umask 077`。
+- 媒体清理不再在整个清理期间持有全局 `m.objects` 锁，改为按媒体 ID 互斥、最多 4 个对象并发删除；同 ID 导入 / `PresignGet` 也使用同一把对象锁，避免与删除交叉。
 
 ## [v0.6.2 - 2026-10-01]
 

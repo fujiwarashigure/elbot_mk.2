@@ -227,6 +227,7 @@ func v2EventResult(event hook.Event, action Action, state state, raw json.RawMes
 	if err := hookoutput.DecodeJSON(raw, &payload); err != nil {
 		return actionResult{}, event, fmt.Errorf("decode hook.v2 event result: %w", err)
 	}
+	event = hookprotocol.ApplyLLMResult(event, payload.LLM)
 	if status := strings.TrimSpace(payload.Status); status != "" && status != "completed" {
 		return actionResult{}, event, fmt.Errorf("one-shot hook.v2 returned unsupported status %q", status)
 	}

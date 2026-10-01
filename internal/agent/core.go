@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentcommands "elbot/internal/agent/commands"
+	"elbot/internal/angelmemory"
 	"elbot/internal/character"
 	"elbot/internal/command"
 	"elbot/internal/completion"
@@ -25,6 +26,7 @@ import (
 	"elbot/internal/request"
 	runtimestatus "elbot/internal/runtime"
 	"elbot/internal/security"
+	"elbot/internal/selflearning"
 	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
@@ -38,6 +40,9 @@ type Agent struct {
 	modelRuntime       modelRuntimeState
 	statePath          string
 	stateModTime       time.Time
+	stateMu            sync.Mutex
+	contextOverflowMu  sync.RWMutex
+	contextOverflow    map[string]config.ContextOverflowConfig
 	store              storage.Store
 	media              *media.Manager
 	sessions           *session.Service
@@ -49,6 +54,8 @@ type Agent struct {
 	titleGen           *titleGenerator
 	soul               SoulProvider
 	residentMemory     *resident.Store
+	angelMemory        *angelmemory.Service
+	selfLearning       *selflearning.Service
 	characters         *character.Store
 	modelProfiles      map[string]config.ModelSelection
 	modelAliases       map[string]string
@@ -255,6 +262,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		modelRuntime:            newModelRuntimeState(client, workModel.Model, workModel.Provider, provider, providers, modeModels, clients),
 		statePath:               statePath,
 		stateModTime:            stateModTime,
+		contextOverflow:         cloneContextOverflow(opts.ContextOverflow),
 		store:                   store,
 		media:                   opts.Media,
 		mediaRetentionDays:      opts.MediaRetentionDays,
@@ -264,6 +272,8 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		commands:                command.NewRouter(prefixes),
 		soul:                    promptSoul,
 		residentMemory:          opts.ResidentMemoryStore,
+		angelMemory:             opts.AngelMemory,
+		selfLearning:            opts.SelfLearning,
 		characters:              opts.CharacterStore,
 		modelProfiles:           opts.ModelProfiles,
 		modelAliases:            opts.ModelAliases,
@@ -339,10 +349,13 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		Models:        a,
 		Compact:       a,
 		ContextStatus: a,
+		ContextPolicy: a,
 		Tools:         a,
 		Hooks:         hookService,
 		SessionState:  sessionCommands,
 		Characters:    a.characters,
+		AngelMemory:   a.angelMemory,
+		SelfLearning:  a.selfLearning,
 		Audit:         a.audit,
 		Logs:          a,
 		RuntimeStatus: a.runtimeStatusForSession,

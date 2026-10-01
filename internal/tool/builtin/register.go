@@ -3,12 +3,15 @@ package builtin
 import (
 	"context"
 
+	"elbot/internal/angelmemory"
 	"elbot/internal/character"
 	elcron "elbot/internal/cron"
+	"elbot/internal/groupanalysis"
 	"elbot/internal/media"
 	"elbot/internal/memory/resident"
 	"elbot/internal/ops/concurrency"
 	"elbot/internal/processenv"
+	"elbot/internal/selflearning"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
 	"elbot/internal/tool/runtimeinfo"
@@ -16,20 +19,25 @@ import (
 )
 
 type RegisterOptions struct {
-	RuntimeInfo         runtimeinfo.Info
-	ResidentMemoryStore *resident.Store
-	CharacterStore      *character.Store
-	ImageProfiles       map[string]ImageProfile
-	DefaultImageProfile string
-	ImageLimiter        *concurrency.Limiter
-	PromptRewriter      ImagePromptRewriter
-	SkillManager        *skill.Manager
-	CronService         *elcron.Service
-	ChatHistory         storage.ChatHistoryRepository
-	LongMemoryDir       string
-	FileManager         *FileManager
-	ProcessEnv          processenv.Environment
-	ChildProcessEnv     processenv.Environment
+	RuntimeInfo              runtimeinfo.Info
+	ResidentMemoryStore      *resident.Store
+	CharacterStore           *character.Store
+	ImageProfiles            map[string]ImageProfile
+	DefaultImageProfile      string
+	ImageLimiter             *concurrency.Limiter
+	PromptRewriter           ImagePromptRewriter
+	SkillManager             *skill.Manager
+	CronService              *elcron.Service
+	ChatHistory              storage.ChatHistoryRepository
+	OutboundMessages         storage.OutboundMessageRepository
+	GroupAnalysisService     *groupanalysis.Service
+	GroupAnalysisMaxMessages int
+	AngelMemory              *angelmemory.Service
+	SelfLearning             *selflearning.Service
+	LongMemoryDir            string
+	FileManager              *FileManager
+	ProcessEnv               processenv.Environment
+	ChildProcessEnv          processenv.Environment
 }
 
 func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
@@ -56,6 +64,18 @@ func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
 			if err := registry.Register(memoryTool); err != nil {
 				return err
 			}
+		}
+	}
+	if opts.AngelMemory != nil {
+		for _, memoryTool := range NewAngelMemoryTools(opts.AngelMemory, info) {
+			if err := registry.Register(memoryTool); err != nil {
+				return err
+			}
+		}
+	}
+	if opts.SelfLearning != nil {
+		if err := registry.Register(NewSelfLearningReviewTool(opts.SelfLearning, info)); err != nil {
+			return err
 		}
 	}
 	if longMemoryDir := opts.LongMemoryDir; longMemoryDir != "" {
@@ -95,6 +115,11 @@ func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
 			return err
 		}
 		if err := registry.Register(NewReplyToChatHistoryMessageTool(opts.ChatHistory, info)); err != nil {
+			return err
+		}
+	}
+	if opts.GroupAnalysisService != nil {
+		if err := registry.Register(NewGroupAnalysisTool(opts.GroupAnalysisService, opts.GroupAnalysisMaxMessages, info)); err != nil {
 			return err
 		}
 	}

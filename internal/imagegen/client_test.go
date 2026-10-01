@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -94,5 +95,61 @@ func TestGenerateRequiresAPIKey(t *testing.T) {
 	client := New(Config{Enabled: true, BaseURL: "http://127.0.0.1:1/v1"}, nil)
 	if _, err := client.Generate(context.Background(), Request{Prompt: "x"}); err == nil || !strings.Contains(err.Error(), "API Key") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestGenerateReferencesPayload(t *testing.T) {
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	var (
+		mu   sync.Mutex
+		seen []any
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		mu.Lock()
+		seen = append(seen, body["image"])
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"b64_json": base64.StdEncoding.EncodeToString(png)}},
+		})
+	}))
+	defer server.Close()
+	client := New(Config{Enabled: true, BaseURL: server.URL + "/v1", APIKey: "k", SupportsReference: true}, nil)
+
+	if _, err := client.Generate(context.Background(), Request{
+		Prompt:     "one",
+		References: []Reference{{Data: []byte("a"), MIMEType: "image/png"}},
+	}); err != nil {
+		t.Fatalf("single reference: %v", err)
+	}
+	if _, err := client.Generate(context.Background(), Request{
+		Prompt: "two",
+		References: []Reference{
+			{Data: []byte("a"), MIMEType: "image/png"},
+			{Data: []byte("b"), MIMEType: "image/jpeg"},
+		},
+	}); err != nil {
+		t.Fatalf("multiple references: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("payloads = %d", len(seen))
+	}
+	if text, ok := seen[0].(string); !ok || !strings.HasPrefix(text, "data:image/png;base64,") {
+		t.Fatalf("single reference payload = %#v", seen[0])
+	}
+	values, ok := seen[1].([]any)
+	if !ok || len(values) != 2 {
+		t.Fatalf("multi reference payload = %#v", seen[1])
+	}
+	for _, value := range values {
+		text, _ := value.(string)
+		if !strings.HasPrefix(text, "data:image/") {
+			t.Fatalf("reference value = %q", text)
+		}
 	}
 }

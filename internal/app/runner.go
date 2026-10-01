@@ -68,10 +68,14 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 	tasksProvider := &lazyJSONProvider{}
 	metricsProvider := &lazyJSONProvider{}
 	diagnosticsProvider := &lazyJSONProvider{}
+	memoryAdminProvider := &lazyHTTPHandler{}
+	learningAdminProvider := &lazyHTTPHandler{}
 	healthState, healthServer, err := startHealthServer(foundation.Config, foundation.Logger, opts.Version, map[string]http.Handler{
-		"/tasks":       tasksProvider,
-		"/metrics":     metricsProvider,
-		"/diagnostics": diagnosticsProvider,
+		"/tasks":            tasksProvider,
+		"/metrics":          metricsProvider,
+		"/diagnostics":      diagnosticsProvider,
+		"/plugins/memory":   memoryAdminProvider,
+		"/plugins/learning": learningAdminProvider,
 	})
 	if err != nil {
 		return err
@@ -130,6 +134,36 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 		return collectOpsMetrics(foundation.Config, healthState, runtime.Agent, runtime.ImageLimiter)
 	})
 	diagnosticsProvider.Set(func() any { return collectOpsDiagnostics(healthState, runtime.Agent) })
+	memoryAdminProvider.Set(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSONResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		platform := r.URL.Query().Get("platform")
+		scopeID := r.URL.Query().Get("scope_id")
+		count, err := runtime.Agent.AngelMemoryCount(r.Context(), platform, scopeID)
+		if err != nil {
+			writeJSONResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONResponse(w, http.StatusOK, map[string]any{"platform": platform, "scope_id": scopeID, "count": count})
+	})
+	learningAdminProvider.Set(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSONResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		platform := r.URL.Query().Get("platform")
+		scopeID := r.URL.Query().Get("scope_id")
+		pending, approved, err := runtime.Agent.SelfLearningStats(r.Context(), platform, scopeID)
+		if err != nil {
+			writeJSONResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONResponse(w, http.StatusOK, map[string]any{"platform": platform, "scope_id": scopeID, "pending": pending, "approved": approved})
+	})
 	if healthState != nil {
 		runtime.Handler = healthHandler{inner: runtime.Handler, state: healthState}
 		healthState.SetReady(true)

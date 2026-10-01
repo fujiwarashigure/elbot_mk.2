@@ -16,10 +16,19 @@ type Info struct {
 	// MinRole controls slash-command access. RoleUser allows regular users;
 	// empty defaults to RoleSuperadmin for backward compatibility.
 	MinRole security.Role
+	// AllowGroupAdmin permits group owners/admins in addition to superadmins.
+	// It does not grant access to regular group members.
+	AllowGroupAdmin bool
 }
 
 func CanAccess(info Info, actor security.Actor) bool {
-	return info.MinRole == security.RoleUser || actor.Role == security.RoleSuperadmin
+	if info.MinRole == security.RoleUser || actor.Role == security.RoleSuperadmin {
+		return true
+	}
+	if !info.AllowGroupAdmin {
+		return false
+	}
+	return actor.GroupRole == security.GroupRoleOwner || actor.GroupRole == security.GroupRoleAdmin
 }
 
 type SessionEffect uint8

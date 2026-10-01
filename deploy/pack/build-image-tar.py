@@ -10,7 +10,7 @@
 
 用法：
   python build-image-tar.py --binary ./elbot-linux-amd64 --arch amd64 \
-      --version 0.6.1 --output elbot-0.6.1-linux-amd64.tar.gz
+      --version 0.6.3 --output elbot-0.6.3-linux-amd64.tar.gz
 
 注意：scratch 镜像内没有 /bin/sh 和 coreutils，ElBot 的 shell 工具不可用；
 需要完整工具能力请用同目录的 Dockerfile（基于 debian:bookworm-slim）在服务器上构建。
@@ -349,11 +349,23 @@ def resolve_zoneinfo(explicit: str = "") -> Path:
              "或用 --zoneinfo 指定目录，或 pip install tzdata")
 
 
+def default_version() -> str:
+    env_version = os.environ.get("ELBOT_VERSION", "").strip()
+    if env_version:
+        return env_version
+    version_file = Path(__file__).resolve().parents[1] / "VERSION"
+    if version_file.is_file():
+        version = version_file.read_text(encoding="utf-8").strip()
+        if version:
+            return version
+    return "dev"
+
+
 def main():
     ap = argparse.ArgumentParser(description="构造 ElBot 离线 Docker 镜像 tar.gz")
     ap.add_argument("--binary", required=True, type=Path)
     ap.add_argument("--arch", default="amd64", choices=["amd64", "arm64"])
-    ap.add_argument("--version", default=os.environ.get("ELBOT_VERSION", "0.6.1"))
+    ap.add_argument("--version", default=default_version())
     ap.add_argument("--tag", default=None, help="默认为 elbot:<version>")
     ap.add_argument("--output", required=True, type=Path)
     ap.add_argument("--zoneinfo", default=None, type=Path,

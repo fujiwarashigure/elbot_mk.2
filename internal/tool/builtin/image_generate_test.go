@@ -4,16 +4,23 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"elbot/internal/character"
 	"elbot/internal/imagegen"
+	"elbot/internal/llm"
+	"elbot/internal/media"
 	"elbot/internal/platform"
 	"elbot/internal/storage"
+	"elbot/internal/storage/sqlite"
 	"elbot/internal/tool"
 )
 
@@ -369,5 +376,217 @@ func TestImageGenerateProfileSelection(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "没有配置生图 profile") {
 		t.Fatalf("result = %q", result.Content)
+	}
+}
+
+func imageToolWithMediaForTest(t *testing.T, client *imagegen.Client, characters *character.Store) (ImageGenerateTool, *media.Manager) {
+	t.Helper()
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	root := t.TempDir()
+	center := media.NewManager(store, root, &media.LocalBackend{Root: root})
+	profiles := map[string]ImageProfile{}
+	if client != nil {
+		profiles[""] = ImageProfile{Name: "", Client: client, Config: client.Config()}
+	}
+	return NewImageGenerateTool(profiles, "", characters, center, nil, nil, nil), center
+}
+
+func seedImageCharacter(t *testing.T, store *character.Store, id, name, preset string, references ...string) {
+	t.Helper()
+	if _, err := store.Write(context.Background(), character.WriteRequest{
+		ID:         id,
+		Name:       name,
+		Visibility: "public",
+		Image:      &character.ImageSettings{PresetPrompt: preset, References: references},
+	}, character.Viewer{Platform: "cli", ActorID: "cli:local", Superadmin: true}); err != nil {
+		t.Fatalf("seed character %s: %v", id, err)
+	}
+}
+
+func countImageSegments(result *tool.Result) int {
+	if result == nil {
+		return 0
+	}
+	count := 0
+	for _, segment := range result.Segments {
+		if segment.Type == llm.SegmentImage {
+			count++
+		}
+	}
+	return count
+}
+
+func TestImageGenerateMultipleCharactersInOneImage(t *testing.T) {
+	var mu sync.Mutex
+	var prompt string
+	server := imageTestServer(t, func(value string) {
+		mu.Lock()
+		prompt = value
+		mu.Unlock()
+	})
+	defer server.Close()
+
+	characters := character.NewStore(t.TempDir())
+	seedImageCharacter(t, characters, "catgirl", "猫娘", "CATGIRL LOOK")
+	seedImageCharacter(t, characters, "foxgirl", "狐娘", "FOXGIRL LOOK")
+	client := imagegen.New(imagegen.Config{Enabled: true, BaseURL: server.URL + "/v1", APIKey: "k", Optimize: "off"}, nil)
+	generate, _ := imageToolWithMediaForTest(t, client, characters)
+
+	result, err := generate.Call(context.Background(), tool.CallRequest{Arguments: json.RawMessage(`{"prompt":"两人在雨夜同框","character_ids":["catgirl","foxgirl"]}`)})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	mu.Lock()
+	got := prompt
+	mu.Unlock()
+	for _, want := range []string{"CATGIRL LOOK", "FOXGIRL LOOK", "猫娘", "狐娘", "画面必须同时出现以下全部角色"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("prompt %q missing %q", got, want)
+		}
+	}
+	if countImageSegments(result) != 1 || len(result.Outputs) != 0 {
+		t.Fatalf("result segments=%d outputs=%d content=%q", countImageSegments(result), len(result.Outputs), result.Content)
+	}
+}
+
+func TestImageGenerateAllActiveCharactersInOneImage(t *testing.T) {
+	var prompt string
+	server := imageTestServer(t, func(value string) { prompt = value })
+	defer server.Close()
+
+	characters := character.NewStore(t.TempDir())
+	seedImageCharacter(t, characters, "catgirl", "猫娘", "CATGIRL LOOK")
+	seedImageCharacter(t, characters, "foxgirl", "狐娘", "FOXGIRL LOOK")
+	client := imagegen.New(imagegen.Config{Enabled: true, BaseURL: server.URL + "/v1", APIKey: "k", Optimize: "off"}, nil)
+	generate, _ := imageToolWithMediaForTest(t, client, characters)
+
+	ctx := character.WithActive(context.Background(), "catgirl", "foxgirl")
+	result, err := generate.Call(ctx, tool.CallRequest{Arguments: json.RawMessage(`{"prompt":"两人在雨夜同框"}`)})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	for _, want := range []string{"CATGIRL LOOK", "FOXGIRL LOOK", "画面必须同时出现以下全部角色"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt %q missing %q", prompt, want)
+		}
+	}
+	if countImageSegments(result) != 1 {
+		t.Fatalf("result image segments = %d, want 1", countImageSegments(result))
+	}
+}
+
+func TestImageGenerateAutoMatchesMultipleCharacters(t *testing.T) {
+	var prompt string
+	server := imageTestServer(t, func(value string) { prompt = value })
+	defer server.Close()
+
+	characters := character.NewStore(t.TempDir())
+	seedImageCharacter(t, characters, "catgirl", "猫娘", "CATGIRL LOOK")
+	seedImageCharacter(t, characters, "foxgirl", "狐娘", "FOXGIRL LOOK")
+	client := imagegen.New(imagegen.Config{Enabled: true, BaseURL: server.URL + "/v1", APIKey: "k", Optimize: "off", AutoCharacter: true}, nil)
+	generate, _ := imageToolWithMediaForTest(t, client, characters)
+
+	result, err := generate.Call(context.Background(), tool.CallRequest{Arguments: json.RawMessage(`{"prompt":"画猫娘和狐娘一起喝咖啡"}`)})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	for _, want := range []string{"CATGIRL LOOK", "FOXGIRL LOOK", "画面必须同时出现以下全部角色"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt %q missing %q", prompt, want)
+		}
+	}
+	if countImageSegments(result) != 1 {
+		t.Fatalf("result image segments = %d, want 1", countImageSegments(result))
+	}
+}
+
+func TestImageGenerateCountMultipliesImagesWithoutSplittingCharacters(t *testing.T) {
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"b64_json": base64.StdEncoding.EncodeToString(png)}},
+		})
+	}))
+	defer server.Close()
+
+	characters := character.NewStore(t.TempDir())
+	seedImageCharacter(t, characters, "catgirl", "猫娘", "CATGIRL LOOK")
+	seedImageCharacter(t, characters, "foxgirl", "狐娘", "FOXGIRL LOOK")
+	client := imagegen.New(imagegen.Config{Enabled: true, BaseURL: server.URL + "/v1", APIKey: "k", Optimize: "off"}, nil)
+	generate, _ := imageToolWithMediaForTest(t, client, characters)
+
+	result, err := generate.Call(context.Background(), tool.CallRequest{Arguments: json.RawMessage(`{"prompt":"两人同框","character_ids":["catgirl","foxgirl"],"count":3,"send":true}`)})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("upstream hits = %d, want 3", got)
+	}
+	if got := countImageSegments(result); got != 3 {
+		t.Fatalf("image segments = %d, want 3", got)
+	}
+	if len(result.Outputs) != 3 {
+		t.Fatalf("outputs = %d, want 3", len(result.Outputs))
+	}
+	if !strings.Contains(result.Content, "已生成 3/3 张图片") {
+		t.Fatalf("content = %q", result.Content)
+	}
+}
+
+func TestImageGenerateMultipleReferencesUseArrayPayload(t *testing.T) {
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	var mu sync.Mutex
+	var referenceValue any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		mu.Lock()
+		referenceValue = body["image"]
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"b64_json": base64.StdEncoding.EncodeToString(png)}},
+		})
+	}))
+	defer server.Close()
+
+	client := imagegen.New(imagegen.Config{Enabled: true, BaseURL: server.URL + "/v1", APIKey: "k", Optimize: "off", SupportsReference: true}, nil)
+	generate, center := imageToolWithMediaForTest(t, client, character.NewStore(t.TempDir()))
+	first, err := center.ImportBytes(context.Background(), []byte("ref-one"), media.Input{Name: "one.png", MIMEType: "image/png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := center.ImportBytes(context.Background(), []byte("ref-two"), media.Input{Name: "two.png", MIMEType: "image/png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	args := fmt.Sprintf(`{"prompt":"x","reference_images":[%q,%q]}`, first.ID, second.ID)
+	result, err := generate.Call(context.Background(), tool.CallRequest{Arguments: json.RawMessage(args)})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if countImageSegments(result) != 1 {
+		t.Fatalf("image segments = %d, want 1", countImageSegments(result))
+	}
+	mu.Lock()
+	got := referenceValue
+	mu.Unlock()
+	values, ok := got.([]any)
+	if !ok || len(values) != 2 {
+		t.Fatalf("reference payload = %#v, want 2-element array", got)
+	}
+	for _, value := range values {
+		if text, _ := value.(string); !strings.HasPrefix(text, "data:image/png;base64,") {
+			t.Fatalf("reference value = %q", text)
+		}
 	}
 }

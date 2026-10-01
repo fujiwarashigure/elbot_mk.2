@@ -416,6 +416,8 @@ func (a *Agent) refreshRuntimeState() {
 	if a.statePath == "" {
 		return
 	}
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
 	info, err := os.Stat(a.statePath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) && a.logger != nil {
@@ -479,15 +481,22 @@ func (a *Agent) applyRuntimeState(state *config.StateConfig) error {
 			a.titleGen.setNaming(a.clientForProvider(state.NamingModel.Provider), state.NamingModel.Model)
 		}
 	}
+	a.setContextOverflowSnapshot(state.ContextOverflow)
 	return nil
 }
 
 func (a *Agent) saveRuntimeState() error {
+	if a.statePath == "" {
+		return nil
+	}
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
 	if err := config.SaveState(a.statePath, config.StateConfig{
-		Session:      config.StateSessionConfig{DefaultMode: a.sessions.DefaultMode()},
-		ModeModels:   a.modeModelsSnapshot(),
-		CompactModel: a.contextRuntime.configuredCompactModel(),
-		NamingModel:  a.configuredNamingModel(),
+		Session:         config.StateSessionConfig{DefaultMode: a.sessions.DefaultMode()},
+		ModeModels:      a.modeModelsSnapshot(),
+		CompactModel:    a.contextRuntime.configuredCompactModel(),
+		NamingModel:     a.configuredNamingModel(),
+		ContextOverflow: a.contextOverflowSnapshot(),
 	}); err != nil {
 		return err
 	}
