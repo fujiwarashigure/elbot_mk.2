@@ -4,7 +4,9 @@
 # 真实运行需要 Windows + Docker Desktop；本测试只保证：
 #   - PowerShell 5.1 能正确读取 UTF-8 BOM（否则中文会被按 ANSI 解析）；
 #   - elbot.cmd 是 CRLF 且调用 elbot.ps1；
-#   - README / CHANGELOG 中引用的版本号与 deploy/VERSION 一致。
+#   - 人工维护的中文 README / CHANGELOG / 部署文档中引用的版本号与 deploy/VERSION 一致。
+#     README.md / CHANGELOG.en.md 是自动翻译产物，可能因外部 LLM 不可用而暂时落后，
+#     不作为发版阻塞条件。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,10 +67,8 @@ else:
         errors.append(f"unexpected deploy/VERSION: {version!r}")
 
 for rel in [
-    "README.md",
     "README.zh-CN.md",
     "CHANGELOG.md",
-    "CHANGELOG.en.md",
     "deploy/README.md",
     "deploy/windows/README.md",
 ]:
