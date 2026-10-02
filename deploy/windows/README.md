@@ -119,7 +119,7 @@ deploy/
 ├── backups/             # backup.sh 默认备份目录
 ├── portainer/           # 可选：Portainer 浏览器 Docker 管理界面
 │   └── portainer-compose.yml  # 仅绑定 127.0.0.1:9443，本地 / 云共用
-├── VERSION              # 版本号单点来源，当前 0.6.4
+├── VERSION              # 版本号单点来源，当前 0.6.5
 └── ...
 ```
 
@@ -186,7 +186,7 @@ docker compose --env-file deploy\.env -f deploy\docker-compose.yml up -d --build
 
 脚本会：
 
-- 使用 `deploy/VERSION` 作为镜像版本（当前 `0.6.4`）；
+- 使用 `deploy/VERSION` 作为镜像版本（当前 `0.6.5`）；
 - 后台启动 `elbot` 容器；
 - 等待 `/ready`；
 - 打印容器状态与 `/live`、`/ready`、`/healthz`。
@@ -258,7 +258,7 @@ Get-ChildItem .\deploy\data\config\elbot
 | --- | --- |
 | `/live` | 进程是否仍在运行 |
 | `/ready` | 初始化、数据目录、调度心跳是否就绪 |
-| `/healthz` | 聚合状态；平台/模型故障显示 `degraded` |
+| `/healthz` | 聚合状态；设置 `ELBOT_OPS_TOKEN` 后需要鉴权；平台/模型故障显示 `degraded` |
 
 ### 5.3 活跃任务、资源与聚合诊断
 
@@ -275,7 +275,7 @@ Get-ChildItem .\deploy\data\config\elbot
 - `/diagnostics`：面向“机器人没回复”的聚合诊断。
 
 如果设置了 `ELBOT_OPS_TOKEN`，脚本会自动读取 `deploy/.env` 并带上
-`Authorization: Bearer <token>` 与 `X-Elbot-Ops-Token`。
+`Authorization: Bearer <token>` 与 `X-Elbot-Ops-Token`。未设置时敏感运维接口默认不注册，只保留 `/live` 和 `/ready`；排障时如需临时无鉴权访问，可在 `.env` 显式设置 `ELBOT_OPS_ALLOW_UNAUTHENTICATED=1`，但只应用于本机回环/可信网络。
 
 ### 5.4 复用 `elbot doctor`
 

@@ -75,7 +75,7 @@ func (c learningCommand) Info() command.Info {
 	return command.Info{
 		Name:        "learning",
 		Aliases:     []string{"selflearning"},
-		Usage:       "/learning status | mine | review [status] | approve <id> [meaning] | reject <id>",
+		Usage:       "/learning status | mine | review [status] | approve <id> [meaning] | reject <id> | undo <id>",
 		Description: "管理 clean-room 表达/黑话候选；只有 approved 的内容会注入上下文。",
 		MinRole:     security.RoleSuperadmin,
 		Help: strings.TrimSpace(`Usage:
@@ -83,7 +83,8 @@ func (c learningCommand) Info() command.Info {
   /learning mine
   /learning review [pending|approved|rejected]
   /learning approve <id> [含义]
-  /learning reject <id>`),
+  /learning reject <id>
+  /learning undo <id>`),
 	}
 }
 
@@ -105,11 +106,11 @@ func (c learningCommand) Handle(ctx context.Context, req command.Request) (*comm
 		}
 		return &command.Result{Content: fmt.Sprintf("self learning：待审 %d 条，已批准 %d 条。", pending, approved)}, nil
 	case "mine":
-		created, err := c.deps.SelfLearning.Mine(ctx, scope.Platform, scope.PlatformScopeID, 3, 100)
+		stats, err := c.deps.SelfLearning.Mine(ctx, scope.Platform, scope.PlatformScopeID, 3, 100)
 		if err != nil {
 			return nil, err
 		}
-		return &command.Result{Content: fmt.Sprintf("已生成/更新 %d 条待审候选。", created)}, nil
+		return &command.Result{Content: fmt.Sprintf("候选挖掘完成：新增 %d 条，更新 %d 条，跳过 %d 条。", stats.Created, stats.Updated, stats.Skipped)}, nil
 	case "review":
 		status := "pending"
 		if len(args) > 1 {
@@ -139,11 +140,32 @@ func (c learningCommand) Handle(ctx context.Context, req command.Request) (*comm
 		if len(args) > 2 {
 			meaning = strings.Join(args[2:], " ")
 		}
-		if err := c.deps.SelfLearning.Decide(ctx, args[1], status, meaning); err != nil {
+		if err := c.deps.SelfLearning.Decide(ctx, scope.Platform, scope.PlatformScopeID, args[1], status, meaning, reviewerName(ctx)); err != nil {
 			return nil, err
 		}
 		return &command.Result{Content: fmt.Sprintf("候选 %s 已标记为 %s。", args[1], status)}, nil
+	case "undo":
+		if len(args) < 2 {
+			return &command.Result{Content: "undo 需要候选 ID。"}, nil
+		}
+		if err := c.deps.SelfLearning.Undo(ctx, scope.Platform, scope.PlatformScopeID, args[1], reviewerName(ctx)); err != nil {
+			return nil, err
+		}
+		return &command.Result{Content: fmt.Sprintf("候选 %s 已撤回为待审。", args[1])}, nil
 	default:
-		return &command.Result{Content: "用法：/learning status|mine|review|approve|reject"}, nil
+		return &command.Result{Content: "用法：/learning status|mine|review|approve|reject|undo"}, nil
 	}
+}
+
+func reviewerName(ctx context.Context) string {
+	actor, ok := security.ActorFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	for _, value := range []string{actor.ID, actor.PlatformUserID, actor.Nickname, actor.DisplayName} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }

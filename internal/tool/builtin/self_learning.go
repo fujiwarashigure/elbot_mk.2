@@ -8,6 +8,7 @@ import (
 
 	"elbot/internal/llm"
 	"elbot/internal/platform"
+	"elbot/internal/security"
 	"elbot/internal/selflearning"
 	"elbot/internal/tool"
 	"elbot/internal/tool/runtimeinfo"
@@ -64,11 +65,11 @@ func (t SelfLearningReviewTool) Call(ctx context.Context, req tool.CallRequest) 
 		}
 		return &tool.Result{Content: fmt.Sprintf("self learning：待审 %d 条，已批准 %d 条。", pending, approved)}, nil
 	case "mine":
-		created, err := t.service.Mine(ctx, msgCtx.Platform, msgCtx.ScopeID, args.MinCount, args.Limit)
+		stats, err := t.service.Mine(ctx, msgCtx.Platform, msgCtx.ScopeID, args.MinCount, args.Limit)
 		if err != nil {
 			return nil, err
 		}
-		return &tool.Result{Content: fmt.Sprintf("已生成/更新 %d 条待审候选。", created)}, nil
+		return &tool.Result{Content: fmt.Sprintf("候选挖掘完成：新增 %d 条，更新 %d 条，跳过 %d 条。", stats.Created, stats.Updated, stats.Skipped)}, nil
 	case "list":
 		status := strings.TrimSpace(args.Status)
 		if status == "" {
@@ -94,24 +95,45 @@ func (t SelfLearningReviewTool) Call(ctx context.Context, req tool.CallRequest) 
 		if action == "reject" {
 			status = selflearning.StatusRejected
 		}
-		if err := t.service.Decide(ctx, args.ID, status, args.Meaning); err != nil {
+		if err := t.service.Decide(ctx, msgCtx.Platform, msgCtx.ScopeID, args.ID, status, args.Meaning, toolReviewer(ctx)); err != nil {
 			return nil, err
 		}
 		return &tool.Result{Content: fmt.Sprintf("候选 %s 已标记为 %s。", args.ID, status)}, nil
+	case "undo":
+		if strings.TrimSpace(args.ID) == "" {
+			return &tool.Result{Content: "undo 需要 id。"}, nil
+		}
+		if err := t.service.Undo(ctx, msgCtx.Platform, msgCtx.ScopeID, args.ID, toolReviewer(ctx)); err != nil {
+			return nil, err
+		}
+		return &tool.Result{Content: fmt.Sprintf("候选 %s 已撤回为待审。", args.ID)}, nil
 	default:
-		return &tool.Result{Content: "action 只支持 status、mine、list、approve、reject。"}, nil
+		return &tool.Result{Content: "action 只支持 status、mine、list、approve、reject、undo。"}, nil
 	}
+}
+
+func toolReviewer(ctx context.Context) string {
+	actor, ok := security.ActorFromContext(ctx)
+	if !ok {
+		return "tool"
+	}
+	for _, value := range []string{actor.ID, actor.PlatformUserID, actor.Nickname, actor.DisplayName} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return "tool"
 }
 
 func selfLearningReviewBuilder() *tool.Builder {
 	return tool.NewBuilder(selfLearningReviewToolName).
-		Description("管理 clean-room 表达/黑话候选：查看状态、挖掘候选、列出、批准或拒绝。批准后的内容才会注入上下文。").
+		Description("管理 clean-room 表达/黑话候选：查看状态、挖掘候选、列出、批准、拒绝或撤回。批准后的内容才会注入上下文。").
 		Risk(tool.RiskHigh).
 		SuperadminOnly().
 		Tags("learning").
-		String("action", "status、mine、list、approve、reject；默认 status。").
+		String("action", "status、mine、list、approve、reject、undo；默认 status。").
 		String("status", "list 时过滤 pending/approved/rejected。").
-		String("id", "approve/reject 的候选 ID。").
+		String("id", "approve/reject/undo 的候选 ID。").
 		String("meaning", "approve 黑话时可选的含义。").
 		Integer("min_count", "mine 时候选最低出现次数。").
 		Integer("limit", "返回/生成数量上限。")

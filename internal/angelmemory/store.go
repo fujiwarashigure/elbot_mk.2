@@ -3,6 +3,7 @@ package angelmemory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,11 +11,21 @@ import (
 	"time"
 
 	"elbot/internal/storage"
+	"elbot/internal/textmatch"
 
 	_ "modernc.org/sqlite"
 )
 
 const defaultRecallLimit = 5
+
+var (
+	// ErrContentTooLong is returned when one memory exceeds the configured
+	// per-entry rune budget.
+	ErrContentTooLong = errors.New("angel memory content is too long")
+	// ErrScopeFull is returned when a scope is at its configured memory count
+	// limit and the new content would create another entry.
+	ErrScopeFull = errors.New("angel memory scope limit reached")
+)
 
 // Memory is one reviewable, scope-local memory record.
 type Memory struct {
@@ -31,14 +42,31 @@ type Memory struct {
 }
 
 type RecallQuery struct {
-	Platform string
-	ScopeID  string
-	Text     string
-	Limit    int
+	Platform      string
+	ScopeID       string
+	Text          string
+	Limit         int
+	AllowFallback bool
 }
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	limits StoreLimits
+}
+
+// SetLimits applies write-side limits. It is intended to be called once while
+// the store is being constructed, before concurrent use.
+func (s *Store) SetLimits(limits StoreLimits) {
+	if s == nil {
+		return
+	}
+	if limits.MaxContentRunes <= 0 {
+		limits.MaxContentRunes = defaultMaxContentRunes
+	}
+	if limits.MaxPerScope <= 0 {
+		limits.MaxPerScope = defaultMaxPerScope
+	}
+	s.limits = limits
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -83,7 +111,10 @@ ON memories(platform, scope_id, strength);
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate angel memory sqlite: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{
+		db:     db,
+		limits: StoreLimits{MaxContentRunes: defaultMaxContentRunes, MaxPerScope: defaultMaxPerScope},
+	}, nil
 }
 
 func (s *Store) Close() error {
@@ -106,6 +137,31 @@ func (s *Store) Remember(ctx context.Context, memory *Memory) (*Memory, error) {
 	memory.Tags = normalizeTags(memory.Tags)
 	if memory.Platform == "" || memory.ScopeID == "" || memory.Content == "" {
 		return nil, fmt.Errorf("angel memory platform, scope and content are required")
+	}
+	if max := s.limits.MaxContentRunes; max > 0 && len([]rune(memory.Content)) > max {
+		return nil, fmt.Errorf("%w: %d runes (max %d)", ErrContentTooLong, len([]rune(memory.Content)), max)
+	}
+	if max := s.limits.MaxPerScope; max > 0 {
+		var existingID string
+		err := s.db.QueryRowContext(ctx, `
+SELECT id FROM memories WHERE platform = ? AND scope_id = ? AND content = ?`,
+			memory.Platform, memory.ScopeID, memory.Content).Scan(&existingID)
+		switch {
+		case err == nil:
+			// Updating an existing entry is always allowed.
+		case errors.Is(err, sql.ErrNoRows):
+			var count int
+			if countErr := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM memories WHERE platform = ? AND scope_id = ?`,
+				memory.Platform, memory.ScopeID).Scan(&count); countErr != nil {
+				return nil, fmt.Errorf("count angel memory scope: %w", countErr)
+			}
+			if count >= max {
+				return nil, fmt.Errorf("%w: %d entries (max %d)", ErrScopeFull, count, max)
+			}
+		default:
+			return nil, fmt.Errorf("check angel memory entry: %w", err)
+		}
 	}
 	if memory.Strength <= 0 {
 		memory.Strength = 50
@@ -179,25 +235,82 @@ func (s *Store) Recall(ctx context.Context, query RecallQuery) ([]Memory, error)
 		limit = 50
 	}
 	text := strings.TrimSpace(query.Text)
-	conditions := []string{"platform = ?", "scope_id = ?"}
-	params := []any{platform, scopeID}
-	if text != "" {
-		conditions = append(conditions, "(content LIKE ? OR tags LIKE ?)")
-		pattern := "%" + text + "%"
-		params = append(params, pattern, pattern)
-	}
-	params = append(params, limit)
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id, platform, scope_id, content, tags, strength, source, created_at, updated_at, last_accessed_at
-FROM memories
-WHERE `+strings.Join(conditions, " AND ")+`
+	terms := textmatch.Keywords(text)
+	const selectColumns = `SELECT id, platform, scope_id, content, tags, strength, source, created_at, updated_at, last_accessed_at FROM memories`
+
+	var memories []Memory
+	if len(terms) == 0 {
+		rows, err := s.db.QueryContext(ctx, selectColumns+`
+WHERE platform = ? AND scope_id = ?
 ORDER BY strength DESC, updated_at DESC
-LIMIT ?`, params...)
-	if err != nil {
-		return nil, fmt.Errorf("recall angel memory: %w", err)
+LIMIT ?`, platform, scopeID, limit)
+		if err != nil {
+			return nil, fmt.Errorf("recall angel memory: %w", err)
+		}
+		memories, err = scanMemories(rows)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		whereParts := make([]string, 0, len(terms))
+		scoreParts := make([]string, 0, len(terms))
+		whereParams := make([]any, 0, len(terms)*2)
+		scoreParams := make([]any, 0, len(terms)*2)
+		for _, term := range terms {
+			pattern := textmatch.LikePattern(term)
+			whereParts = append(whereParts, `(content LIKE ? ESCAPE '\' OR tags LIKE ? ESCAPE '\')`)
+			whereParams = append(whereParams, pattern, pattern)
+			scoreParts = append(scoreParts, `(CASE WHEN content LIKE ? ESCAPE '\' THEN 2 ELSE 0 END + CASE WHEN tags LIKE ? ESCAPE '\' THEN 1 ELSE 0 END)`)
+			scoreParams = append(scoreParams, pattern, pattern)
+		}
+		params := make([]any, 0, 2+len(whereParams)+len(scoreParams)+1)
+		params = append(params, platform, scopeID)
+		params = append(params, whereParams...)
+		params = append(params, scoreParams...)
+		params = append(params, limit)
+		statement := selectColumns + `
+WHERE platform = ? AND scope_id = ? AND (` + strings.Join(whereParts, " OR ") + `)
+ORDER BY (` + strings.Join(scoreParts, " + ") + `) DESC, strength DESC, updated_at DESC
+LIMIT ?`
+		rows, err := s.db.QueryContext(ctx, statement, params...)
+		if err != nil {
+			return nil, fmt.Errorf("recall angel memory: %w", err)
+		}
+		memories, err = scanMemories(rows)
+		if err != nil {
+			return nil, err
+		}
 	}
+
+	if len(memories) == 0 && query.AllowFallback && text != "" && len(terms) > 0 {
+		fallbackLimit := limit
+		if fallbackLimit > 3 {
+			fallbackLimit = 3
+		}
+		rows, err := s.db.QueryContext(ctx, selectColumns+`
+WHERE platform = ? AND scope_id = ? AND strength >= 60
+ORDER BY strength DESC, updated_at DESC
+LIMIT ?`, platform, scopeID, fallbackLimit)
+		if err != nil {
+			return nil, fmt.Errorf("recall angel memory fallback: %w", err)
+		}
+		memories, err = scanMemories(rows)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(memories) > 0 {
+		if err := s.touch(ctx, memories); err != nil {
+			return memories, nil
+		}
+	}
+	return memories, nil
+}
+
+func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	defer rows.Close()
-	memories := make([]Memory, 0, limit)
+	memories := []Memory{}
 	for rows.Next() {
 		var memory Memory
 		var createdAt, updatedAt, lastAccessedAt string
@@ -211,11 +324,6 @@ LIMIT ?`, params...)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate angel memory: %w", err)
-	}
-	if len(memories) > 0 {
-		if err := s.touch(ctx, memories); err != nil {
-			return memories, nil
-		}
 	}
 	return memories, nil
 }

@@ -73,8 +73,9 @@ func TestServerReadyCheckerFailure(t *testing.T) {
 func TestServerExtraHandlers(t *testing.T) {
 	state := NewState(Options{})
 	server, err := NewServer(ServerOptions{
-		Addr:  "127.0.0.1:0",
-		State: state,
+		Addr:                              "127.0.0.1:0",
+		State:                             state,
+		AllowUnauthenticatedExtraHandlers: true,
 		ExtraHandlers: map[string]http.Handler{
 			"/tasks": http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusTeapot)
@@ -90,6 +91,58 @@ func TestServerExtraHandlers(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusTeapot {
 		t.Fatalf("status = %d", recorder.Code)
+	}
+}
+
+func TestServerExtraHandlersDisabledWithoutToken(t *testing.T) {
+	state := NewState(Options{})
+	server, err := NewServer(ServerOptions{
+		Addr:  "127.0.0.1:0",
+		State: state,
+		ExtraHandlers: map[string]http.Handler{
+			"/tasks": http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestServerProtectsHealthzWithToken(t *testing.T) {
+	state := NewState(Options{})
+	state.Beat()
+	state.SetReady(true)
+	server, err := NewServer(ServerOptions{
+		Addr:              "127.0.0.1:0",
+		State:             state,
+		ExtraHandlerToken: "ops-secret",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	handler := server.Handler()
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /healthz status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("Authorization", "Bearer ops-secret")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("authenticated /healthz status = %d, want %d, body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 }
 

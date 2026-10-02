@@ -309,8 +309,12 @@ func (c GroupAnalysisConfig) IsEnabled() bool {
 
 // AngelMemoryConfig controls the clean-room long-memory tool and injection.
 type AngelMemoryConfig struct {
-	Enabled       *bool `toml:"enabled"`
-	RetentionDays int   `toml:"retention_days"`
+	Enabled            *bool `toml:"enabled"`
+	RetentionDays      int   `toml:"retention_days"`
+	MaxContentRunes    int   `toml:"max_content_runes"`
+	MaxContextRunes    int   `toml:"max_context_runes"`
+	MaxPerScope        int   `toml:"max_per_scope"`
+	MaxWritesPerMinute int   `toml:"max_writes_per_minute"`
 }
 
 func (c AngelMemoryConfig) IsEnabled() bool {
@@ -319,9 +323,11 @@ func (c AngelMemoryConfig) IsEnabled() bool {
 
 // SelfLearningConfig controls the clean-room expression/jargon learning layer.
 type SelfLearningConfig struct {
-	Enabled       *bool `toml:"enabled"`
-	RetentionDays int   `toml:"retention_days"`
-	MinCount      int   `toml:"min_count"`
+	Enabled         *bool `toml:"enabled"`
+	RetentionDays   int   `toml:"retention_days"`
+	MinCount        int   `toml:"min_count"`
+	MaxMeaningRunes int   `toml:"max_meaning_runes"`
+	MaxContextRunes int   `toml:"max_context_runes"`
 }
 
 func (c SelfLearningConfig) IsEnabled() bool {

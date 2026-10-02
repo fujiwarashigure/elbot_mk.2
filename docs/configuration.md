@@ -205,20 +205,22 @@ services:
 # 原生部署默认只监听回环；容器内需要监听 0.0.0.0，宿主机端口仍只映射到 127.0.0.1。
 ELBOT_HEALTH_ADDR=127.0.0.1:32171
 ELBOT_HEALTH_LIVE_STALE_SECONDS=90
-# /tasks 和 /metrics 的访问 token。非回环监听或反代时必须设置。
+# /tasks、/metrics、/diagnostics、/plugins/* 和 /healthz 的访问 token。
+# 未设置时这些敏感接口默认不注册；只有显式开启不安全模式才会无鉴权暴露：
 # ELBOT_OPS_TOKEN=请替换为随机长字符串
+# ELBOT_OPS_ALLOW_UNAUTHENTICATED=1
 ```
 
 `ELBOT_HEALTH_LIVE_STALE_SECONDS` 建议明显大于调度心跳间隔；当前实现约每 10 秒更新一次心跳，未启用任何平台时也会持续发送心跳。
 
 - `GET /live`：只表示进程仍在运行；进程存活时 HTTP 返回 200，不判断模型、平台或调度心跳。
 - `GET /ready`：进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期。平台未连接、模型 API 故障不会让它失败。
-- `GET /healthz`：汇总状态。平台或模型故障显示为 `degraded`；调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。HTTP 状态不应单独作为自动重启依据。
+- `GET /healthz`：汇总状态。设置 `ELBOT_OPS_TOKEN` 后，`/healthz` 也需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`；平台或模型故障显示为 `degraded`，调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。HTTP 状态不应单独作为自动重启依据。
 - `GET /tasks`：活跃任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。
 - `GET /metrics`：任务/资源/平台/模型状态、熔断状态、限速阈值与拒绝计数、生图队列状态。
 - `GET /diagnostics`：面向“机器人没回复”的聚合诊断，包含排队/超时、限速命中、熔断状态和最近一次重启原因。
 
-`/tasks` 和 `/metrics` 是运维接口。设置 `ELBOT_OPS_TOKEN` 后，请求必须带 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`。该接口只应监听容器内部或宿主机回环地址；不要在 Nginx 中无鉴权暴露到公网。
+`/tasks`、`/metrics`、`/diagnostics`、`/plugins/*` 是敏感运维接口。默认安全策略是：**未设置 `ELBOT_OPS_TOKEN` 时不注册这些接口**，只保留 `/live`、`/ready`。本机排障需要临时无鉴权访问时，显式设置 `ELBOT_OPS_ALLOW_UNAUTHENTICATED=1`；这应当只用于回环或完全可信的临时环境。接口只应监听容器内部或宿主机回环地址，不要在 Nginx 中无鉴权暴露到公网。
 
 平台和模型的 `last_error` 在写入健康快照前会先做凭据脱敏（`sk-` / `Bearer` / `api_key=` / JSON 凭据 / Telegram bot token / URL userinfo 等），以免上游错误里的 token 通过 `/healthz`、`/metrics`、`/diagnostics` 泄露。这是第二道防线，不改变"这些接口必须限制在回环或可信内网"的前提。
 
@@ -855,11 +857,12 @@ report_days = 1
 ```
 
 - `enabled`：默认 `true`；为 `false` 时不注册 `group_analysis` 工具。
-- `max_messages`：单次统计最多读取多少条本地历史消息，默认 5000。工具参数 `limit` 不能超过它。
+- `max_messages`：单次统计每条方向（入站/出站）最多读取多少条本地历史消息，默认 5000，硬上限 200000。服务层按 5000 条分页完整读取；达到上限时报告会标注 `truncated` 和实际扫描条数。工具参数 `limit` 不能超过它。
 - `report_enabled`：默认 `false`；开启后注册 Cron 日报，把统计和可选 LLM 摘要发送到 `report_platform` / `report_scope_id`。
 - `report_schedule`：Cron 表达式，默认 `0 9 * * *`。
 - `report_days`：日报统计最近多少天，默认 1。
 - 摘要使用当前默认 Session 模式对应的默认模型（`state.toml` 的 `mode_models` / `session.default_mode`）；不再单独引入 work 模型 slot。
+- 消息数按聊天记录统计（纯图片、文件等无文本消息也计入消息量和活跃成员）；字数只统计文本。统计区间按本地时区计算并显示在报告中。
 - 当前实现只读取本地 `chat_history` 与 `outbound_messages`，不复制第三方群分析插件的模板、图片或 Prompt。
 - OneBot 适配器额外实现可选 `get_group_msg_history` / `get_group_info` / `get_group_member_list` 能力；Telegram 实现群信息和管理员列表；平台不提供时调用方回退到本地历史。
 
@@ -869,12 +872,22 @@ report_days = 1
 [angel_memory]
 enabled = true
 retention_days = 365
+# 单条记忆最大字符数（rune）
+max_content_runes = 1000
+# 单个平台/会话最多保留多少条记忆
+max_per_scope = 1000
+# 每个平台/会话每分钟最多写入次数
+max_writes_per_minute = 30
+# 每轮最多注入多少字符的上下文
+max_context_runes = 1200
 ```
 
 - 使用本地 SQLite `angel_memory.db`；
 - 提供 `angel_remember` / `angel_recall` 工具；
+- 召回会先做关键词 / 中文 2-4 字 n-gram 匹配与相关度排序；没有命中时，自动注入会谨慎回退到少量高强度记忆；
+- 注入内容会统一转义边界字符、折叠控制字符、按条限长并按总预算截断，单条超长记忆不会挡住后面的短记忆；
 - `llm.turn.prepared` 会按当前平台/会话检索记忆并追加临时 system 上下文，不写入 Session 历史；
-- `retention_days <= 0` 时不做时间清理。
+- `retention_days <= 0` 时不做时间清理；`max_content_runes`、`max_per_scope`、`max_writes_per_minute`、`max_context_runes` 未设置时使用内置默认值。
 
 ## 自主学习
 
@@ -883,11 +896,17 @@ retention_days = 365
 enabled = true
 retention_days = 365
 min_count = 3
+# 单个候选含义的最大字符数
+max_meaning_runes = 200
+# 每轮最多注入多少字符的学习上下文
+max_context_runes = 1200
 ```
 
 - 使用本地 SQLite `self_learning.db`；
-- 观察消息并生成表达/黑话候选；
+- 观察消息并生成表达/黑话候选；挖掘会按连续词段提取、单条消息内去重，并结合出现次数和不同用户数排序；
 - 候选先进入 `pending`，只有管理员通过 `/learning` 或 `self_learning_review` 批准为 `approved` 后才会注入上下文；
+- 审核按 `id + platform + scope_id` 定位，不存在的候选返回错误，并记录审核人和审核时间；`/learning undo <id>` 可撤回为待审；
+- 已审核上下文优先选择与当前话题相关的条目，注入内容同样做边界转义和长度限制；
 - `/learning` 和 `self_learning_review` 仅超级管理员可用。
 
 ## 隐私清理

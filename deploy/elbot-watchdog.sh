@@ -229,13 +229,13 @@ capture_diagnostics() {
         echo "last_restart_at=$(read_int last_restart_epoch 0)"
         echo "last_restart_reason=$(cat "${RESTART_REASON_FILE}" 2>/dev/null || tail -n 1 "$(state_file restart_reasons.log)" 2>/dev/null || true)"
     } >"${dir}/summary.txt" 2>&1 || true
-    curl -sS --max-time 5 "${HEALTH_URL}" >"${dir}/live.json" 2>&1 || true
-    curl -sS --max-time 5 "${READY_URL}" >"${dir}/ready.json" 2>&1 || true
-    curl -sS --max-time 5 "${HEALTHZ_URL}" >"${dir}/healthz.json" 2>&1 || true
     local curl_auth=()
     if [ -n "${OPS_TOKEN}" ]; then
         curl_auth=(-H "Authorization: Bearer ${OPS_TOKEN}")
     fi
+    curl -sS --max-time 5 "${HEALTH_URL}" >"${dir}/live.json" 2>&1 || true
+    curl -sS --max-time 5 "${READY_URL}" >"${dir}/ready.json" 2>&1 || true
+    curl -sS --max-time 5 "${HEALTHZ_URL}" "${curl_auth[@]}" >"${dir}/healthz.json" 2>&1 || true
     curl -sS --max-time 5 "${HEALTHZ_URL%/healthz}/tasks" "${curl_auth[@]}" >"${dir}/tasks.json" 2>&1 || true
     curl -sS --max-time 5 "${HEALTHZ_URL%/healthz}/metrics" "${curl_auth[@]}" >"${dir}/metrics.json" 2>&1 || true
     if command -v docker >/dev/null 2>&1; then

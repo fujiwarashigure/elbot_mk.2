@@ -25,7 +25,7 @@ func (s LLMSummarizer) Summarize(ctx context.Context, report Report) (string, er
 	if s.Client == nil {
 		return "", fmt.Errorf("group analysis summarizer client is not configured")
 	}
-	prompt := strings.TrimSpace(fmt.Sprintf(`请用中文简洁总结下面的群聊统计报告，指出整体活跃度、最活跃成员和值得关注的变化。不要编造报告中没有的数据，控制在 200 字以内。
+	prompt := strings.TrimSpace(fmt.Sprintf(`请用中文简洁总结下面的群聊统计报告：只依据报告中的数字说明整体活跃度、最活跃成员和活跃时段；如果报告没有提供上一周期基线，不要推断或编造“上升/下降”等变化，也不要编造报告中没有的数据。控制在 200 字以内。
 
 %s`, report.FormatText()))
 	stream, err := s.Client.ChatStream(ctx, llm.ChatRequest{

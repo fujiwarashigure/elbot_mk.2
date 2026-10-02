@@ -271,6 +271,14 @@ report_days = 1
 enabled = true
 # 0 表示不按时间清理。
 retention_days = 365
+# 单条记忆最大字符数（rune）；超过会拒绝写入。
+# max_content_runes = 1000
+# 单个会话最多保留多少条记忆。
+# max_per_scope = 1000
+# 每个会话每分钟最多写入次数。
+# max_writes_per_minute = 30
+# 每轮最多注入多少字符的上下文。
+# max_context_runes = 1200
 
 [self_learning]
 # clean-room 表达/黑话学习；默认启用，但只有 review 通过的内容会注入。
@@ -278,6 +286,10 @@ enabled = true
 retention_days = 365
 # 候选至少出现多少次才进入 review。
 min_count = 3
+# 单个候选含义的最大字符数。
+# max_meaning_runes = 200
+# 每轮最多注入多少字符的学习上下文。
+# max_context_runes = 1200
 
 # image_generation 已移到共享的只读 services.toml，避免多个服务各配一份。
 # 旧部署仍可把 [image_generation] 写回这里；写了 services.toml 时以 services.toml 为准。

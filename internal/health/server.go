@@ -21,12 +21,16 @@ type ServerOptions struct {
 	State         *State
 	Checkers      []Checker
 	ExtraHandlers map[string]http.Handler
-	// ExtraHandlerToken protects /tasks, /metrics and any other extra handler.
-	// Empty means no authentication, which is only appropriate when the server
-	// is bound to loopback or otherwise not reachable from untrusted networks.
+	// ExtraHandlerToken protects /tasks, /metrics, /diagnostics, any other
+	// extra handler, and /healthz. Empty means extra handlers are disabled
+	// unless AllowUnauthenticatedExtraHandlers is explicitly true.
 	ExtraHandlerToken string
-	Logger            *slog.Logger
-	ReadHeaderTimeout time.Duration
+	// AllowUnauthenticatedExtraHandlers is an explicit opt-in for exposing
+	// sensitive ops handlers without a token. It should only be used for
+	// trusted loopback-only diagnostics.
+	AllowUnauthenticatedExtraHandlers bool
+	Logger                            *slog.Logger
+	ReadHeaderTimeout                 time.Duration
 }
 
 // Server exposes /live, /ready and /healthz for internal or loopback access.
@@ -63,7 +67,11 @@ func NewServer(opts ServerOptions) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/live", s.handleLive)
 	mux.HandleFunc("/ready", s.handleReady)
-	mux.HandleFunc("/healthz", s.handleHealthz)
+	healthzHandler := http.Handler(http.HandlerFunc(s.handleHealthz))
+	if s.extraHandlerToken != "" {
+		healthzHandler = s.requireExtraHandlerToken(healthzHandler)
+	}
+	mux.Handle("/healthz", healthzHandler)
 	for path, handler := range opts.ExtraHandlers {
 		if handler == nil {
 			continue
@@ -73,6 +81,10 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		}
 		if s.extraHandlerToken != "" {
 			handler = s.requireExtraHandlerToken(handler)
+		} else if !opts.AllowUnauthenticatedExtraHandlers {
+			// Secure default: a missing token disables the sensitive ops
+			// handlers instead of exposing them silently.
+			continue
 		}
 		mux.Handle(path, handler)
 	}

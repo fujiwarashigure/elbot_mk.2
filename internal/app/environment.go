@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -81,7 +80,7 @@ func startupProfileEnabled(level string) bool {
 func resolveRunMode(mode RunMode) (RunMode, error) {
 	switch mode {
 	case "", RunModeAuto:
-		if runtime.GOOS != "windows" && serviceMarkerRunning() {
+		if serviceMarkerRunning() {
 			fmt.Fprintln(os.Stderr, "ElBot service detected, starting local CLI-only mode. Use `elbot run` to force full foreground mode.")
 			return RunModeCLIOnly, nil
 		}

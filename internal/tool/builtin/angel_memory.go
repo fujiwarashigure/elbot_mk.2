@@ -123,5 +123,5 @@ func angelRecallBuilder() *tool.Builder {
 		Risk(tool.RiskLow).
 		Tags("memory").
 		String("query", "检索关键词，留空返回强度最高的记忆。").
-		Integer("limit", "返回条数，默认 5，最大 20。")
+		Integer("limit", "返回条数，默认 5，最大 50。")
 }

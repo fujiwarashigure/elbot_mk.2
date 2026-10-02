@@ -1,4 +1,21 @@
-## Unreleased
+## [v0.6.5 - 2026-10-02]
+
+### Changed
+
+- 版本号提升到 `0.6.5`；`deploy/VERSION`、Compose 默认镜像、构建/离线脚本和中文部署文档中的版本示例同步更新。
+
+### Security
+
+- 长期记忆与自学习上下文统一走安全渲染：转义边界字符、剥离控制/零宽字符、折叠多行，并按条和总量限制长度；`angel_memory` 增加单条长度、单会话条数和每会话写入频率限制，`self_learning` 增加含义/注入长度限制。
+- 运维接口改为安全默认：未设置 `ELBOT_OPS_TOKEN` 时默认不注册 `/tasks`、`/metrics`、`/diagnostics`、`/plugins/*`，只保留 `/live`、`/ready`；只有显式设置 `ELBOT_OPS_ALLOW_UNAUTHENTICATED=1` 才允许无鉴权暴露。设置 token 后 `/healthz` 也需要鉴权，`doctor` 与 watchdog 已自动携带 token。
+- 自学习审核改为按 `id + platform + scope_id` 定位并检查影响行数，记录审核人和审核时间；新增 `/learning undo`，不存在的候选返回明确错误。
+
+### Fixed
+
+- 长期记忆召回从整句 `LIKE` 改为关键词 / 中文 2-4 字 n-gram 匹配与相关度排序，未命中时可谨慎回退到少量高强度记忆；修复单条超长记忆会挡住后续短记忆的问题，并统一工具 schema 的最大条数说明。
+- 群分析按消息记录计数（纯图片/文件等无文本消息也计入消息量和活跃成员），按 `AfterSeq` 分页读取完整窗口，达到上限时输出 `truncated` 警告和实际扫描条数，并明确本地时区与“消息数/字数”口径；摘要提示词不再要求模型编造同比变化。
+- 自学习挖掘按连续词段提取、不跨标点，单条消息内去重，记录不同用户数并返回 `created/updated/skipped`；已审核上下文按当前话题相关度优先排序。
+- Windows 原生版单实例保护改为命名互斥体，并增加 Windows 原生测试与 CI job。
 
 ## [v0.6.4 - 2026-10-02]
 

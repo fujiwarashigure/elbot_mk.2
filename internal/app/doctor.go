@@ -119,7 +119,7 @@ func RunDoctor(ctx context.Context, opts DoctorOptions) (DoctorReport, error) {
 		add("platform", "configured", "passed", strings.Join(enabled, ", "), nil)
 	}
 	if healthURL != "" {
-		if snapshot, err := fetchHealthSnapshot(ctx, healthURL); err != nil {
+		if snapshot, err := fetchHealthSnapshot(ctx, healthURL, resolveDoctorOpsToken(cfg)); err != nil {
 			add("platform", "connection", "failed", healthURL, err)
 			report.PlatformOK = false
 		} else {
@@ -256,11 +256,25 @@ func probeApplicationHealth(ctx context.Context, baseURL string) error {
 	return nil
 }
 
-func fetchHealthSnapshot(ctx context.Context, baseURL string) (health.Snapshot, error) {
+func resolveDoctorOpsToken(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	value, _, err := config.ConfigEnv(healthOpsTokenEnv, filepath.Dir(cfg.ConfigPath))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func fetchHealthSnapshot(ctx context.Context, baseURL, opsToken string) (health.Snapshot, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/healthz", nil)
 	if err != nil {
 		return health.Snapshot{}, err
+	}
+	if token := strings.TrimSpace(opsToken); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -3,6 +3,7 @@ package selflearning
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 
 	"elbot/internal/storage"
+	"elbot/internal/textmatch"
 
 	_ "modernc.org/sqlite"
 )
@@ -24,17 +26,44 @@ const (
 	KindJargon     = "jargon"
 )
 
+// ErrCandidateNotFound means the review target does not exist in the requested
+// platform/scope.
+var ErrCandidateNotFound = errors.New("self learning candidate not found")
+
 type Candidate struct {
-	ID        string
-	Kind      string
-	Platform  string
-	ScopeID   string
-	Pattern   string
-	Meaning   string
-	Count     int
-	Status    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID         string
+	Kind       string
+	Platform   string
+	ScopeID    string
+	Pattern    string
+	Meaning    string
+	Count      int
+	UserCount  int
+	Status     string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	ReviewedAt time.Time
+	ReviewedBy string
+}
+
+// MineStats separates real inserts from pending-row refreshes and unchanged or
+// already-decided candidates.
+type MineStats struct {
+	Created int
+	Updated int
+	Skipped int
+}
+
+func (m MineStats) Total() int { return m.Created + m.Updated + m.Skipped }
+
+// DecideRequest identifies one candidate and the scope that owns it.
+type DecideRequest struct {
+	ID       string
+	Platform string
+	ScopeID  string
+	Status   string
+	Meaning  string
+	Reviewer string
 }
 
 type Store struct {
@@ -82,9 +111,12 @@ CREATE TABLE IF NOT EXISTS candidates (
     pattern TEXT NOT NULL,
     meaning TEXT NOT NULL DEFAULT '',
     count INTEGER NOT NULL DEFAULT 0,
+    user_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    reviewed_at TEXT NOT NULL DEFAULT '',
+    reviewed_by TEXT NOT NULL DEFAULT '',
     UNIQUE(kind, platform, scope_id, pattern)
 );
 CREATE INDEX IF NOT EXISTS idx_selflearning_candidates_scope_status
@@ -92,6 +124,16 @@ ON candidates(kind, platform, scope_id, status, count);
 `); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate self learning sqlite: %w", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE candidates ADD COLUMN user_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE candidates ADD COLUMN reviewed_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE candidates ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate self learning candidates: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -122,11 +164,13 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 }
 
 // Mine scans recent observations and creates reviewable frequent-pattern
-// candidates. It is deliberately simple and deterministic: CJK n-grams 2-4 and
-// ASCII words length >= 3, excluding common stop phrases.
-func (s *Store) Mine(ctx context.Context, platform, scopeID string, minCount, limit int) (int, error) {
+// candidates. CJK n-grams 2-4 run only inside contiguous letter/digit runs,
+// ASCII words length >= 3 are extracted once per message, and each message
+// contributes at most one count per token.
+func (s *Store) Mine(ctx context.Context, platform, scopeID string, minCount, limit int) (MineStats, error) {
+	var stats MineStats
 	if s == nil || s.db == nil {
-		return 0, fmt.Errorf("self learning store is not open")
+		return stats, fmt.Errorf("self learning store is not open")
 	}
 	if minCount <= 0 {
 		minCount = 3
@@ -134,76 +178,138 @@ func (s *Store) Mine(ctx context.Context, platform, scopeID string, minCount, li
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
+	platform = strings.TrimSpace(platform)
+	scopeID = strings.TrimSpace(scopeID)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT text FROM observations
+SELECT text, user_id FROM observations
 WHERE platform = ? AND scope_id = ?
 ORDER BY created_at DESC
-LIMIT 1000`, strings.TrimSpace(platform), strings.TrimSpace(scopeID))
+LIMIT 1000`, platform, scopeID)
 	if err != nil {
-		return 0, fmt.Errorf("load self learning observations: %w", err)
+		return stats, fmt.Errorf("load self learning observations: %w", err)
 	}
 	defer rows.Close()
-	counts := map[string]int{}
+
+	type tokenStat struct {
+		count int
+		users map[string]struct{}
+	}
+	counts := map[string]*tokenStat{}
 	for rows.Next() {
-		var text string
-		if err := rows.Scan(&text); err != nil {
-			return 0, fmt.Errorf("scan self learning observation: %w", err)
+		var text, userID string
+		if err := rows.Scan(&text, &userID); err != nil {
+			return stats, fmt.Errorf("scan self learning observation: %w", err)
 		}
+		userID = strings.TrimSpace(userID)
+		seen := map[string]struct{}{}
 		for _, token := range extractCandidates(text) {
-			counts[token]++
+			if _, dup := seen[token]; dup {
+				continue
+			}
+			seen[token] = struct{}{}
+			entry := counts[token]
+			if entry == nil {
+				entry = &tokenStat{users: map[string]struct{}{}}
+				counts[token] = entry
+			}
+			entry.count++
+			if userID != "" {
+				entry.users[userID] = struct{}{}
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate self learning observations: %w", err)
+		return stats, fmt.Errorf("iterate self learning observations: %w", err)
 	}
-	type pair struct {
+
+	type ranked struct {
 		token string
 		count int
+		users int
 	}
-	ordered := make([]pair, 0, len(counts))
-	for token, count := range counts {
-		if count < minCount || isStopCandidate(token) {
+	ordered := make([]ranked, 0, len(counts))
+	for token, entry := range counts {
+		if entry.count < minCount || isStopCandidate(token) {
 			continue
 		}
-		ordered = append(ordered, pair{token: token, count: count})
+		ordered = append(ordered, ranked{token: token, count: entry.count, users: len(entry.users)})
 	}
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].count != ordered[j].count {
 			return ordered[i].count > ordered[j].count
+		}
+		if ordered[i].users != ordered[j].users {
+			return ordered[i].users > ordered[j].users
 		}
 		return ordered[i].token < ordered[j].token
 	})
 	if len(ordered) > limit {
 		ordered = ordered[:limit]
 	}
-	created := 0
 	for _, item := range ordered {
 		kind := KindExpression
 		if isASCIIWord(item.token) {
 			kind = KindJargon
 		}
-		if err := s.upsertCandidate(ctx, kind, platform, scopeID, item.token, item.count); err != nil {
-			return created, err
+		result, err := s.upsertCandidate(ctx, kind, platform, scopeID, item.token, item.count, item.users)
+		if err != nil {
+			return stats, err
 		}
-		created++
+		switch result {
+		case upsertCreated:
+			stats.Created++
+		case upsertUpdated:
+			stats.Updated++
+		default:
+			stats.Skipped++
+		}
 	}
-	return created, nil
+	return stats, nil
 }
 
-func (s *Store) upsertCandidate(ctx context.Context, kind, platform, scopeID, pattern string, count int) error {
-	now := storage.FormatTime(storage.Now())
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO candidates (id, kind, platform, scope_id, pattern, meaning, count, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, '', ?, 'pending', ?, ?)
-ON CONFLICT(kind, platform, scope_id, pattern) DO UPDATE SET
-    count = excluded.count,
-    updated_at = excluded.updated_at
-WHERE candidates.status = 'pending'`,
-		storage.NewID(), kind, strings.TrimSpace(platform), strings.TrimSpace(scopeID), pattern, count, now, now)
-	if err != nil {
-		return fmt.Errorf("upsert self learning candidate: %w", err)
+type upsertResult int
+
+const (
+	upsertSkipped upsertResult = iota
+	upsertCreated
+	upsertUpdated
+)
+
+func (s *Store) upsertCandidate(ctx context.Context, kind, platform, scopeID, pattern string, count, userCount int) (upsertResult, error) {
+	platform = strings.TrimSpace(platform)
+	scopeID = strings.TrimSpace(scopeID)
+	var existingID, existingStatus string
+	var existingCount, existingUserCount int
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, status, count, user_count FROM candidates
+WHERE kind = ? AND platform = ? AND scope_id = ? AND pattern = ?`,
+		kind, platform, scopeID, pattern).Scan(&existingID, &existingStatus, &existingCount, &existingUserCount)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		now := storage.FormatTime(storage.Now())
+		_, insertErr := s.db.ExecContext(ctx, `
+INSERT INTO candidates (id, kind, platform, scope_id, pattern, meaning, count, user_count, status, created_at, updated_at, reviewed_at, reviewed_by)
+VALUES (?, ?, ?, ?, ?, '', ?, ?, 'pending', ?, ?, '', '')`,
+			storage.NewID(), kind, platform, scopeID, pattern, count, userCount, now, now)
+		if insertErr != nil {
+			return upsertSkipped, fmt.Errorf("insert self learning candidate: %w", insertErr)
+		}
+		return upsertCreated, nil
+	case err != nil:
+		return upsertSkipped, fmt.Errorf("load self learning candidate: %w", err)
 	}
-	return nil
+	if existingStatus != StatusPending {
+		return upsertSkipped, nil
+	}
+	if count == existingCount && userCount == existingUserCount {
+		return upsertSkipped, nil
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE candidates SET count = ?, user_count = ?, updated_at = ? WHERE id = ?`,
+		count, userCount, storage.FormatTime(storage.Now()), existingID); err != nil {
+		return upsertSkipped, fmt.Errorf("update self learning candidate: %w", err)
+	}
+	return upsertUpdated, nil
 }
 
 func (s *Store) ListCandidates(ctx context.Context, platform, scopeID, status string, limit int) ([]Candidate, error) {
@@ -221,7 +327,7 @@ func (s *Store) ListCandidates(ctx context.Context, platform, scopeID, status st
 	}
 	params = append(params, limit)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, kind, platform, scope_id, pattern, meaning, count, status, created_at, updated_at
+SELECT id, kind, platform, scope_id, pattern, meaning, count, user_count, status, created_at, updated_at, reviewed_at, reviewed_by
 FROM candidates
 WHERE `+strings.Join(conditions, " AND ")+`
 ORDER BY count DESC, updated_at DESC
@@ -232,20 +338,38 @@ LIMIT ?`, params...)
 	return scanCandidates(rows)
 }
 
-func (s *Store) Decide(ctx context.Context, id, status, meaning string) error {
+// Decide updates one candidate only when it belongs to the requested scope.
+func (s *Store) Decide(ctx context.Context, req DecideRequest) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("self learning store is not open")
 	}
-	status = strings.TrimSpace(strings.ToLower(status))
+	status := strings.TrimSpace(strings.ToLower(req.Status))
 	switch status {
 	case StatusApproved, StatusRejected, StatusPending:
 	default:
 		return fmt.Errorf("unsupported review status %q", status)
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE candidates SET status = ?, meaning = ?, updated_at = ? WHERE id = ?`,
-		status, strings.TrimSpace(meaning), storage.FormatTime(storage.Now()), strings.TrimSpace(id))
+	id := strings.TrimSpace(req.ID)
+	platform := strings.TrimSpace(req.Platform)
+	scopeID := strings.TrimSpace(req.ScopeID)
+	if id == "" || platform == "" || scopeID == "" {
+		return fmt.Errorf("self learning decide requires id, platform and scope")
+	}
+	now := storage.FormatTime(storage.Now())
+	result, err := s.db.ExecContext(ctx, `
+UPDATE candidates
+SET status = ?, meaning = ?, reviewed_at = ?, reviewed_by = ?, updated_at = ?
+WHERE id = ? AND platform = ? AND scope_id = ?`,
+		status, strings.TrimSpace(req.Meaning), now, strings.TrimSpace(req.Reviewer), now, id, platform, scopeID)
 	if err != nil {
 		return fmt.Errorf("decide self learning candidate: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("decide self learning candidate rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrCandidateNotFound
 	}
 	return nil
 }
@@ -257,18 +381,56 @@ func (s *Store) ApprovedContext(ctx context.Context, platform, scopeID, query st
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id, kind, platform, scope_id, pattern, meaning, count, status, created_at, updated_at
-FROM candidates
+	platform = strings.TrimSpace(platform)
+	scopeID = strings.TrimSpace(scopeID)
+	const selectColumns = `SELECT id, kind, platform, scope_id, pattern, meaning, count, user_count, status, created_at, updated_at, reviewed_at, reviewed_by FROM candidates`
+	terms := textmatch.Keywords(query)
+	load := func(statement string, params ...any) ([]Candidate, error) {
+		rows, err := s.db.QueryContext(ctx, statement, params...)
+		if err != nil {
+			return nil, fmt.Errorf("load approved self learning context: %w", err)
+		}
+		return scanCandidates(rows)
+	}
+	if len(terms) == 0 {
+		return load(selectColumns+`
 WHERE platform = ? AND scope_id = ? AND status = 'approved'
 ORDER BY count DESC, updated_at DESC
-LIMIT ?`, strings.TrimSpace(platform), strings.TrimSpace(scopeID), limit)
-	if err != nil {
-		return nil, fmt.Errorf("load approved self learning context: %w", err)
+LIMIT ?`, platform, scopeID, limit)
 	}
-	return scanCandidates(rows)
-}
 
+	whereParts := make([]string, 0, len(terms))
+	scoreParts := make([]string, 0, len(terms))
+	whereParams := make([]any, 0, len(terms)*2)
+	scoreParams := make([]any, 0, len(terms)*2)
+	for _, term := range terms {
+		pattern := textmatch.LikePattern(term)
+		whereParts = append(whereParts, `(pattern LIKE ? ESCAPE '\' OR meaning LIKE ? ESCAPE '\')`)
+		whereParams = append(whereParams, pattern, pattern)
+		scoreParts = append(scoreParts, `(CASE WHEN pattern LIKE ? ESCAPE '\' THEN 2 ELSE 0 END + CASE WHEN meaning LIKE ? ESCAPE '\' THEN 1 ELSE 0 END)`)
+		scoreParams = append(scoreParams, pattern, pattern)
+	}
+	params := make([]any, 0, 2+len(whereParams)+len(scoreParams)+1)
+	params = append(params, platform, scopeID)
+	params = append(params, whereParams...)
+	params = append(params, scoreParams...)
+	params = append(params, limit)
+	statement := selectColumns + `
+WHERE platform = ? AND scope_id = ? AND status = 'approved' AND (` + strings.Join(whereParts, " OR ") + `)
+ORDER BY (` + strings.Join(scoreParts, " + ") + `) DESC, count DESC, updated_at DESC
+LIMIT ?`
+	candidates, err := load(statement, params...)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) > 0 {
+		return candidates, nil
+	}
+	return load(selectColumns+`
+WHERE platform = ? AND scope_id = ? AND status = 'approved'
+ORDER BY count DESC, updated_at DESC
+LIMIT ?`, platform, scopeID, limit)
+}
 func (s *Store) Counts(ctx context.Context, platform, scopeID string) (pending int, approved int, err error) {
 	if s == nil || s.db == nil {
 		return 0, 0, nil
@@ -306,12 +468,29 @@ func scanCandidates(rows *sql.Rows) ([]Candidate, error) {
 	out := []Candidate{}
 	for rows.Next() {
 		var candidate Candidate
-		var createdAt, updatedAt string
-		if err := rows.Scan(&candidate.ID, &candidate.Kind, &candidate.Platform, &candidate.ScopeID, &candidate.Pattern, &candidate.Meaning, &candidate.Count, &candidate.Status, &createdAt, &updatedAt); err != nil {
+		var createdAt, updatedAt, reviewedAt string
+		if err := rows.Scan(
+			&candidate.ID,
+			&candidate.Kind,
+			&candidate.Platform,
+			&candidate.ScopeID,
+			&candidate.Pattern,
+			&candidate.Meaning,
+			&candidate.Count,
+			&candidate.UserCount,
+			&candidate.Status,
+			&createdAt,
+			&updatedAt,
+			&reviewedAt,
+			&candidate.ReviewedBy,
+		); err != nil {
 			return nil, fmt.Errorf("scan self learning candidate: %w", err)
 		}
 		candidate.CreatedAt, _ = storage.ParseTime(createdAt)
 		candidate.UpdatedAt, _ = storage.ParseTime(updatedAt)
+		if strings.TrimSpace(reviewedAt) != "" {
+			candidate.ReviewedAt, _ = storage.ParseTime(reviewedAt)
+		}
 		out = append(out, candidate)
 	}
 	if err := rows.Err(); err != nil {
@@ -330,13 +509,24 @@ func isStopCandidate(token string) bool {
 	return stopCandidates[strings.ToLower(token)]
 }
 
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
 func isASCIIWord(token string) bool {
+	if token == "" {
+		return false
+	}
+	hasLetter := false
 	for _, r := range token {
-		if r > unicode.MaxASCII || !unicode.IsLetter(r) {
+		if r > unicode.MaxASCII || !isWordRune(r) {
 			return false
 		}
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		}
 	}
-	return token != ""
+	return hasLetter
 }
 
 func extractCandidates(text string) []string {
@@ -344,26 +534,47 @@ func extractCandidates(text string) []string {
 	if text == "" {
 		return nil
 	}
-	out := []string{}
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	add := func(token string) {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return
+		}
+		if _, ok := seen[token]; ok {
+			return
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
+
 	runes := []rune(text)
-	for i := 0; i < len(runes); i++ {
-		if !unicode.IsLetter(runes[i]) && !unicode.IsDigit(runes[i]) {
+	for i := 0; i < len(runes); {
+		if !isWordRune(runes[i]) {
+			i++
 			continue
 		}
-		for size := 2; size <= 4 && i+size <= len(runes); size++ {
-			part := string(runes[i : i+size])
-			if !containsCJK(part) && len(part) < 3 {
-				continue
-			}
-			out = append(out, part)
+		j := i
+		for j < len(runes) && isWordRune(runes[j]) {
+			j++
 		}
+		segment := runes[i:j]
+		for start := 0; start < len(segment); start++ {
+			for size := 2; size <= 4 && start+size <= len(segment); size++ {
+				part := string(segment[start : start+size])
+				if containsCJK(part) {
+					add(part)
+				}
+			}
+		}
+		i = j
 	}
 	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		return !isWordRune(r)
 	}) {
 		word = strings.ToLower(strings.TrimSpace(word))
-		if len(word) >= 3 && isASCIIWord(word) {
-			out = append(out, word)
+		if len([]rune(word)) >= 3 && isASCIIWord(word) {
+			add(word)
 		}
 	}
 	return out
@@ -376,4 +587,34 @@ func containsCJK(value string) bool {
 		}
 	}
 	return false
+}
+
+// Undo moves a candidate back to pending while preserving its current meaning.
+func (s *Store) Undo(ctx context.Context, req DecideRequest) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("self learning store is not open")
+	}
+	id := strings.TrimSpace(req.ID)
+	platform := strings.TrimSpace(req.Platform)
+	scopeID := strings.TrimSpace(req.ScopeID)
+	if id == "" || platform == "" || scopeID == "" {
+		return fmt.Errorf("self learning undo requires id, platform and scope")
+	}
+	now := storage.FormatTime(storage.Now())
+	result, err := s.db.ExecContext(ctx, `
+UPDATE candidates
+SET status = 'pending', reviewed_at = ?, reviewed_by = ?, updated_at = ?
+WHERE id = ? AND platform = ? AND scope_id = ?`,
+		now, strings.TrimSpace(req.Reviewer), now, id, platform, scopeID)
+	if err != nil {
+		return fmt.Errorf("undo self learning candidate: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("undo self learning candidate rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrCandidateNotFound
+	}
+	return nil
 }

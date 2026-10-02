@@ -3,14 +3,14 @@
 # 预编译二进制版运行镜像（不需要 Go 工具链，也不需要拉 golang:1.26 大镜像）
 # 构建上下文需要包含名为 `elbot` 的 Linux 静态二进制。
 #
-#   docker build -t elbot:0.6.4 .
+#   docker build -t elbot:0.6.5 .
 #   docker run -d --init --name elbot -v $PWD/data:/data \
-#     -p 127.0.0.1:32172:32172 -p 127.0.0.1:32171:32171 elbot:0.6.4
+#     -p 127.0.0.1:32172:32172 -p 127.0.0.1:32171:32171 elbot:0.6.5
 #
 # 国内服务器拉 debian 慢时，可换镜像源：
-#   docker build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim -t elbot:0.6.4 .
+#   docker build --build-arg BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/debian:bookworm-slim -t elbot:0.6.5 .
 # 需要 pin digest 时：
-#   docker build --build-arg BASE_IMAGE=debian:bookworm-slim@sha256:<digest> -t elbot:0.6.4 .
+#   docker build --build-arg BASE_IMAGE=debian:bookworm-slim@sha256:<digest> -t elbot:0.6.5 .
 
 ARG BASE_IMAGE=debian:bookworm-slim
 FROM ${BASE_IMAGE}

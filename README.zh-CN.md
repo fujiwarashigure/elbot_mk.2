@@ -120,7 +120,7 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 ## 本地定制版：相对原版 v0.5.0 的新增功能
 
-当前定制版版本：`0.6.4`。
+当前定制版版本：`0.6.5`。
 
 本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
 
@@ -156,7 +156,7 @@ ElBot 提供不依赖 Elnis 的独立运维 HTTP 接口：
 | --- | --- |
 | `/live` | 只表示进程仍在运行；不判断调度心跳、模型或平台。 |
 | `/ready` | 进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期；平台/模型故障不会让它失败。 |
-| `/healthz` | 汇总状态。平台/模型故障显示为 `degraded`；调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。不应仅凭它自动重启。 |
+| `/healthz` | 汇总状态。设置 `ELBOT_OPS_TOKEN` 后需要鉴权；平台/模型故障显示为 `degraded`；调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。不应仅凭它自动重启。 |
 | `/tasks` | 当前活跃的 turn / tool / hook / 上下文压缩任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。 |
 | `/metrics` | 任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台/模型/熔断状态、限速阈值与拒绝原因、生图队列状态。 |
 | `/diagnostics` | 面向“机器人没回复”的聚合诊断：排队/超时、限速命中、熔断状态和最近一次重启原因。 |
@@ -164,11 +164,14 @@ ElBot 提供不依赖 Elnis 的独立运维 HTTP 接口：
 ```dotenv
 ELBOT_HEALTH_ADDR=0.0.0.0:32171
 ELBOT_HEALTH_LIVE_STALE_SECONDS=90
-# /tasks 和 /metrics 的访问 token；反代或非回环访问前必须设置。
+# /tasks、/metrics、/diagnostics、/plugins/* 和 /healthz 的访问 token。
+# 未设置时敏感运维接口默认不注册，只保留 /live 和 /ready。
 # ELBOT_OPS_TOKEN=请替换为随机长字符串
+# 仅排障用：显式允许无鉴权暴露敏感运维接口（必须只用于回环/可信网络）。
+# ELBOT_OPS_ALLOW_UNAUTHENTICATED=1
 ```
 
-Compose 只映射到宿主机回环：`127.0.0.1:32171:32171`。标准 Dockerfile 的 `HEALTHCHECK` 已改为 `curl -fsS http://127.0.0.1:32171/live`，不再只看 PID。`32171` 不应加入 Nginx 公网路由。
+`/tasks`、`/metrics`、`/diagnostics`、`/plugins/*` 默认安全策略是：**未设置 `ELBOT_OPS_TOKEN` 时不注册**，只有显式开启不安全模式才会无鉴权暴露。Compose 只映射到宿主机回环：`127.0.0.1:32171:32171`。标准 Dockerfile 的 `HEALTHCHECK` 已改为 `curl -fsS http://127.0.0.1:32171/live`，不再只看 PID。`32171` 不应加入 Nginx 公网路由。
 
 ### 数据卷、首次启动与配置
 
@@ -248,7 +251,7 @@ max_concurrent_hooks = 4
 - 群聊限速会先检查用户级额度，再检查群级总额度；用户级防止单个成员刷屏，群级保护全群资源。超级管理员不受限速影响。
 - 限速只是自我保护，不是公平调度：用户级额度按 `平台 + 用户` 统计，同一用户在多个群共享同一份额度；群级拒绝时，本次请求此前消耗的用户额度不会退回。因此“单个成员能否耗尽全群额度”取决于两组阈值怎么配，建议按群规模调整 `[ops]` 的 `rate_limit_*`。
 - `turn` 默认不排队；tool / hook / compress 可短暂排队；队列满或超时会明确拒绝。
-- `/tasks` 和 `/metrics` 暴露活跃任务与资源状态。
+- `/tasks` 和 `/metrics` 暴露活跃任务与资源状态；未设置 `ELBOT_OPS_TOKEN` 时敏感运维接口默认不注册，只保留 `/live` 和 `/ready`。
 
 ### P1：模型熔断与备用 Provider
 
@@ -561,15 +564,15 @@ docker compose up -d
 ```bash
 bash deploy/pack/prepare-offline.sh
 # 或使用已下载产物
-docker load -i elbot-0.6.4-linux-amd64.tar.gz
+docker load -i elbot-0.6.5-linux-amd64.tar.gz
 ```
 
 多架构构建：
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/Dockerfile --build-arg VERSION=0.6.4 \
-  --push -t <registry>/<namespace>/elbot:0.6.4 .
+  -f deploy/Dockerfile --build-arg VERSION=0.6.5 \
+  --push -t <registry>/<namespace>/elbot:0.6.5 .
 ```
 
 构建参数：

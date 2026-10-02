@@ -60,10 +60,27 @@ jobs:
           bash deploy/tests/watchdog_redaction_test.sh
           bash deploy/tests/windows_script_test.sh
 
+  windows-test:
+    name: Windows native tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Windows service marker test
+        run: go test ./internal/app -run TestServiceMarkerNamedMutexConcurrentClaim -count=1
+
+      - name: Portable helper tests
+        run: go test ./internal/safecontext/... ./internal/textmatch/... -count=1
+
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     if: github.event_name == 'push'
-    needs: [test, deploy]
+    needs: [test, deploy, windows-test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

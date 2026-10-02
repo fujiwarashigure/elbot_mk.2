@@ -94,7 +94,12 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	}
 	var angelMemoryService *angelmemory.Service
 	if angelMemoryStore != nil {
-		angelMemoryService = angelmemory.NewService(angelMemoryStore)
+		angelMemoryService = angelmemory.NewService(angelMemoryStore, angelmemory.Options{
+			MaxContentRunes:    opts.AngelMemory.MaxContentRunes,
+			MaxContextRunes:    opts.AngelMemory.MaxContextRunes,
+			MaxPerScope:        opts.AngelMemory.MaxPerScope,
+			MaxWritesPerMinute: opts.AngelMemory.MaxWritesPerMinute,
+		})
 	}
 	var selfLearningStore *selflearning.Store
 	if opts.SelfLearning.IsEnabled() {
@@ -106,7 +111,10 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	}
 	var selfLearningService *selflearning.Service
 	if selfLearningStore != nil {
-		selfLearningService = selflearning.NewService(selfLearningStore)
+		selfLearningService = selflearning.NewService(selfLearningStore, selflearning.Options{
+			MaxMeaningRunes: opts.SelfLearning.MaxMeaningRunes,
+			MaxContextRunes: opts.SelfLearning.MaxContextRunes,
+		})
 	}
 	var groupAnalysisService *groupanalysis.Service
 	if opts.ChatHistory != nil && opts.GroupAnalysis.IsEnabled() {

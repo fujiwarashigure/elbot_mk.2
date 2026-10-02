@@ -9,7 +9,7 @@
 > **不想在服务器上编译 Go？**
 > 仓库**不提交**预编译 / 离线产物，`deploy/dist/` 默认不存在；需要时先在本地或 CI 运行
 > `deploy/pack/prepare-offline.sh` 生成，再上传服务器。生成方式见 [`pack/README-OFFLINE.md`](pack/README-OFFLINE.md)：
-> - `deploy/dist/elbot-0.6.4-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
+> - `deploy/dist/elbot-0.6.5-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
 > - `deploy/dist/offline-amd64/`：预编译二进制 + Debian 运行时，服务器只需拉约 30MB debian 基础镜像，功能完整；
 > - 如果从仓库里找不到 `deploy/dist/`，属于正常现象，请先自行生成。
 
@@ -411,11 +411,14 @@ curl -sS http://127.0.0.1:32171/healthz
 ELBOT_HEALTH_ADDR=0.0.0.0:32171
 # 调度心跳过期阈值；未启用平台时也会持续心跳，默认 90 秒。
 ELBOT_HEALTH_LIVE_STALE_SECONDS=90
-# /tasks 和 /metrics 的 token；反代或非回环访问前必须设置。
+# /tasks、/metrics、/diagnostics、/plugins/* 和 /healthz 的 token。
+# 未设置时敏感运维接口默认不注册，只保留 /live 和 /ready。
 # ELBOT_OPS_TOKEN=请替换为随机长字符串
+# 仅排障用：显式允许无鉴权暴露敏感运维接口。
+# ELBOT_OPS_ALLOW_UNAUTHENTICATED=1
 ```
 
-> `/tasks` 和 `/metrics` 在设置 `ELBOT_OPS_TOKEN` 后需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`。`ELBOT_HEALTH_LIVE_STALE_SECONDS` 应明显大于调度心跳间隔（当前 10 秒），建议保持默认 90。
+> 设置 `ELBOT_OPS_TOKEN` 后，`/tasks`、`/metrics`、`/diagnostics`、`/plugins/*` 和 `/healthz` 都需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`；未设置时敏感接口默认不注册。`ELBOT_OPS_ALLOW_UNAUTHENTICATED=1` 只应临时用于回环/可信网络排障。`ELBOT_HEALTH_LIVE_STALE_SECONDS` 应明显大于调度心跳间隔（当前 10 秒），建议保持默认 90。
 >
 > 32171 **不要**加入宝塔 Nginx 的公网 location；它只供宿主机 watchdog、宝塔监控或本机 curl 使用。标准 Dockerfile 已把 `HEALTHCHECK` 切到 `curl /live`；如果你使用无 curl 的 scratch 离线镜像或自定义镜像，自动处置仍应直接请求宿主机 `127.0.0.1:32171/live`，不要只看 Docker 的 `healthy/unhealthy`。
 
@@ -515,7 +518,7 @@ systemctl daemon-reload
 systemctl enable --now elbot-watchdog.timer
 ```
 
-watchdog 的重启决策只看 `/live`：调度心跳过期、平台掉线、模型 `degraded` 都不会触发重启（否则模型 API 抖动就会变成重启风暴）。这类“进程活着但不可用”的情况靠告警和 `/diagnostics` 人工判断：配置 `WATCHDOG_WEBHOOK_URL` 后，`/ready` 连续失败达到 `WATCHDOG_READY_ALERT_THRESHOLD`（默认 3）会推送一次 `not_ready` 告警，`WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`（默认 3600 秒）内不重复推送，并且**永远不会**因此重启。若启用了 `ELBOT_OPS_TOKEN`，在 `watchdog.env` 中把同一个值写入 `WATCHDOG_OPS_TOKEN`，否则 `/tasks`、`/metrics` 诊断会收到 401。需要临时暂停自动重启时：
+watchdog 的重启决策只看 `/live`：调度心跳过期、平台掉线、模型 `degraded` 都不会触发重启（否则模型 API 抖动就会变成重启风暴）。这类“进程活着但不可用”的情况靠告警和 `/diagnostics` 人工判断：配置 `WATCHDOG_WEBHOOK_URL` 后，`/ready` 连续失败达到 `WATCHDOG_READY_ALERT_THRESHOLD`（默认 3）会推送一次 `not_ready` 告警，`WATCHDOG_READY_ALERT_COOLDOWN_SECONDS`（默认 3600 秒）内不重复推送，并且**永远不会**因此重启。若启用了 `ELBOT_OPS_TOKEN`，在 `watchdog.env` 中把同一个值写入 `WATCHDOG_OPS_TOKEN`，watchdog 会自动携带 token 访问 `/healthz`、`/tasks`、`/metrics`；未设置时敏感诊断接口默认不注册（排障需显式设置 `ELBOT_OPS_ALLOW_UNAUTHENTICATED=1`）。需要临时暂停自动重启时：
 
 ```bash
 touch /opt/elbot/deploy/watchdog-state/paused
@@ -608,7 +611,7 @@ bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.
 
 ```bash
 # 1 / 0 / auto 之外，也接受 required / require / true / yes / false / no / off
-RESTORE_VERIFY_START=required RESTORE_VERIFY_IMAGE=elbot:0.6.4 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
+RESTORE_VERIFY_START=required RESTORE_VERIFY_IMAGE=elbot:0.6.5 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
 # 等待 /ready 的上限，默认 45 秒：
 RESTORE_VERIFY_START_TIMEOUT=90 ...
 # 关闭隔离启动检查：
@@ -684,7 +687,7 @@ bash rollback.sh
 `upgrade.sh` 只从**当前工作区**构建镜像，不会自动切换代码，所以它有两条硬性保护：
 
 - `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免“只给旧代码贴新版本号”；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
-- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.4 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
+- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.5 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
 
 重建之后 `upgrade.sh` 会等待容器 healthcheck 变成 `healthy`，再在容器内执行 `elbot doctor --no-model` 作为验收；任一步失败都会提示回滚命令并以非 0 退出。需要跳过或加严：
 
@@ -756,14 +759,14 @@ s3_secret_key_env = "ELBOT_S3_SECRET_ACCESS_KEY"
 
 ```bash
 docker login registry.cn-hangzhou.aliyuncs.com
-bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.4
+bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.5
 ```
 
 ### 9.2 腾讯云 TCR
 
 ```bash
 docker login ccr.ccs.tencentyun.com
-bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.4
+bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.5
 ```
 
 ### 9.3 服务器使用远端镜像
@@ -771,7 +774,7 @@ bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.4
 编辑 `deploy/.env`：
 
 ```dotenv
-ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.4
+ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.5
 ```
 
 服务器登录私有仓库后：
@@ -795,7 +798,7 @@ Dockerfile 的 `VERSION` 构建参数只影响镜像内的版本字符串与 OCI
 
 ```bash
 PLATFORM=linux/amd64,linux/arm64 \
-  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.4
+  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.5
 ```
 
 多平台只能 `--push`（buildx 限制），脚本已处理。Dockerfile 的构建阶段固定在
