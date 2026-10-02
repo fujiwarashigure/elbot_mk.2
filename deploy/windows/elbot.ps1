@@ -180,6 +180,23 @@ function Assert-DockerRunning {
     }
 }
 
+function Wait-DockerRunning {
+    param([int]$TimeoutSeconds = 120)
+    Write-Info "等待 Docker Desktop 守护进程（最长 ${TimeoutSeconds}s）"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $docker = Get-Command docker -ErrorAction SilentlyContinue
+        if ($docker) {
+            & $docker.Source info *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return
+            }
+        }
+        Start-Sleep -Seconds 3
+    }
+    Throw-Error "Docker 守护进程在 ${TimeoutSeconds}s 内未就绪：请确认 Docker Desktop 已启动并使用 Linux containers。"
+}
+
 function Set-LocalComposeEnv {
     $version = Get-Version
     if (-not $env:ELBOT_VERSION) {
@@ -226,6 +243,24 @@ function Assert-EnvFile {
     if (-not (Test-Path -LiteralPath $script:EnvFile)) {
         Throw-Error "未找到 $script:EnvFile。请先运行 `.\deploy\windows\elbot.ps1 init`，然后编辑 .env 填写 API Key / token。"
     }
+}
+
+function Assert-BackupVerificationDependencies {
+    if ($env:BACKUP_VERIFY -eq '0' -or $env:RESTORE_VERIFY_STRICT -eq '0') {
+        return
+    }
+    if (-not (Get-Command sqlite3 -ErrorAction SilentlyContinue)) {
+        Throw-Error '严格备份验证需要宿主 sqlite3；请安装并加入 PATH，或显式设置 RESTORE_VERIFY_STRICT=0 / BACKUP_VERIFY=0 降级。'
+    }
+    foreach ($candidate in @('python3', 'python')) {
+        $python = Get-Command $candidate -ErrorAction SilentlyContinue
+        if (-not $python) { continue }
+        & $python.Source -c 'import tomllib' *> $null
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+    }
+    Throw-Error '严格备份验证需要带 tomllib 的 python3 / python；请安装 Python 3.11+，或显式设置 RESTORE_VERIFY_STRICT=0 / BACKUP_VERIFY=0 降级。'
 }
 
 function Test-PortListening {
@@ -289,9 +324,17 @@ function Get-Health {
     try {
         return Invoke-RestMethod -Method Get -Uri "$script:HealthBase$Path" -Headers $headers -TimeoutSec 5
     } catch {
+        # 401 必须明确报认证失败，不能把 JSON 错误体当普通健康结果返回。
+        $response = $_.Exception.Response
+        $statusCode = 0
+        if ($response) {
+            try { $statusCode = [int]$response.StatusCode } catch { $statusCode = 0 }
+        }
+        if ($statusCode -eq 401) {
+            Throw-Error "$Path 认证失败（HTTP 401）：请检查 ELBOT_OPS_TOKEN 与服务端是否一致。"
+        }
         # /ready 在 not_ready 时会返回 503 + JSON；尽量把响应体解析出来，
         # 这样 status 不会把“进程活着但未就绪”误报成“接口不可达”。
-        $response = $_.Exception.Response
         if ($response) {
             $parsed = ConvertFrom-HealthResponseStream $response
             if ($null -ne $parsed) {
@@ -300,6 +343,23 @@ function Get-Health {
         }
         return $null
     }
+}
+
+function Test-HealthReady {
+    param($Value)
+    if ($null -eq $Value) {
+        return $false
+    }
+    if ($Value -is [string]) {
+        return ($Value.Trim().ToLowerInvariant() -eq 'ready')
+    }
+    if ($Value.PSObject.Properties.Name -contains 'ready') {
+        return [bool]$Value.ready
+    }
+    if ($Value.PSObject.Properties.Name -contains 'status') {
+        return ([string]$Value.status).Trim().ToLowerInvariant() -eq 'ready'
+    }
+    return $false
 }
 
 function Format-HealthValue {
@@ -378,7 +438,7 @@ function Show-Status {
 
     if ($Json) {
         $summary | ConvertTo-Json -Depth 8
-        if (-not $dockerOK -or $null -eq $live) {
+        if (-not $dockerOK -or $null -eq $live -or -not (Test-HealthReady $ready)) {
             $script:ExitCode = 1
         }
         return
@@ -409,7 +469,7 @@ function Show-Status {
     Write-Host '  .\deploy\windows\elbot.ps1 metrics'
     Write-Host '  .\deploy\windows\elbot.ps1 diagnostics'
 
-    if (-not $dockerOK -or $null -eq $container -or $null -eq $live) {
+    if (-not $dockerOK -or $null -eq $container -or $null -eq $live -or -not (Test-HealthReady $ready)) {
         $script:ExitCode = 1
     }
 }
@@ -444,15 +504,42 @@ function Invoke-Init {
     Write-Host '  4. 首次启动后按 deploy/windows/README.md 检查 data/config/elbot/*.toml。'
 }
 
+function Test-GitBash {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+    if ($Path -match '(?i)[\/](System32|WindowsApps)[\/]bash\.exe$') {
+        return $false
+    }
+    try {
+        $uname = & $Path -lc 'uname -s 2>/dev/null || true' 2>$null
+        return ($uname -match '^(MINGW|MSYS|CYGWIN)')
+    } catch {
+        return $false
+    }
+}
+
 function Resolve-Bash {
-    $bash = Get-Command bash.exe -ErrorAction SilentlyContinue
-    if (-not $bash) {
-        $bash = Get-Command bash -ErrorAction SilentlyContinue
+    $candidates = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('bash.exe', 'bash')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) {
+            [void]$candidates.Add($cmd.Source)
+        }
     }
-    if (-not $bash) {
-        Throw-Error '该动作复用 deploy/*.sh，需要 Git for Windows 的 bash.exe；请安装 Git 并确保 bash 在 PATH 中，或直接在 Git Bash 中运行 deploy 下的对应脚本。'
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $root) { continue }
+        foreach ($relative in @('Git\bin\bash.exe', 'Git\usr\bin\bash.exe')) {
+            [void]$candidates.Add((Join-Path $root $relative))
+        }
     }
-    return $bash.Source
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        if (Test-GitBash $candidate) {
+            return $candidate
+        }
+    }
+    Throw-Error '该动作复用 deploy/*.sh，需要 Git for Windows 的 Git Bash；请安装 Git 并确保 Git\bin 在 PATH 中，或直接在 Git Bash 中运行 deploy 下的对应脚本。WSL 的 bash 不能直接替代。'
 }
 
 function Convert-ToBashPath {
@@ -563,7 +650,7 @@ ElBot Windows 本地容器部署 / 后台控制
   tasks                查看 /tasks：活跃任务、阶段、排队积压
   metrics              查看 /metrics：任务/资源/模型/限速/生图队列
   diagnostics          查看 /diagnostics：聚合诊断
-  doctor [选项]        容器内运行 elbot doctor；可追加 --e2e、--no-model、--json
+  doctor [选项]        容器内运行 elbot doctor；可追加 --e2e、--no-model、--require-platform、--json
   logs                 查看容器日志；支持 -Follow -Tail N
 
 运维 / 数据安全（复用 deploy/*.sh，需要 Git for Windows bash）：
@@ -610,7 +697,7 @@ try {
         }
         'start' {
             Assert-EnvFile
-            Assert-DockerRunning
+            Wait-DockerRunning 180
             New-ElbotDataDirs
             $upArgs = @('up', '-d', '--remove-orphans')
             if (-not $NoBuild) {
@@ -628,7 +715,7 @@ try {
         }
         'recreate' {
             Assert-EnvFile
-            Assert-DockerRunning
+            Wait-DockerRunning 180
             New-ElbotDataDirs
             Invoke-Compose (@('up', '-d', '--remove-orphans', '--force-recreate', '--build') + @($Rest))
             if (-not (Wait-ElbotReady)) {
@@ -654,7 +741,7 @@ try {
         }
         'restart' {
             Assert-EnvFile
-            Assert-DockerRunning
+            Wait-DockerRunning 120
             Invoke-Compose (@('restart') + @($Rest))
             if (-not (Wait-ElbotReady 60)) {
                 Write-Warn '容器已重启，但 /ready 在 60 秒内未就绪。'
@@ -680,7 +767,7 @@ try {
                 Write-Host "/ready   : $(Format-HealthValue $ready)"
                 Write-Host "/healthz : $(Format-HealthValue $healthz)"
             }
-            if ($null -eq $live) {
+            if ($null -eq $live -or -not (Test-HealthReady $ready)) {
                 $script:ExitCode = 1
             }
         }
@@ -730,11 +817,13 @@ try {
         'backup' {
             Assert-EnvFile
             Assert-DockerRunning
+            Assert-BackupVerificationDependencies
             $backupScript = Join-Path $script:DeployDir 'backup.sh'
             Invoke-BashScript $backupScript $Rest
         }
         'restore-verify' {
             Assert-DockerRunning
+            Assert-BackupVerificationDependencies
             if (@($Rest).Count -eq 0) {
                 Throw-Error '用法：.\deploy\windows\elbot.ps1 restore-verify <deploy\backups\elbot-data-*.tar.gz>'
             }

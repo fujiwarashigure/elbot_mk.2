@@ -177,16 +177,83 @@ if [ "${MODE}" = "sqlite" ]; then
 
     STAGE="$(mktemp -d "${BACKUP_DIR}/.elbot-backup-XXXXXX")"
     mkdir -p "${STAGE}/data"
-    log "复制 data 到临时目录 ${STAGE}/data"
-    cp -a "${DATA_DIR}/." "${STAGE}/data/"
 
+    # 先对所有 SQLite 做一致性快照，再复制媒体等非数据库文件。这样如果快照之后
+    # 又导入了新图片，补齐步骤会把新文件也带进归档；不能反过来先复制媒体再做
+    # 数据库快照，否则数据库可能引用归档中不存在的媒体。
+    log "先做 SQLite 一致性快照"
     while IFS= read -r -d '' db; do
         rel="${db#${DATA_DIR}/}"
         out="${STAGE}/data/${rel}"
+        out_dir="$(dirname "${out}")"
+        out_name="$(basename "${out}")"
+        case "${out_name}" in
+            *"'"*)
+                die "数据库文件名包含单引号，无法安全执行 sqlite3 .backup：${rel}"
+                ;;
+        esac
+        mkdir -p "${out_dir}"
         rm -f "${out}" "${out}-wal" "${out}-shm" "${out}-journal"
         log "SQLite 一致性备份：${rel}"
-        sqlite3 "${db}" ".backup '${out}'"
+        # 在目标目录里用相对文件名执行 .backup，避免把带空格/特殊字符的绝对
+        # 路径拼进 sqlite3 的 SQL 参数；Windows Git Bash 的路径转换也不会干扰。
+        if ! ( cd "${out_dir}" && sqlite3 "${db}" ".backup '${out_name}'" ); then
+            die "SQLite 一致性备份失败：${db}"
+        fi
     done < <(find "${DATA_DIR}" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print0)
+
+    log "复制快照时间点之后的非数据库文件（媒体、配置、日志等）"
+    if ! ( cd "${DATA_DIR}" && tar \
+        --exclude='*.db' \
+        --exclude='*.sqlite' \
+        --exclude='*.sqlite3' \
+        --exclude='*-wal' \
+        --exclude='*-shm' \
+        --exclude='*-journal' \
+        -cf - . ) | tar -xpf - -C "${STAGE}/data"; then
+        die "复制非数据库文件失败：${DATA_DIR}"
+    fi
+
+    # 数据库快照和媒体复制仍可能跨过“删除”窗口。按数据库里的本地媒体引用补齐；
+    # 如果源文件已经被清理，则说明无法产出引用完整的在线备份，直接失败。
+    MISSING_MEDIA=0
+    while IFS= read -r -d '' db; do
+        if ! has_media_table="$(sqlite3 "${db}" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media';" 2>&1)"; then
+            die "查询 media 表失败：${db}: ${has_media_table}"
+        fi
+        [ "${has_media_table}" = "1" ] || continue
+        if ! media_rows="$(sqlite3 "${db}" "SELECT local_path FROM media WHERE backend='local' AND local_path IS NOT NULL AND local_path<>'';" 2>&1)"; then
+            die "读取本地媒体引用失败：${db}: ${media_rows}"
+        fi
+        while IFS= read -r local_path; do
+            [ -n "${local_path}" ] || continue
+            case "${local_path}" in
+                /data/*)
+                    rel="${local_path#/data/}"
+                    ;;
+                *)
+                    rel="${local_path#/}"
+                    ;;
+            esac
+            stage_file="${STAGE}/data/${rel}"
+            if [ -f "${stage_file}" ]; then
+                continue
+            fi
+            source_file="${DATA_DIR}/${rel}"
+            if [ -f "${source_file}" ]; then
+                mkdir -p "$(dirname "${stage_file}")"
+                cp -a "${source_file}" "${stage_file}"
+                log "补齐媒体引用：${local_path}"
+            else
+                warn "数据库 $(basename "${db}") 引用的本地媒体在源 data 中已不存在：${local_path}"
+                MISSING_MEDIA=$((MISSING_MEDIA + 1))
+            fi
+        done <<<"${media_rows}"
+    done < <(find "${STAGE}/data" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print0)
+
+    if [ "${MISSING_MEDIA}" -gt 0 ]; then
+        die "在线备份不完整：${MISSING_MEDIA} 个数据库引用的本地媒体已不存在；如需可回滚快照请改用 BACKUP_MODE=stop"
+    fi
 
     find "${STAGE}/data" -type f \( -name '*-wal' -o -name '*-shm' -o -name '*-journal' \) -delete
 

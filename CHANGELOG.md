@@ -1,5 +1,7 @@
 ## Unreleased
 
+## [v0.6.4 - 2026-10-02]
+
 ### Added
 
 - 新增 clean-room `group_analysis` 工具与 `internal/groupanalysis/` 统计服务：只读取本地 `chat_history` / `outbound_messages`，按天统计群消息量、活跃成员和活跃时段，不复制第三方群分析插件的模板、图片、Prompt 或素材。
@@ -22,14 +24,28 @@
 
 ### Changed
 
+- 版本号提升到 `0.6.4`；`deploy/VERSION`、Compose 默认镜像、构建/离线脚本和中文部署文档中的版本示例同步更新。
 - 文档同步集中服务配置：`docs/configuration.md`、`docs/getting-started.md`、`docs/image-generation.md`、`deploy/README.md`、`deploy/windows/README.md` 和离线包说明改为以 `services.toml` 为主，`providers.toml` 作为旧部署兼容入口。
 - 常驻记忆注入 system prompt 时增加 `<resident_memory>` 边界和“用户数据、不是系统指令”的信任声明，并转义记忆内容中的尖括号，防止内容提前结束或伪造边界标签，降低 normal 记忆被用作持久 Prompt 注入向量时的影响。
 - 常驻记忆 normal 写入增加服务端保护：`[resident_memory]` 可配置最小写入间隔、窗口内最大写入次数、最大条目数和单条最大长度，并默认逐条拒绝明显指令类内容和控制字符；失败写入不消耗频率额度，core 写入不受 normal 限流影响。
 - 常驻记忆 normal 改为结构化保存：每条一行、一行一件事，写入时去掉 `-` / `*` / `1.` 等列表前缀、空行和重复条目，注入 system prompt 时渲染为独立 `-` 列表项，避免多个事实被拼成一段容易被当作指令的文本。
 - `memories.toml` 改为原子写入：先写同目录临时文件并 `fsync`，再 `rename` 覆盖目标文件，最后尽力 `fsync` 目录；崩溃或断电时只会留下完整旧文件或完整新文件。写入前检测文件状态，若外部在读取与写入之间修改了文件则重新加载后再应用，避免覆盖手工编辑或恢复脚本的改动。
 
+- `elbot doctor` 新增 `platform_ok` 总字段与 `--require-platform`：平台 `disconnected` 不再标记为通过，严格模式还要求平台已启用且健康快照中存在连接状态；CLI E2E 改为发送唯一探测标记并等待包含该标记的回复，空流结束或无关非空文本都失败。
+- `deploy/upgrade.sh` 先切换 `ELBOT_GIT_REF` 再解析未显式指定的目标版本；旧镜像快照改用运行容器的实际 `.Image` ID 并记录 digest；升级前快照默认 `BACKUP_MODE=stop`，并且新镜像配置预检默认挂载生产 `data` 的隔离副本；回滚信息新增 `ROLLBACK_IMAGE_ID` / `ROLLBACK_IMAGE_DIGEST` / `ROLLBACK_FROM_IMAGE`。
+- `deploy/rollback.sh` 不再 `source rollback.env`，改为安全解析键值以支持空格路径并避免执行未知键；回滚前先载入旧镜像并用旧镜像 `RESTORE_VERIFY_START=required` 验证备份，恢复后等待 `/ready`、运行 doctor 验收，失败时保留失败数据并尝试恢复 `data.before-rollback-*`。
+- `deploy/restore-verify.sh` 的最终状态改为区分 `passed` / `static_passed` / `static_passed_with_skips`，隔离启动跳过时不再伪装成完整 `passed`；`RESTORE_VERIFY_START` 明确接受文档里的 `required`。
+- `deploy/windows/elbot.ps1` 增加 Docker Desktop 就绪等待、Git Bash（非 WSL）识别、401 明确报错，并让 `health` / `status` 在 `/ready` 未通过时返回失败；严格备份验证前预检宿主 `sqlite3` 与带 `tomllib` 的 Python。
+- Release / Docker CI 增加 `pull_request` 触发、关键包 `-race`、ShellCheck 与 `deploy/tests/*.sh` 部署回归，并显式安装 sqlite3/python3 防止关键测试缺依赖后以 skip 通过。
+
+- `deploy/backup.sh` 的在线 `sqlite` 模式改为先对所有 SQLite 做一致性 `.backup`，再复制媒体等非数据库文件；随后按数据库中的 `backend='local'` 引用补齐缺失媒体，源文件已被删除时直接判定备份失败，避免生成数据库引用完整但归档缺媒体的快照。
+- `deploy/restore-verify.sh` 先把归档和 manifest 转成绝对路径，避免相对备份目录在 `sha256sum -c` 进入临时目录后失效；恢复隔离启动前移除归档里的旧服务 PID 标记；Windows Git Bash 下通过 `cygpath` 转换 Docker bind mount 宿主路径，并用 `MSYS_NO_PATHCONV` 保护容器内 `/data` 路径。
+- `deploy/rollback.sh` 在恢复数据后移除旧 PID 标记，保证回滚到尚未使用文件锁的旧版本镜像时不会被陈旧标记卡住。
+
 ### Fixed
 
+- 修复 `internal/app/service_marker*`：服务互斥从“只信 PID 文件”改为 `flock` 文件锁，进程被硬杀或容器重建后锁会由内核自动释放，不再因 PID 复用/陈旧 PID 标记导致新容器启动失败。
+- 统一用户可见错误、Hook 失败和日志/audit 出口的脱敏，并为用户端失败消息附 `error_id`；上游错误包含带 token 的 URL 时，群消息和日志不再包含凭据。
 - 修复 `deploy/windows/elbot.ps1` 的 `Invoke-Compose` 参数绑定：Windows PowerShell 5.1 会把 `Invoke-Compose (@(...) + @($Rest))` 折叠成单个带空格字符串，导致 `docker compose` 收到 `"compose up -d --remove-orphans"` 这类错误参数；现在改为普通 `[string[]]` 参数，并把 `Invoke-Compose @doctorArgs` / `@logArgs` / `@Rest` 调用改为直接传数组。
 
 ## [v0.6.3 - 2026-10-01]

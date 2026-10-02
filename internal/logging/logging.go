@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"elbot/internal/redact"
 )
 
 const DefaultRetentionDays = 30
@@ -112,6 +114,16 @@ func replaceAttr(groups []string, attr slog.Attr) slog.Attr {
 	if attr.Key == slog.TimeKey {
 		if t, ok := attr.Value.Any().(time.Time); ok {
 			attr.Value = slog.StringValue(t.Format("2006-01-02 15:04:05"))
+		}
+		return attr
+	}
+	if attr.Value.Kind() == slog.KindString {
+		attr.Value = slog.StringValue(redact.Secrets(attr.Value.String()))
+		return attr
+	}
+	if attr.Value.Kind() == slog.KindAny {
+		if err, ok := attr.Value.Any().(error); ok {
+			attr.Value = slog.StringValue(redact.Error(err))
 		}
 	}
 	return attr

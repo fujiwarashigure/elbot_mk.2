@@ -10,6 +10,7 @@ import (
 	"elbot/internal/hook"
 	"elbot/internal/llm"
 	"elbot/internal/platform"
+	"elbot/internal/redact"
 	"elbot/internal/request"
 	"elbot/internal/security"
 	"elbot/internal/storage"
@@ -131,7 +132,8 @@ func (a *Agent) notifyHookError(ctx context.Context, source hook.Event, err erro
 	}
 	event := source
 	event.Point = hook.PointErrorOccurred
-	event.Error = err
+	event.Error = safeError(err)
+	event.ErrorInfo = &hook.ErrorPayload{Message: redact.Error(err)}
 	a.notifyHook(ctx, event)
 }
 
@@ -162,13 +164,7 @@ func hookFailureNoticeText(event hook.Event, err error) string {
 }
 
 func trimHookNoticeText(text string) string {
-	text = strings.TrimSpace(text)
-	const max = 1200
-	runes := []rune(text)
-	if len(runes) <= max {
-		return text
-	}
-	return string(runes[:max]) + "\n...（已截断）"
+	return redact.Summarize(text, 1200)
 }
 
 func (a *Agent) NotifyPlatformConnected(ctx context.Context, platformName string) {

@@ -12,6 +12,7 @@ import (
 	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/turn"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -349,5 +350,24 @@ func TestChatFailureDoesNotScheduleNaming(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if f.requestCount() != 1 {
 		t.Fatalf("request count = %d, want only the failed chat request", f.requestCount())
+	}
+}
+
+func TestHandleMessageRedactsUpstreamTokenURL(t *testing.T) {
+	const secret = "AAHsecretTokenValue"
+	p := &fakePlatform{}
+	upstream := fmt.Errorf(`Post "https://api.telegram.org/bot123456789:%s/getMe": unexpected EOF`, secret)
+	a := New(p, &fakeLLM{chunks: [][]llm.StreamChunk{{{Error: upstream}}}}, "test-model", config.ProviderConfig{}, newTestStore(t))
+
+	err := a.HandleMessage(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("HandleMessage() error = nil, want failure")
+	}
+	got := p.out.String()
+	if strings.Contains(got, secret) {
+		t.Fatalf("platform output leaked upstream token: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") || !strings.Contains(got, "error_id=") {
+		t.Fatalf("platform output missing redaction/error_id: %q", got)
 	}
 }

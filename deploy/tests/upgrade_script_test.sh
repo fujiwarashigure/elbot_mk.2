@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 TMP="$(mktemp -d)"
+export TMP
 trap 'rm -rf "${TMP}"' EXIT
 
 ROOT="${TMP}/repo"
@@ -26,6 +27,8 @@ printf '0.6.3\n' >"${DEPLOY}/VERSION"
 cat >"${DEPLOY}/backup.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s
+' "${BACKUP_MODE:-}" >>"${TMP}/backup-mode.log"
 mkdir -p "$(dirname "$0")/backups"
 : >"$(dirname "$0")/backups/elbot-data-20260101-000000.tar.gz"
 STUB
@@ -36,7 +39,7 @@ STUB
 
 GIT_LOG="${TMP}/git.log"
 DOCKER_LOG="${TMP}/docker.log"
-export GIT_LOG DOCKER_LOG FAKE_REPO_ROOT="${ROOT}"
+export GIT_LOG DOCKER_LOG FAKE_REPO_ROOT="${ROOT}" FAKE_DEPLOY="${DEPLOY}"
 
 cat >"${BIN}/git" <<'STUB'
 #!/usr/bin/env bash
@@ -52,7 +55,14 @@ case "${1:-}" in
             exit 0
         fi
         ;;
-    fetch|checkout)
+    fetch)
+        exit 0
+        ;;
+    checkout)
+        case "$*" in
+            *" v0.6.4"*) printf '0.6.4
+' >"${FAKE_DEPLOY}/VERSION" ;;
+        esac
         exit 0
         ;;
 esac
@@ -77,7 +87,9 @@ case "${1:-}" in
     inspect)
         case "$*" in
             *State.Health*) printf 'healthy\n' ;;
-            *) printf 'elbot:old\n' ;;
+            *Config.Image*) printf 'elbot:old-tag\n' ;;
+            *.Image*) printf 'sha256:old-image-id\n' ;;
+            *) printf 'elbot:old-tag\n' ;;
         esac
         exit 0
         ;;
@@ -145,6 +157,31 @@ if ! run_upgrade "without-git-ref"; then
 fi
 if ! grep -q 'run .*config check' "${DOCKER_LOG}"; then
     echo "FAIL: 新镜像配置检查没有执行"
+    fail=1
+fi
+
+echo "== case 3: GIT_REF alone resolves target version after checkout =="
+if ! run_upgrade "git-ref-only" ELBOT_GIT_REF=v0.6.4 ELBOT_VERSION=; then
+    fail=1
+fi
+if ! grep -q '源码版本 0.6.4' "${TMP}/git-ref-only.log"; then
+    echo "FAIL: 未在切换源码后解析出 0.6.4 目标版本"
+    fail=1
+fi
+
+echo "== case 4: upgrade snapshot asks backup.sh for stop mode =="
+if ! grep -q '^stop$' "${TMP}/backup-mode.log"; then
+    echo "FAIL: 升级前数据快照没有使用 stop 模式"
+    fail=1
+fi
+
+echo "== case 5: old image snapshot uses actual image ID =="
+if ! grep -q -- "docker tag sha256:old-image-id elbot:rollback" "${DOCKER_LOG}"; then
+    echo "FAIL: 没有按实际 image ID 保存旧镜像"
+    fail=1
+fi
+if grep -q -- "docker tag elbot:old-tag elbot:rollback" "${DOCKER_LOG}"; then
+    echo "FAIL: 仍然按 .Config.Image 标签保存旧镜像"
     fail=1
 fi
 

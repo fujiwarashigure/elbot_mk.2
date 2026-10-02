@@ -120,7 +120,7 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 ## 本地定制版：相对原版 v0.5.0 的新增功能
 
-当前定制版版本：`0.6.3`。
+当前定制版版本：`0.6.4`。
 
 本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
 
@@ -197,12 +197,12 @@ Compose 只映射到宿主机回环：`127.0.0.1:32171:32171`。标准 Dockerfil
 
 `deploy/backup.sh` 不再直接热 tar SQLite：
 
-- 有 `sqlite3`：执行 SQLite `.backup` 一致性备份，不中断服务。
+- 有 `sqlite3`：先逐个执行 SQLite `.backup` 一致性快照，再复制媒体等非数据库文件，并按数据库里的本地媒体引用补齐缺失文件；源文件已经被清理时会明确失败，而不是生成引用不完整的归档。
 - 没有 `sqlite3` 但有 Docker Compose：短暂停止容器，打包后自动启动，并等待 healthcheck `healthy`；恢复失败或等待就绪超时会让备份以非 0 退出（`BACKUP_RESTART_READY_TIMEOUT` 默认 60 秒）。
 - 两者都没有：回退热打包并明确警告。
 - 备份成功后默认生成 `*.manifest` 文件级 sha256 清单，并调用 `deploy/restore-verify.sh` 在隔离目录验证 SQLite、配置、角色素材、本地媒体和 manifest；`BACKUP_VERIFY=0` 可跳过。
-- `restore-verify.sh` 严格模式要求 manifest、`sqlite3`、带 `tomllib` 的 `python3`、必需配置和 `/data/...` 媒体精确路径全部通过；跳过项会输出 `restore_verify: passed_with_skips`，严格模式则直接失败。`RESTORE_VERIFY_START=auto`（默认）在 Docker 和镜像可用时会额外用 `--network none` 启动一次性恢复实例并等待 `/ready`。
-- 单机升级/回滚可用 `deploy/upgrade.sh` / `deploy/rollback.sh`：升级前保存数据快照和上一版镜像，回滚前先校验数据快照。
+- `restore-verify.sh` 严格模式要求 manifest、`sqlite3`、带 `tomllib` 的 `python3`/`python`、必需配置和 `/data/...` 媒体精确路径全部通过；最终状态区分 `restore_verify: passed`（静态 + 隔离启动都通过）、`static_passed`（静态通过但未做启动验收）和 `static_passed_with_skips`。`RESTORE_VERIFY_START=auto`（默认）在 Docker 和镜像可用时会额外用 `--network none` 启动一次性恢复实例并等待 `/ready`；恢复前会移除旧服务 PID 标记。
+- 单机升级/回滚可用 `deploy/upgrade.sh` / `deploy/rollback.sh`：升级前默认以 `BACKUP_MODE=stop` 做数据快照，旧镜像按运行容器实际 image ID 保存，新镜像配置预检使用隔离数据副本；回滚前先用旧镜像验证快照，恢复后等待 `/ready` 并运行 doctor 验收。
 - `deploy/README.md` 包含恢复演练步骤：解压到临时目录、SQLite 完整性校验、停止服务、替换 `data`、恢复属主，并实际发消息验证。
 
 ### 分级 watchdog 与自愈
@@ -269,7 +269,7 @@ fallback_mode = "circuit"      # circuit（默认）/ on_error / off
 - `context.Canceled` 和整轮 response timeout 不计入。
 - 默认 `fallback_mode = "circuit"`：熔断打开时，有 fallback 就切备用；没有则返回明确错误，不再无限重试。
 - `fallback_mode = "on_error"`（或 `fallback_on_error = true`）时，首个预流式失败请求即可切换；`fallback_timeout_seconds` 可限制单次 Provider 尝试总时长。
-- 部署验收可运行 `elbot doctor`：默认检查配置/存储/端口/平台/模型；加 `--e2e` 后通过 CLI 远程协议做真实消息往返，报告区分 `config_ok` 与 `e2e_ok`。
+- 部署验收可运行 `elbot doctor`：默认检查配置/存储/端口/平台/模型；平台 `disconnected` 不再算通过，`--require-platform` 进一步要求平台已启用且有健康状态；加 `--e2e` 后通过 CLI 远程协议发送唯一探测标记并匹配回复，报告区分 `config_ok`、`platform_ok` 与 `e2e_ok`。
 - 外部模型异常只显示为 `degraded`，不会触发自动重启。
 
 ### P1：生图并发与降级
@@ -561,15 +561,15 @@ docker compose up -d
 ```bash
 bash deploy/pack/prepare-offline.sh
 # 或使用已下载产物
-docker load -i elbot-0.6.3-linux-amd64.tar.gz
+docker load -i elbot-0.6.4-linux-amd64.tar.gz
 ```
 
 多架构构建：
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/Dockerfile --build-arg VERSION=0.6.3 \
-  --push -t <registry>/<namespace>/elbot:0.6.3 .
+  -f deploy/Dockerfile --build-arg VERSION=0.6.4 \
+  --push -t <registry>/<namespace>/elbot:0.6.4 .
 ```
 
 构建参数：
@@ -620,12 +620,13 @@ docker compose -f deploy\portainer\portainer-compose.yml up -d
 一条命令做部署验收：
 
 ```bash
-elbot doctor [--config path] [--json] [--no-model] [--e2e]
+elbot doctor [--config path] [--json] [--no-model] [--e2e] [--require-platform]
 ```
 
 - 默认检查：配置、存储目录、健康端口、平台状态、真实模型调用。
-- `--e2e`：通过 CLI 远程 WebSocket 协议发送一条真实消息并等待回复。
-- `config_ok` 与 `e2e_ok` 分开报告；未加 `--e2e` 时 `e2e_ok=false` 并显示 `skipped`。
+- 平台 `disconnected` 时平台检查失败；`--require-platform` 还要求至少启用一个平台且健康快照中有对应状态。
+- `--e2e`：通过 CLI 远程 WebSocket 协议发送唯一探测标记，只有回复中包含该标记才成功；空流结束或只收到无关文本都失败。
+- `config_ok`、`platform_ok` 与 `e2e_ok` 分开报告；未加 `--e2e` 时 `e2e_ok=false` 并显示 `skipped`。
 - `--json` 适合接入 CI 或发布流水线。
 - Docker 中执行示例：
 
@@ -668,11 +669,10 @@ bash upgrade.sh
 `upgrade.sh` 的顺序：
 
 1. 当前容器内 `elbot config check`；
-2. `backup.sh` 生成一致性数据快照；
-3. `restore-verify.sh` 校验快照；
-4. 保存上一版镜像为 `deploy/rollback/previous-image.tar`；
-5. 构建新镜像并用新镜像执行配置兼容性检查；
-6. 通过后重建服务。
+2. 以 `BACKUP_MODE=stop` 生成一致性数据快照，并用当前实际镜像 ID 做恢复验证；
+3. 保存上一版实际镜像 ID/tar 和 digest 到 `deploy/rollback/rollback.env`；
+4. 构建新镜像，并用生产 `data` 的隔离副本执行配置兼容性检查；
+5. 通过后重建服务，等待健康检查并运行 `elbot doctor --no-model` 验收。
 
 回滚：
 
@@ -685,10 +685,11 @@ ROLLBACK_CONFIRM=1 bash rollback.sh
 
 回滚会：
 
-1. 校验数据快照的 SQLite、配置、角色、媒体和 manifest；
-2. 载入上一版镜像；
+1. 安全解析 `rollback.env`，载入上一版镜像；
+2. 用上一版镜像校验数据快照的 SQLite、配置、角色、媒体和 manifest，并执行隔离启动 `/ready` 验收；
 3. 停止服务并保留当前 `data` 为 `data.before-rollback-*`；
-4. 恢复数据快照，使用上一版镜像重建服务。
+4. 恢复数据快照、清理旧 PID 标记，使用上一版镜像重建服务；
+5. 等待 `/ready` 并运行 `elbot doctor --no-model`；验收失败时会尝试恢复回滚前 data。
 
 ### 更多细节
 

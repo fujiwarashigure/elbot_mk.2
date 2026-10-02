@@ -1,6 +1,8 @@
 package logging
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,5 +128,23 @@ func TestCleanupOldLogsRemovesExpiredManagedLogs(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Fatal("today log is empty")
+	}
+}
+
+func TestLoggerRedactsSecretsInStringAndErrorAttributes(t *testing.T) {
+	var output bytes.Buffer
+	logger := New("info", &output)
+	logger.Error("provider failed",
+		"url", "https://api.telegram.org/bot123456789:AAHsecretTokenValue/getMe",
+		"error", errors.New("POST https://user:secret-pass@example.com/hook failed"),
+	)
+	text := output.String()
+	for _, secret := range []string{"AAHsecretTokenValue", "secret-pass"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("log output leaked %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, "REDACTED") {
+		t.Fatalf("log output did not mark redaction: %s", text)
 	}
 }

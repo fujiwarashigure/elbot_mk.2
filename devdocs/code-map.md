@@ -25,7 +25,7 @@ rg -n "locator:tool" devdocs/code-map.md
 - `internal/launcher/cli.go`：命令行解析和补全生成。
 - `internal/app/app.go`、`runner.go`、`dependencies.go`：稳定启动入口、分阶段 Runner 和可替换依赖组。
 - `internal/app/foundation.go`、`models.go`、`runtime.go`：配置/存储基础设施、模型客户端，以及 Cron/Tool/Hook/Agent 核心装配。
-- `internal/app/platforms.go`、`integrations.go`：平台运行、Elnis 和平台能力接线；同目录还包含远程 CLI client 与 service marker。
+- `internal/app/platforms.go`、`integrations.go`：平台运行、Elnis 和平台能力接线；同目录 `service_marker*.go` 使用 `flock` 文件锁做服务单实例互斥，避免陈旧 PID 在容器重建后误判。
 
 常用搜索：
 
@@ -59,14 +59,14 @@ rg -n "ELBOT_CONFIG_FILE|services.toml|providers.toml|state.toml|tool_tags.toml|
 
 - `internal/health/`：健康状态、`/live`、`/ready`、`/healthz`、extra handler token；`state.go` 区分进程存活、readiness、调度心跳、平台和模型状态。
 - `internal/app/health.go`、`ops_health.go`、`health_llm.go`、`health_handler.go`：启动健康接口、读取 `ELBOT_HEALTH_*` / `ELBOT_OPS_TOKEN` / 重启原因文件、组装 `/metrics`、`/diagnostics` 以及只读插件状态 `/plugins/memory`、`/plugins/learning`。
-- `internal/app/doctor.go`、`internal/launcher/cli.go`、`cmd/elbot/main.go`：`elbot doctor` 配置/端口/平台/模型验收与 `--e2e` CLI 真实消息往返。
+- `internal/app/doctor.go`、`internal/launcher/cli.go`、`cmd/elbot/main.go`：`elbot doctor` 配置/端口/平台/模型验收；`platform_ok` 独立于 `config_ok`，`--require-platform` 要求平台状态存在，`--e2e` 使用唯一探测标记做 CLI 真实消息往返。
 - `internal/character/store.go`、`write.go`：角色/图片 `version`、`source` 与 `Manifest`/`WriteManifest` 备份清单。
 - `internal/app/breaker_llm.go`、`internal/app/models.go`、`internal/llm/breaker/`：Provider 熔断、`fallback_mode` / `fallback_on_error`、备用 Provider 和总超时。
 - `internal/agent/ratelimit.go`、`internal/ops/ratelimit/ratelimit.go`：用户级/群级令牌桶叠加；阈值和拒绝原因进入 `/metrics.rate_limit`。
 - `internal/processenv/environment.go`：Shell / Go Skill 子进程凭据变量过滤。
-- `deploy/elbot-watchdog.sh`、`deploy/restore-verify.sh`、`deploy/backup.sh`：阈值/冷却/诊断脱敏、重启原因文件、sha256 备份清单和隔离恢复验证。
-- `deploy/upgrade.sh`、`deploy/rollback.sh`：配置兼容性检查、源码版本守卫、上一版镜像/数据快照、重建后健康检查与 `doctor` 验收、回滚。
-- `internal/health/redact.go`、`deploy/tests/watchdog_redaction_test.sh`：健康快照错误文本的凭据脱敏，以及诊断包脱敏的 fixture 自测。
+- `deploy/elbot-watchdog.sh`、`deploy/restore-verify.sh`、`deploy/backup.sh`：阈值/冷却/诊断脱敏、重启原因文件、sha256 备份清单和隔离恢复验证；在线 SQLite 模式先做数据库快照再复制媒体并按引用补齐，恢复结果区分 `passed` / `static_passed` / `static_passed_with_skips`，并在启动隔离实例前移除旧 PID 标记。
+- `deploy/upgrade.sh`、`deploy/rollback.sh`：配置兼容性检查、源码版本守卫、按实际 image ID 保存旧镜像、升级前 stop 模式快照、隔离配置预检；回滚先载入旧镜像验证备份，重建后等待 `/ready` 并跑 `doctor`，失败时尝试恢复回滚前 data。
+- `internal/redact/`：用户可见错误、Hook 失败、日志/audit 和健康快照共用的凭据脱敏与错误 ID；`internal/health/redact.go` 保留健康包的兼容入口；`deploy/tests/watchdog_redaction_test.sh` 覆盖诊断包脱敏。
 
 常用搜索：
 

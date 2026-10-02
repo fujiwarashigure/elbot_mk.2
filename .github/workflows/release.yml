@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  pull_request:
 
 permissions:
   contents: read
@@ -29,9 +30,40 @@ jobs:
       - name: Go test
         run: go test ./...
 
+      - name: Go race tests for critical packages
+        run: go test -race ./internal/agent ./internal/app ./internal/config ./internal/storage/...
+
+
+  deploy:
+    name: Deploy scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install script test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 python3 shellcheck
+
+      - name: ShellCheck deployment scripts
+        run: shellcheck -S error deploy/*.sh deploy/tests/*.sh
+
+      - name: Deployment script regression
+        env:
+          REQUIRE_TEST_DEPS: "1"
+        run: |
+          bash deploy/tests/backup_restart_test.sh
+          bash deploy/tests/backup_restore_test.sh
+          bash deploy/tests/restore_verify_start_test.sh
+          bash deploy/tests/rollback_script_test.sh
+          bash deploy/tests/upgrade_script_test.sh
+          bash deploy/tests/watchdog_redaction_test.sh
+          bash deploy/tests/windows_script_test.sh
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: test
+    if: github.event_name == 'push'
+    needs: [test, deploy]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -74,6 +106,7 @@ jobs:
 
   release:
     name: Publish release
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     permissions:

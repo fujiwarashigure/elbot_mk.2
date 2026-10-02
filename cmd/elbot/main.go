@@ -43,10 +43,11 @@ func main() {
 	}
 	if opts.Command == launcher.CommandDoctor {
 		report, err := app.RunDoctor(context.Background(), app.DoctorOptions{
-			ConfigPath: opts.ConfigPath,
-			E2E:        opts.DoctorE2E,
-			JSON:       opts.DoctorJSON,
-			SkipModel:  opts.DoctorNoModel,
+			ConfigPath:      opts.ConfigPath,
+			E2E:             opts.DoctorE2E,
+			JSON:            opts.DoctorJSON,
+			SkipModel:       opts.DoctorNoModel,
+			RequirePlatform: opts.DoctorRequirePlatform,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "elbot doctor: %v\n", err)
@@ -67,9 +68,9 @@ func main() {
 				}
 				fmt.Fprintln(os.Stdout, line)
 			}
-			fmt.Fprintf(os.Stdout, "config_ok=%v e2e_ok=%v\n", report.ConfigOK, report.E2EOK)
+			fmt.Fprintf(os.Stdout, "config_ok=%v platform_ok=%v e2e_ok=%v\n", report.ConfigOK, report.PlatformOK, report.E2EOK)
 		}
-		if !report.ConfigOK || (opts.DoctorE2E && !report.E2EOK) {
+		if !report.ConfigOK || !report.PlatformOK || (opts.DoctorE2E && !report.E2EOK) {
 			os.Exit(1)
 		}
 		return

@@ -25,9 +25,11 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (err error) {
 	segments := inboundSegments(ctx, text)
 	defer func() {
 		if err != nil {
-			a.notifyHookError(ctx, hook.Event{Point: hook.PointAgentInputPrepared, Actor: actorContext(actor), Message: hook.MessagePayload{Role: string(llm.RoleUser), Segments: segments}}, err)
+			details := newUserErrorDetails("请求失败", err)
+			a.auditError("message_error", "error_id", details.ID, "error", details.Safe)
+			a.notifyHookError(ctx, hook.Event{Point: hook.PointAgentInputPrepared, Actor: actorContext(actor), Message: hook.MessagePayload{Role: string(llm.RoleUser), Segments: segments}}, errors.New(details.Safe))
 			if shouldNotifyUserError(err) {
-				a.sendChat(ctx, "请求失败："+err.Error())
+				a.sendChat(ctx, details.Text)
 			}
 		}
 	}()

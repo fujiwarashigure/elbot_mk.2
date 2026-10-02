@@ -3,11 +3,11 @@
 #
 # 用法：
 #   docker login registry.cn-hangzhou.aliyuncs.com
-#   bash build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3
+#   bash build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.4
 #
 # 腾讯云示例：
 #   docker login ccr.ccs.tencentyun.com
-#   bash build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.3
+#   bash build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.4
 #
 # 架构（可多选，逗号分隔）：
 #   PLATFORM=linux/amd64,linux/arm64 bash build-push.sh <image>

@@ -12,11 +12,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
+    if [ "${REQUIRE_TEST_DEPS:-0}" = "1" ]; then
+        echo "backup_restore_test: 需要 sqlite3（REQUIRE_TEST_DEPS=1，不允许跳过）" >&2
+        exit 1
+    fi
     echo "skip: 未安装 sqlite3，跳过 backup_restore_test"
     exit 0
 fi
-if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import tomllib' >/dev/null 2>&1; then
-    echo "skip: 没有带 tomllib 的 python3，跳过 backup_restore_test"
+TOML_PYTHON=""
+for candidate in python3 python; do
+    if command -v "${candidate}" >/dev/null 2>&1 && "${candidate}" -c 'import tomllib' >/dev/null 2>&1; then
+        TOML_PYTHON="${candidate}"
+        break
+    fi
+done
+if [ -z "${TOML_PYTHON}" ]; then
+    if [ "${REQUIRE_TEST_DEPS:-0}" = "1" ]; then
+        echo "backup_restore_test: 需要带 tomllib 的 python3/python（REQUIRE_TEST_DEPS=1，不允许跳过）" >&2
+        exit 1
+    fi
+    echo "skip: 没有带 tomllib 的 python3/python，跳过 backup_restore_test"
     exit 0
 fi
 
@@ -49,8 +64,26 @@ else
     awk '{print $2}' "${ARCHIVE}.manifest" | sed 's/^\*//' | sort >"${TMP}/from-manifest.txt"
     tar -tzf "${ARCHIVE}" | grep -v '/$' | sort >"${TMP}/from-archive.txt"
     diff -u "${TMP}/from-archive.txt" "${TMP}/from-manifest.txt" || note "manifest 与归档内容不一致"
-    grep -q 'restore_verify: passed' "${TMP}/backup.log" || note "严格模式没有输出 passed"
+    grep -q 'restore_verify: static_passed' "${TMP}/backup.log" || note "严格模式没有输出 static_passed"
 fi
+
+echo "== case 1b: online sqlite backup includes reconciled media =="
+if ! BACKUP_MODE=sqlite bash "${DEPLOY}/backup.sh" "${TMP}/backups" >"${TMP}/sqlite-backup.log" 2>&1; then
+    cat "${TMP}/sqlite-backup.log"
+    note "sqlite 在线备份失败"
+else
+    sqlite_archive="$(ls -1t "${TMP}"/backups/elbot-data-*.tar.gz | head -1)"
+    tar -tzf "${sqlite_archive}" | grep -q 'data/elbot/media/ab/cdef0123' || note "在线备份没有包含媒体文件"
+    grep -q 'restore_verify: static_passed' "${TMP}/sqlite-backup.log" || note "在线备份没有通过静态恢复验证"
+fi
+
+echo "== case 1c: online sqlite backup fails when db references deleted media =="
+mv "${DATA}/elbot/media/ab/cdef0123" "${TMP}/media-missing"
+if BACKUP_MODE=sqlite bash "${DEPLOY}/backup.sh" "${TMP}/backups" >"${TMP}/sqlite-missing.log" 2>&1; then
+    cat "${TMP}/sqlite-missing.log"
+    note "数据库引用缺失媒体时在线备份仍然成功"
+fi
+mv "${TMP}/media-missing" "${DATA}/elbot/media/ab/cdef0123"
 
 echo "== case 2: missing manifest =="
 cp "${ARCHIVE}" "${TMP}/no-manifest.tar.gz"
@@ -103,11 +136,13 @@ fi
 echo "== case 7: strict refuses to skip TOML parser =="
 FAKE_PY="${TMP}/fake-python"
 mkdir -p "${FAKE_PY}"
-cat >"${FAKE_PY}/python3" <<'STUB'
+for interpreter in python3 python; do
+    cat >"${FAKE_PY}/${interpreter}" <<'STUB'
 #!/usr/bin/env bash
 exit 1
 STUB
-chmod +x "${FAKE_PY}/python3"
+    chmod +x "${FAKE_PY}/${interpreter}"
+done
 if env PATH="${FAKE_PY}:${PATH}" bash "${DEPLOY_SRC}/restore-verify.sh" "${ARCHIVE}" >"${TMP}/c7.log" 2>&1; then
     note "严格模式在无法解析 TOML 时仍然通过"
 fi
@@ -128,7 +163,7 @@ if ! RESTORE_VERIFY_STRICT=0 bash "${DEPLOY_SRC}/restore-verify.sh" "${TMP}/nond
     cat "${TMP}/c8b.log"
     note "非严格模式不允许文件名兜底"
 fi
-if ! grep -q 'restore_verify: passed_with_skips' "${TMP}/c8b.log"; then
+if ! grep -q 'restore_verify: static_passed_with_skips' "${TMP}/c8b.log"; then
     note "非严格模式带跳过项时没有输出 passed_with_skips"
 fi
 

@@ -9,7 +9,7 @@
 > **不想在服务器上编译 Go？**
 > 仓库**不提交**预编译 / 离线产物，`deploy/dist/` 默认不存在；需要时先在本地或 CI 运行
 > `deploy/pack/prepare-offline.sh` 生成，再上传服务器。生成方式见 [`pack/README-OFFLINE.md`](pack/README-OFFLINE.md)：
-> - `deploy/dist/elbot-0.6.3-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
+> - `deploy/dist/elbot-0.6.4-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
 > - `deploy/dist/offline-amd64/`：预编译二进制 + Debian 运行时，服务器只需拉约 30MB debian 基础镜像，功能完整；
 > - 如果从仓库里找不到 `deploy/dist/`，属于正常现象，请先自行生成。
 
@@ -553,7 +553,7 @@ bash /opt/elbot/deploy/tests/watchdog_redaction_test.sh
 
 清单是从**打包好的归档内容**里解压出来算的（不是从仍在变化的 `data/`），并且覆盖归档内所有 `data/` 文件；清单生成失败会直接判定这次备份失败，不会打印“完成”。所有 `docker compose` 调用都显式带 `-f <compose 文件>` 并在 `deploy/` 下执行，所以从 cron 或任意目录调用都不会命中别的 Compose 项目；Compose 文件路径可用 `ELBOT_COMPOSE_FILE` 覆盖。
 
-- 宿主机有 `sqlite3`：对 SQLite 数据库（`*.db` / `*.sqlite` / `*.sqlite3`）执行 `.backup`，其余文件归档，不中断服务；
+- 宿主机有 `sqlite3`：先对 SQLite 数据库（`*.db` / `*.sqlite` / `*.sqlite3`）执行 `.backup`，再复制媒体等非数据库文件；随后按数据库里的 `backend='local'` 媒体引用补齐缺失文件，源文件已被清理时直接判定备份失败，不中断服务；
 - 没有 `sqlite3`：短暂停止 Compose 容器，打包完成后自动 `up -d`，并等待 Docker healthcheck 变为 `healthy`（没有 healthcheck 时要求 `running`）；恢复失败或等待就绪超时会让 `backup.sh` 以非 0 退出，等待上限可用 `BACKUP_RESTART_READY_TIMEOUT`（默认 60 秒）调整；
 - 两者都不可用（例如原生部署且未装 `sqlite3`）：回退到热打包并明确警告，不建议生产环境使用。
 
@@ -588,10 +588,16 @@ bash /opt/elbot/deploy/backup.sh >/dev/null 2>&1
 
 - 存在非空的 `*.manifest`，且宿主机有 `sha256sum`，对归档内所有文件做 `sha256sum -c`；
 - 宿主机有 `sqlite3`，对每个数据库执行 `PRAGMA integrity_check` 并确认表结构存在；
-- `app.toml` 存在且非空，并且 `services.toml` 或旧 `providers.toml` 至少有一个存在且非空（`state.toml` 可选）；宿主机必须有带 `tomllib` 的 `python3`，并真正解析所有 `*.toml`；
+- `app.toml` 存在且非空，并且 `services.toml` 或旧 `providers.toml` 至少有一个存在且非空（`state.toml` 可选）；宿主机必须有带 `tomllib` 的 `python3` 或 `python`，并真正解析所有 `*.toml`；
 - SQLite 中 `backend='local'` 的媒体按 `/data/... -> data/...` 精确路径核对文件是否存在；不是 `/data/...` 的 `media.local_path` 严格模式直接失败。
 
-脚本会分别报告 `manifest` / `toml` / `database` / `media_paths` / `start` 的结果。缺依赖或只想看归档内容时，可以显式降级；非严格模式如有跳过项，会打印 warning 并输出 `restore_verify: passed_with_skips`：
+脚本会分别报告 `manifest` / `toml` / `database` / `media_paths` / `start` 的结果。最终状态和隔离启动分开：
+
+- `restore_verify: passed`：静态完整性、校验和以及真实隔离启动 `/ready` 全部通过；
+- `restore_verify: static_passed`：静态完整性通过，但本次没有执行隔离启动检查（`RESTORE_VERIFY_START=0`，或 `auto` 缺 Docker/镜像而跳过）；
+- `restore_verify: static_passed_with_skips`：非严格模式静态完整性通过，但存在跳过项。
+
+缺依赖或只想看归档内容时，可以显式降级；非严格模式如有跳过项，会打印 warning 并输出 `restore_verify: static_passed_with_skips`：
 
 ```bash
 RESTORE_VERIFY_STRICT=0 bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.tar.gz
@@ -601,14 +607,15 @@ bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.
 需要把“恢复后的 data 真的能启动”也纳入验收时，可以启用隔离启动检查：默认 `RESTORE_VERIFY_START=auto`，只要 Docker 和当前 `elbot` 容器镜像可用，就会用 `--network none` 启动一个一次性实例并等待 `/ready`；也可以显式指定镜像或要求必须执行：
 
 ```bash
-RESTORE_VERIFY_START=1 RESTORE_VERIFY_IMAGE=elbot:0.6.3 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
+# 1 / 0 / auto 之外，也接受 required / require / true / yes / false / no / off
+RESTORE_VERIFY_START=required RESTORE_VERIFY_IMAGE=elbot:0.6.4 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
 # 等待 /ready 的上限，默认 45 秒：
 RESTORE_VERIFY_START_TIMEOUT=90 ...
 # 关闭隔离启动检查：
 RESTORE_VERIFY_START=0 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
 ```
 
-备份链路可以用 fixture 自测（需要 `sqlite3` 和带 `tomllib` 的 `python3`；会覆盖 manifest 一致性、缺 manifest、manifest 被篡改、媒体丢失、缺必需配置、TOML 语法错误、严格模式拒绝跳过 TOML、非 `/data/...` 媒体路径这些情况）：
+备份链路可以用 fixture 自测（需要 `sqlite3` 和带 `tomllib` 的 `python3`/`python`；会覆盖 manifest 一致性、缺 manifest、manifest 被篡改、媒体丢失、缺必需配置、TOML 语法错误、严格模式拒绝跳过 TOML、非 `/data/...` 媒体路径这些情况）：
 
 ```bash
 bash /opt/elbot/deploy/tests/backup_restore_test.sh
@@ -665,17 +672,19 @@ docker compose up -d
 ```bash
 cd /opt/elbot/deploy
 
-# 升级：当前配置检查 -> 数据快照 -> 上一版镜像快照 -> 新镜像配置兼容性检查 -> 重建
+# 升级：当前配置检查 -> 停机数据快照 -> 用当前实际镜像 ID 验证快照 -> 上一版实际镜像 ID 快照
+#       -> 新镜像隔离数据副本配置预检 -> 重建 -> doctor 验收
 bash upgrade.sh
 
-# 回滚：校验数据快照 -> 载入上一版镜像 -> 恢复 data -> 重建
+# 回滚：安全解析 rollback.env -> 载入旧镜像 -> 用旧镜像验证数据快照 -> 恢复 data
+#       -> 重建 -> 等待 /ready -> doctor 验收；失败时尝试恢复回滚前 data
 bash rollback.sh
 ```
 
 `upgrade.sh` 只从**当前工作区**构建镜像，不会自动切换代码，所以它有两条硬性保护：
 
 - `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免“只给旧代码贴新版本号”；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
-- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.3 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
+- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.4 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
 
 重建之后 `upgrade.sh` 会等待容器 healthcheck 变成 `healthy`，再在容器内执行 `elbot doctor --no-model` 作为验收；任一步失败都会提示回滚命令并以非 0 退出。需要跳过或加严：
 
@@ -684,13 +693,16 @@ ELBOT_UPGRADE_SKIP_DOCTOR=1 bash upgrade.sh   # 跳过 doctor，仅等健康检�
 ELBOT_UPGRADE_E2E=1 bash upgrade.sh           # 额外做一次真实消息往返（需要 CLI 远程服务端）
 ```
 
-`upgrade.sh` 会把回滚所需信息写入 `deploy/rollback/rollback.env`，包括上一版镜像 tar、数据快照路径和版本信息。回滚前仍会调用 `restore-verify.sh` 校验数据快照；如果要跳过交互确认可使用 `ROLLBACK_CONFIRM=1 bash rollback.sh`。
+`upgrade.sh` 会把回滚所需信息写入 `deploy/rollback/rollback.env`，包括上一版实际镜像 ID/tar、digest、数据快照路径和版本信息；升级前快照默认使用 `BACKUP_MODE=stop`，避免在线文件快照和 SQLite 快照不在同一时间点。新镜像配置预检默认只挂载生产 `data` 的隔离副本；需要关闭时设置 `UPGRADE_PRECHECK_ISOLATED=0`。回滚前会先载入旧镜像并用旧镜像 `RESTORE_VERIFY_START=required` 校验数据快照，恢复后等待 `/ready` 并运行 `elbot doctor --no-model`；验收失败会尝试把 `data.before-rollback-*` 放回并保留失败现场。跳过交互确认可用 `ROLLBACK_CONFIRM=1 bash rollback.sh`。
 
 升级和停机备份的回归 fixture 不需要真实 Docker 引擎：
 
 ```bash
-bash deploy/tests/upgrade_script_test.sh   # ELBOT_GIT_REF 根目录检测 + 镜像 ENTRYPOINT 参数
+bash deploy/tests/upgrade_script_test.sh   # ELBOT_GIT_REF 根目录检测 + 镜像 ID 快照 + 隔离配置预检
 bash deploy/tests/backup_restart_test.sh   # 停机备份恢复失败会影响退出码
+bash deploy/tests/rollback_script_test.sh  # rollback.env 安全解析 + 旧镜像验证 + /ready/doctor
+# 需要真实 Docker 时，可用真实容器依次验证 service /live /ready /doctor、stop 备份、restore-verify 和 rollback；
+# 本仓库开发期间已用真实 Docker Desktop + Linux containers 跑通该链路。
 ```
 
 ### 8.2 查看日志
@@ -744,14 +756,14 @@ s3_secret_key_env = "ELBOT_S3_SECRET_ACCESS_KEY"
 
 ```bash
 docker login registry.cn-hangzhou.aliyuncs.com
-bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3
+bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.4
 ```
 
 ### 9.2 腾讯云 TCR
 
 ```bash
 docker login ccr.ccs.tencentyun.com
-bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.3
+bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.4
 ```
 
 ### 9.3 服务器使用远端镜像
@@ -759,7 +771,7 @@ bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.3
 编辑 `deploy/.env`：
 
 ```dotenv
-ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3
+ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.4
 ```
 
 服务器登录私有仓库后：
@@ -783,7 +795,7 @@ Dockerfile 的 `VERSION` 构建参数只影响镜像内的版本字符串与 OCI
 
 ```bash
 PLATFORM=linux/amd64,linux/arm64 \
-  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.3
+  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.4
 ```
 
 多平台只能 `--push`（buildx 限制），脚本已处理。Dockerfile 的构建阶段固定在
@@ -921,17 +933,21 @@ curl -sS http://127.0.0.1:32171/healthz
 # 容器内运行；检查配置、健康端口、平台状态和模型调用
 docker compose exec -T elbot elbot doctor
 
-# 追加真实消息往返：通过 CLI 远程协议发送一条消息并等待回复
+# 严格平台验收：没有启用的平台、平台未出现在健康快照、或平台 disconnected 都失败
+docker compose exec -T elbot elbot doctor --require-platform
+
+# 追加真实消息往返：通过 CLI 远程协议发送唯一探测标记并等待匹配回复
 docker compose exec -T elbot elbot doctor --e2e
 
 # 输出 JSON，便于接入 CI / 发布流水线
 docker compose exec -T elbot elbot doctor --e2e --json
 ```
 
-报告使用两个总字段区分阶段：
+报告使用三个总字段区分阶段：
 
-- `config_ok`：配置加载、数据目录可写、端口可达、平台状态和模型调用检查通过；
-- `e2e_ok`：`--e2e` 时，CLI 远程服务器实际完成一次“发送消息 → 收到回复”；未加 `--e2e` 时为 `false`，并显示 `skipped`。
+- `config_ok`：配置加载、数据目录可写、端口可达、模型调用检查通过；
+- `platform_ok`：平台连接检查通过。平台状态为 `disconnected` 时该检查失败；`--require-platform` 还会要求平台已启用且在健康快照中有状态；
+- `e2e_ok`：`--e2e` 时，CLI 远程服务器实际完成一次“发送唯一探测标记 → 收到包含该标记的回复”；空流结束、只收到非空但无关的文本都会失败；未加 `--e2e` 时为 `false`，并显示 `skipped`。
 
 `--no-model` 可跳过真实模型调用，只做配置和本地检查。CLI 远程消息往返要求 `platform.cli.server.enabled=true`，并配置好客户端 token。
 

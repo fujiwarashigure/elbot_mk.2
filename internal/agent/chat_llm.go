@@ -13,6 +13,7 @@ import (
 	"elbot/internal/hook"
 	"elbot/internal/llm"
 	"elbot/internal/platform"
+	"elbot/internal/redact"
 )
 
 type llmCallResult struct {
@@ -122,7 +123,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 			a.notifyVisionFallbackOnce(ctx, sessionID, out)
 			return a.callLLM(ctx, sessionID, selection, fallbackVisionMessages(baseMessages), tools, nil, requestOptions, stream, out)
 		}
-		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", err.Error())
+		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", redact.Error(err))
 		a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, ElapsedMS: elapsedMillis(startedAt)}}, err)
 		return llmCallResult{}, fmt.Errorf("chat: %w", err)
 	}
@@ -141,9 +142,10 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 				a.notifyVisionFallbackOnce(ctx, sessionID, out)
 				return a.callLLM(ctx, sessionID, selection, fallbackVisionMessages(baseMessages), tools, nil, requestOptions, stream, out)
 			}
-			a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", chunk.Error.Error())
-			a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, SourceText: assistant.String(), Text: assistant.String(), ToolCalls: toolCalls, Usage: usage, ElapsedMS: elapsedMillis(startedAt)}}, chunk.Error)
-			out.SendNotice(ctx, slog.LevelError, fmt.Sprintf("LLM 响应中断：%v", chunk.Error))
+			details := newUserErrorDetails("LLM 响应中断", chunk.Error)
+			a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error_id", details.ID, "error", details.Safe)
+			a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, SourceText: assistant.String(), Text: assistant.String(), ToolCalls: toolCalls, Usage: usage, ElapsedMS: elapsedMillis(startedAt)}}, errors.New(details.Safe))
+			out.SendNotice(ctx, slog.LevelError, details.Text)
 
 			return llmCallResult{}, markUserNotified(fmt.Errorf("chat stream: %w", chunk.Error))
 		}

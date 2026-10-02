@@ -11,11 +11,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
+    if [ "${REQUIRE_TEST_DEPS:-0}" = "1" ]; then
+        echo "restore_verify_start_test: 需要 sqlite3（REQUIRE_TEST_DEPS=1，不允许跳过）" >&2
+        exit 1
+    fi
     echo "skip: 未安装 sqlite3，跳过 restore_verify_start_test"
     exit 0
 fi
-if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import tomllib' >/dev/null 2>&1; then
-    echo "skip: 没有带 tomllib 的 python3，跳过 restore_verify_start_test"
+TOML_PYTHON=""
+for candidate in python3 python; do
+    if command -v "${candidate}" >/dev/null 2>&1 && "${candidate}" -c 'import tomllib' >/dev/null 2>&1; then
+        TOML_PYTHON="${candidate}"
+        break
+    fi
+done
+if [ -z "${TOML_PYTHON}" ]; then
+    if [ "${REQUIRE_TEST_DEPS:-0}" = "1" ]; then
+        echo "restore_verify_start_test: 需要带 tomllib 的 python3/python（REQUIRE_TEST_DEPS=1，不允许跳过）" >&2
+        exit 1
+    fi
+    echo "skip: 没有带 tomllib 的 python3/python，跳过 restore_verify_start_test"
     exit 0
 fi
 
@@ -93,6 +108,39 @@ if FAKE_EXEC_RC=1 bash "${DEPLOY_SRC}/restore-verify.sh" "${ARCHIVE}" >"${TMP}/f
     note "隔离实例从未 /ready 时严格模式仍然通过"
 fi
 grep -q 'restore_verify: failed' "${TMP}/fail.log" || note "启动验收失败时没有输出 restore_verify: failed"
+
+echo "== case 3: parameterized START_MODE values =="
+for mode in required require 1 true yes; do
+    : >"${FAKE_DOCKER_LOG}"
+    if ! RESTORE_VERIFY_START="${mode}" bash "${DEPLOY_SRC}/restore-verify.sh" "${ARCHIVE}" >"${TMP}/mode-${mode}.log" 2>&1; then
+        cat "${TMP}/mode-${mode}.log"
+        note "START_MODE=${mode} 被拒绝"
+        continue
+    fi
+    if ! grep -q 'start=passed' "${TMP}/mode-${mode}.log"; then
+        note "START_MODE=${mode} 没有执行隔离启动"
+    fi
+    if ! grep -q 'restore_verify: passed$' "${TMP}/mode-${mode}.log"; then
+        note "START_MODE=${mode} 没有输出完整的 passed"
+    fi
+done
+for mode in 0 false no off; do
+    if ! RESTORE_VERIFY_START="${mode}" bash "${DEPLOY_SRC}/restore-verify.sh" "${ARCHIVE}" >"${TMP}/mode-${mode}.log" 2>&1; then
+        cat "${TMP}/mode-${mode}.log"
+        note "START_MODE=${mode} 被错误地当成失败"
+        continue
+    fi
+    if ! grep -q 'start=skipped' "${TMP}/mode-${mode}.log"; then
+        note "START_MODE=${mode} 没有报告 start=skipped"
+    fi
+    if ! grep -q 'restore_verify: static_passed$' "${TMP}/mode-${mode}.log"; then
+        note "START_MODE=${mode} 没有输出 static_passed"
+    fi
+done
+if RESTORE_VERIFY_START=bogus bash "${DEPLOY_SRC}/restore-verify.sh" "${ARCHIVE}" >"${TMP}/mode-bogus.log" 2>&1; then
+    note "未知 START_MODE 仍然通过"
+fi
+grep -q 'restore_verify: failed' "${TMP}/mode-bogus.log" || note "未知 START_MODE 没有输出 restore_verify: failed"
 
 if [ "${fail}" -eq 0 ]; then
     echo "restore_verify_start_test: passed"

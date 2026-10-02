@@ -19,16 +19,17 @@ const (
 )
 
 type Options struct {
-	ConfigPath    string
-	ClientName    string
-	Mode          app.RunMode
-	Command       Command
-	Completion    string
-	DoctorE2E     bool
-	DoctorJSON    bool
-	DoctorNoModel bool
-	Help          bool
-	Version       bool
+	ConfigPath            string
+	ClientName            string
+	Mode                  app.RunMode
+	Command               Command
+	Completion            string
+	DoctorE2E             bool
+	DoctorJSON            bool
+	DoctorNoModel         bool
+	DoctorRequirePlatform bool
+	Help                  bool
+	Version               bool
 }
 
 func ParseArgs(args []string) (Options, error) {
@@ -65,6 +66,8 @@ func ParseArgs(args []string) (Options, error) {
 			opts.DoctorJSON = true
 		case arg == "--no-model":
 			opts.DoctorNoModel = true
+		case arg == "--require-platform":
+			opts.DoctorRequirePlatform = true
 		case strings.HasPrefix(arg, "-"):
 			return Options{}, fmt.Errorf("unknown option: %s", arg)
 		default:
@@ -102,7 +105,7 @@ func ParseArgs(args []string) (Options, error) {
 		opts.Command = CommandConfigCheck
 	case "doctor":
 		if len(positionals) != 1 {
-			return Options{}, fmt.Errorf("usage: elbot doctor [--config path] [--e2e] [--json] [--no-model]")
+			return Options{}, fmt.Errorf("usage: elbot doctor [--config path] [--e2e] [--json] [--no-model] [--require-platform]")
 		}
 		opts.Command = CommandDoctor
 	case "completion":
@@ -133,7 +136,7 @@ func WriteUsage(w io.Writer) {
   elbot cli [--config path] [-c client]
   elbot service run [--config path]
   elbot config check [--config path]
-  elbot doctor [--config path] [--e2e] [--json] [--no-model]
+  elbot doctor [--config path] [--e2e] [--json] [--no-model] [--require-platform]
   elbot completion [auto|bash|zsh|fish|nushell|powershell]
 
 Commands:
@@ -141,7 +144,8 @@ Commands:
   cli           Run local CLI-only mode: CLI without background platforms or cron.
   service run   Run headless service mode for Linux service managers.
   config check  Load app.toml, print a summary and warnings, exit non-zero on error.
-  doctor        Run deployment acceptance checks. Adds --e2e for a real CLI round-trip.
+  doctor        Run deployment acceptance checks. Adds --e2e for a real CLI round-trip;
+                --require-platform makes disconnected/missing platforms fail the run.
   completion    Generate shell completion scripts.
 
 Options:

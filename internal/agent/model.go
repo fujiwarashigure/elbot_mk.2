@@ -16,6 +16,7 @@ import (
 	"elbot/internal/config"
 	"elbot/internal/delivery"
 	"elbot/internal/llm"
+	"elbot/internal/redact"
 	"elbot/internal/storage"
 )
 
@@ -393,9 +394,10 @@ func (a *Agent) attachLLMRetryNotifier(client llm.LLM, providerName string) {
 		if event.Err == nil || errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return
 		}
-		text := fmt.Sprintf("LLM 请求失败，正在重试 %d/%d（%s 后）：%v", event.Attempt, event.MaxRetries, event.Delay.Round(time.Millisecond), event.Err)
+		safe := redact.Summarize(event.Err.Error(), maxUserErrorRunes)
+		text := fmt.Sprintf("LLM 请求失败，正在重试 %d/%d（%s 后）：%s", event.Attempt, event.MaxRetries, event.Delay.Round(time.Millisecond), safe)
 		if providerName != "" {
-			text = fmt.Sprintf("LLM 请求失败，正在重试 %d/%d（provider=%s，%s 后）：%v", event.Attempt, event.MaxRetries, providerName, event.Delay.Round(time.Millisecond), event.Err)
+			text = fmt.Sprintf("LLM 请求失败，正在重试 %d/%d（provider=%s，%s 后）：%s", event.Attempt, event.MaxRetries, providerName, event.Delay.Round(time.Millisecond), safe)
 		}
 		_, _ = a.SendNotice(ctx, delivery.Notice{Outputs: []delivery.Output{delivery.Text(text)}, Level: slog.LevelWarn})
 	})

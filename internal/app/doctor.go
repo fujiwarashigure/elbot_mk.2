@@ -16,6 +16,7 @@ import (
 	"elbot/internal/llm"
 	"elbot/internal/llm/openai"
 	"elbot/internal/platform/cli"
+	"elbot/internal/redact"
 	"elbot/internal/storage"
 
 	"github.com/coder/websocket"
@@ -25,11 +26,12 @@ import (
 const defaultDoctorTimeout = 60 * time.Second
 
 type DoctorOptions struct {
-	ConfigPath string
-	E2E        bool
-	JSON       bool
-	SkipModel  bool
-	Timeout    time.Duration
+	ConfigPath      string
+	E2E             bool
+	JSON            bool
+	SkipModel       bool
+	RequirePlatform bool
+	Timeout         time.Duration
 }
 
 type DoctorCheck struct {
@@ -42,6 +44,7 @@ type DoctorCheck struct {
 
 type DoctorReport struct {
 	ConfigOK   bool          `json:"config_ok"`
+	PlatformOK bool          `json:"platform_ok"`
 	E2EOK      bool          `json:"e2e_ok"`
 	Checks     []DoctorCheck `json:"checks"`
 	StartedAt  time.Time     `json:"started_at"`
@@ -55,11 +58,11 @@ func RunDoctor(ctx context.Context, opts DoctorOptions) (DoctorReport, error) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = defaultDoctorTimeout
 	}
-	report := DoctorReport{ConfigOK: true, StartedAt: time.Now()}
+	report := DoctorReport{ConfigOK: true, PlatformOK: true, StartedAt: time.Now()}
 	add := func(category, name, status, detail string, err error) {
 		check := DoctorCheck{Category: category, Name: name, Status: status, Detail: detail}
 		if err != nil {
-			check.Error = err.Error()
+			check.Error = redact.Error(err)
 		}
 		report.Checks = append(report.Checks, check)
 	}
@@ -118,22 +121,17 @@ func RunDoctor(ctx context.Context, opts DoctorOptions) (DoctorReport, error) {
 	if healthURL != "" {
 		if snapshot, err := fetchHealthSnapshot(ctx, healthURL); err != nil {
 			add("platform", "connection", "failed", healthURL, err)
-			report.ConfigOK = false
+			report.PlatformOK = false
 		} else {
-			detail := "health=" + snapshot.Status
-			if len(snapshot.Platforms) > 0 {
-				parts := make([]string, 0, len(snapshot.Platforms))
-				for _, platform := range snapshot.Platforms {
-					value := platform.Name + "=disconnected"
-					if platform.Connected {
-						value = platform.Name + "=connected"
-					}
-					parts = append(parts, value)
-				}
-				detail = strings.Join(parts, ", ")
+			status, detail, err := doctorPlatformConnection(snapshot, enabled, opts.RequirePlatform)
+			add("platform", "connection", status, detail, err)
+			if status == "failed" {
+				report.PlatformOK = false
 			}
-			add("platform", "connection", "passed", detail, nil)
 		}
+	} else if opts.RequirePlatform && len(enabled) > 0 {
+		add("platform", "connection", "failed", "health endpoint is not configured", fmt.Errorf("cannot verify platform connectivity without %s", healthAddrEnv))
+		report.PlatformOK = false
 	} else {
 		add("platform", "connection", "skipped", "health endpoint is not configured", nil)
 	}
@@ -295,6 +293,59 @@ func enabledPlatformNames(cfg *config.Config) []string {
 	return names
 }
 
+func doctorPlatformConnection(snapshot health.Snapshot, enabled []string, require bool) (string, string, error) {
+	detail := "health=" + snapshot.Status
+	parts := make([]string, 0, len(snapshot.Platforms))
+	connected := map[string]bool{}
+	for _, platform := range snapshot.Platforms {
+		value := platform.Name + "=disconnected"
+		if platform.Connected {
+			value = platform.Name + "=connected"
+		}
+		parts = append(parts, value)
+		if platform.Connected {
+			connected[platform.Name] = true
+		}
+	}
+	if len(parts) > 0 {
+		detail = strings.Join(parts, ", ")
+	}
+	if len(enabled) == 0 {
+		if require {
+			return "failed", detail, fmt.Errorf("--require-platform was set but no platform is enabled")
+		}
+		return "passed", detail + " (no platform is enabled)", nil
+	}
+	missing := make([]string, 0)
+	disconnected := make([]string, 0)
+	for _, name := range enabled {
+		switch {
+		case !connected[name]:
+			if snapshotHasPlatform(snapshot, name) {
+				disconnected = append(disconnected, name)
+			} else {
+				missing = append(missing, name)
+			}
+		}
+	}
+	if len(disconnected) > 0 {
+		return "failed", detail, fmt.Errorf("platform disconnected: %s", strings.Join(disconnected, ", "))
+	}
+	if require && len(missing) > 0 {
+		return "failed", detail, fmt.Errorf("platform status missing for: %s", strings.Join(missing, ", "))
+	}
+	return "passed", detail, nil
+}
+
+func snapshotHasPlatform(snapshot health.Snapshot, name string) bool {
+	for _, platform := range snapshot.Platforms {
+		if platform.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func doctorModelCall(ctx context.Context, cfg *config.Config, provider config.ProviderConfig, apiKey, model string) error {
 	if strings.TrimSpace(provider.BaseURL) == "" {
 		return fmt.Errorf("provider base_url is empty")
@@ -400,9 +451,13 @@ func doctorCLIRoundTrip(ctx context.Context, cfg *config.Config, timeout time.Du
 	if hello.Type != "hello_ok" {
 		return fmt.Errorf("unexpected cli server hello type %q", hello.Type)
 	}
-	if err := wsjson.Write(dialCtx, conn, doctorRemoteMessage{Type: "input", Text: "请回复 pong"}); err != nil {
+	probe := "doctor-probe-" + strings.ReplaceAll(redact.NewErrorID(), "-", "")
+	if err := wsjson.Write(dialCtx, conn, doctorRemoteMessage{Type: "input", Text: "请只回复这个标记，不要添加其他内容：" + probe}); err != nil {
 		return err
 	}
+	expected := strings.ToLower(probe)
+	streamMatched := false
+	var streamed strings.Builder
 	for {
 		var msg doctorRemoteMessage
 		if err := wsjson.Read(dialCtx, conn, &msg); err != nil {
@@ -410,15 +465,30 @@ func doctorCLIRoundTrip(ctx context.Context, cfg *config.Config, timeout time.Du
 		}
 		switch msg.Type {
 		case "chat":
-			if strings.TrimSpace(msg.Text) != "" {
+			text := strings.TrimSpace(msg.Text)
+			if text == "" {
+				return fmt.Errorf("cli server returned an empty chat message")
+			}
+			if strings.Contains(strings.ToLower(text), expected) {
 				return nil
+			}
+			return fmt.Errorf("cli server returned an unexpected reply %q, want probe %q", text, probe)
+		case "stream_append":
+			streamed.WriteString(msg.Text)
+			if strings.Contains(strings.ToLower(streamed.String()), expected) {
+				streamMatched = true
 			}
 		case "stream_replace":
-			if strings.TrimSpace(msg.Text) != "" {
-				return nil
+			streamed.Reset()
+			streamed.WriteString(msg.Text)
+			if strings.Contains(strings.ToLower(streamed.String()), expected) {
+				streamMatched = true
 			}
 		case "stream_finish":
-			return nil
+			if streamMatched {
+				return nil
+			}
+			return fmt.Errorf("cli stream finished without the expected probe reply %q", probe)
 		case "error":
 			return fmt.Errorf("cli round-trip error: %s", msg.Text)
 		}
