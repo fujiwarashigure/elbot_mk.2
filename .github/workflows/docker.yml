@@ -48,7 +48,7 @@ jobs:
         run: go test ./...
 
       - name: Go race tests for critical packages
-        run: go test -race ./internal/agent ./internal/app ./internal/config ./internal/storage/...
+        run: go test -race ./internal/agent ./internal/app ./internal/config ./internal/storage/... ./internal/angelmemory ./internal/selflearning ./internal/groupanalysis ./internal/health ./internal/ratelimit ./internal/safecontext ./internal/textmatch
 
 
   deploy:
@@ -76,6 +76,43 @@ jobs:
           bash deploy/tests/upgrade_script_test.sh
           bash deploy/tests/watchdog_redaction_test.sh
           bash deploy/tests/windows_script_test.sh
+
+  image-smoke:
+    name: Build amd64 image (no push)
+    if: github.event_name == 'pull_request'
+    needs: [test, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(tr -d '[:space:]' < deploy/VERSION)"
+          echo "version=${v#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 image without pushing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: elbot-smoke:${{ steps.ver.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect built image
+        run: docker image inspect "elbot-smoke:${{ steps.ver.outputs.version }}" >/dev/null
 
   image:
     name: Build & push multi-arch image

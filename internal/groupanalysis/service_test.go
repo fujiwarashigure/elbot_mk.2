@@ -2,6 +2,7 @@ package groupanalysis
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -123,11 +124,80 @@ func TestAnalyzePaginatesAndMarksTruncation(t *testing.T) {
 	if report.InboundMessages != 2 || report.ScannedMessages != 2 {
 		t.Fatalf("report = %#v, want exactly 2 scanned messages", report)
 	}
-	if !report.Truncated {
-		t.Fatal("Truncated = false, want true when the read limit is reached")
+	if !report.Truncated || !report.InboundTruncated {
+		t.Fatalf("report = %#v, want inbound truncation", report)
 	}
-	if !strings.Contains(report.FormatText(), "已达到读取上限") {
+	if report.OutboundTruncated {
+		t.Fatalf("report = %#v, outbound was not truncated", report)
+	}
+	if !strings.Contains(report.FormatText(), "读取上限") {
 		t.Fatalf("FormatText missing truncation note: %q", report.FormatText())
+	}
+}
+
+type countingOutboundRepo struct {
+	fakeOutboundRepo
+	countRequests int
+	listRequests  int
+}
+
+func (f *countingOutboundRepo) CountRange(context.Context, storage.OutboundMessageRangeRequest) (int, error) {
+	f.countRequests++
+	return 12345, nil
+}
+
+func (f *countingOutboundRepo) ListRange(context.Context, storage.OutboundMessageRangeRequest) ([]storage.OutboundMessage, error) {
+	f.listRequests++
+	return f.rows, nil
+}
+
+func TestAnalyzeUsesOutboundCountQuery(t *testing.T) {
+	since := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
+	outbound := &countingOutboundRepo{}
+	service := NewService(&fakeRangeRepo{}, outbound)
+	report, err := service.Analyze(context.Background(), Request{
+		Platform: "qqonebot",
+		ScopeID:  "group:1",
+		Since:    since,
+		Until:    since.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if report.OutboundMessages != 12345 {
+		t.Fatalf("OutboundMessages = %d, want 12345", report.OutboundMessages)
+	}
+	if report.OutboundTruncated {
+		t.Fatalf("OutboundTruncated = true, want false for a COUNT query")
+	}
+	if outbound.countRequests != 1 || outbound.listRequests != 0 {
+		t.Fatalf("count=%d list=%d, want count-only path", outbound.countRequests, outbound.listRequests)
+	}
+}
+
+func BenchmarkAnalyzeLargeGroup(b *testing.B) {
+	since := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
+	rows := make([]storage.ChatMessage, 0, 5000)
+	for i := 0; i < 5000; i++ {
+		rows = append(rows, storage.ChatMessage{
+			Seq:       int64(i + 1),
+			SenderID:  fmt.Sprintf("u%d", i%50),
+			Text:      strings.Repeat("消息内容", 4),
+			CreatedAt: since.Add(time.Duration(i) * time.Second),
+		})
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		service := NewService(&pagedRangeRepo{rows: rows}, nil)
+		if _, err := service.Analyze(context.Background(), Request{
+			Platform: "qqonebot",
+			ScopeID:  "group:1",
+			Since:    since,
+			Until:    since.Add(24 * time.Hour),
+			Limit:    5000,
+		}); err != nil {
+			b.Fatalf("Analyze: %v", err)
+		}
 	}
 }
 

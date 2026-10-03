@@ -13,7 +13,11 @@ import (
 func TestServerLiveReadyAndDegraded(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	state := NewState(Options{LiveStale: 10 * time.Second, Now: func() time.Time { return now }})
-	server, err := NewServer(ServerOptions{Addr: "127.0.0.1:0", State: state})
+	server, err := NewServer(ServerOptions{
+		Addr:                              "127.0.0.1:0",
+		State:                             state,
+		AllowUnauthenticatedExtraHandlers: true,
+	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -143,6 +147,53 @@ func TestServerProtectsHealthzWithToken(t *testing.T) {
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("authenticated /healthz status = %d, want %d, body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+}
+
+func TestServerSensitiveEndpointsAccessMatrix(t *testing.T) {
+	cases := []struct {
+		name           string
+		token          string
+		allowUnauth    bool
+		authenticated  bool
+		wantStatusCode int
+	}{
+		{name: "no token denies", wantStatusCode: http.StatusNotFound},
+		{name: "no token explicit allow", allowUnauth: true, wantStatusCode: http.StatusOK},
+		{name: "token rejects anonymous", token: "ops-secret", wantStatusCode: http.StatusUnauthorized},
+		{name: "token accepts bearer", token: "ops-secret", authenticated: true, wantStatusCode: http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := NewState(Options{})
+			state.Beat()
+			state.SetReady(true)
+			server, err := NewServer(ServerOptions{
+				Addr:                              "127.0.0.1:0",
+				State:                             state,
+				ExtraHandlerToken:                 tc.token,
+				AllowUnauthenticatedExtraHandlers: tc.allowUnauth,
+				ExtraHandlers: map[string]http.Handler{
+					"/tasks": http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						w.WriteHeader(http.StatusOK)
+					}),
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			for _, path := range []string{"/healthz", "/tasks"} {
+				recorder := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				if tc.authenticated {
+					req.Header.Set("Authorization", "Bearer "+tc.token)
+				}
+				server.Handler().ServeHTTP(recorder, req)
+				if recorder.Code != tc.wantStatusCode {
+					t.Fatalf("%s status = %d, want %d (body=%s)", path, recorder.Code, tc.wantStatusCode, recorder.Body.String())
+				}
+			}
+		})
 	}
 }
 

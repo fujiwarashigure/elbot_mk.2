@@ -89,4 +89,15 @@ func TestChatHistoryRangeAndOutboundMessages(t *testing.T) {
 	if len(out) != 1 || out[0].Text != "收到" {
 		t.Fatalf("Outbound ListRange = %#v", out)
 	}
+	counter, ok := outbound.(storage.OutboundMessageCounter)
+	if !ok {
+		t.Fatal("OutboundMessageRepository does not implement OutboundMessageCounter")
+	}
+	count, err := counter.CountRange(ctx, storage.OutboundMessageRangeRequest{Platform: "qqonebot", PlatformScopeID: "group:1", Since: &since, Until: &until})
+	if err != nil {
+		t.Fatalf("CountRange: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("CountRange = %d, want 1", count)
+	}
 }

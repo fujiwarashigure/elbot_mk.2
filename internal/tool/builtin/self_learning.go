@@ -69,7 +69,14 @@ func (t SelfLearningReviewTool) Call(ctx context.Context, req tool.CallRequest) 
 		if err != nil {
 			return nil, err
 		}
-		return &tool.Result{Content: fmt.Sprintf("候选挖掘完成：新增 %d 条，更新 %d 条，跳过 %d 条。", stats.Created, stats.Updated, stats.Skipped)}, nil
+		summary := fmt.Sprintf("候选挖掘完成：新增 %d 条，更新 %d 条，跳过 %d 条；扫描 %d 条 / %d 字。", stats.Created, stats.Updated, stats.Skipped, stats.Scanned, stats.TotalChars)
+		if stats.Truncated {
+			summary += " 已达到挖掘预算，结果可能不完整。"
+		}
+		if stats.TimedOut {
+			summary += " 挖掘超时，结果可能不完整。"
+		}
+		return &tool.Result{Content: summary}, nil
 	case "list":
 		status := strings.TrimSpace(args.Status)
 		if status == "" {
@@ -107,8 +114,24 @@ func (t SelfLearningReviewTool) Call(ctx context.Context, req tool.CallRequest) 
 			return nil, err
 		}
 		return &tool.Result{Content: fmt.Sprintf("候选 %s 已撤回为待审。", args.ID)}, nil
+	case "history":
+		if strings.TrimSpace(args.ID) == "" {
+			return &tool.Result{Content: "history 需要 id。"}, nil
+		}
+		records, err := t.service.History(ctx, msgCtx.Platform, msgCtx.ScopeID, args.ID, 20)
+		if err != nil {
+			return nil, err
+		}
+		if len(records) == 0 {
+			return &tool.Result{Content: "没有审核记录。"}, nil
+		}
+		lines := []string{fmt.Sprintf("审核历史 %d 条：", len(records))}
+		for i, record := range records {
+			lines = append(lines, fmt.Sprintf("%d. %s → %s by %s", i+1, record.FromStatus, record.ToStatus, record.Reviewer))
+		}
+		return &tool.Result{Content: strings.Join(lines, "\n")}, nil
 	default:
-		return &tool.Result{Content: "action 只支持 status、mine、list、approve、reject、undo。"}, nil
+		return &tool.Result{Content: "action 只支持 status、mine、list、approve、reject、undo、history。"}, nil
 	}
 }
 
@@ -127,14 +150,14 @@ func toolReviewer(ctx context.Context) string {
 
 func selfLearningReviewBuilder() *tool.Builder {
 	return tool.NewBuilder(selfLearningReviewToolName).
-		Description("管理 clean-room 表达/黑话候选：查看状态、挖掘候选、列出、批准、拒绝或撤回。批准后的内容才会注入上下文。").
+		Description("管理 clean-room 表达/黑话候选：查看状态、挖掘候选、列出、批准、拒绝、撤回或查看审核历史。批准后的内容才会注入上下文。").
 		Risk(tool.RiskHigh).
 		SuperadminOnly().
 		Tags("learning").
-		String("action", "status、mine、list、approve、reject、undo；默认 status。").
+		String("action", "status、mine、list、approve、reject、undo、history；默认 status。").
 		String("status", "list 时过滤 pending/approved/rejected。").
-		String("id", "approve/reject/undo 的候选 ID。").
+		String("id", "approve/reject/undo/history 的候选 ID。").
 		String("meaning", "approve 黑话时可选的含义。").
-		Integer("min_count", "mine 时候选最低出现次数。").
+		Integer("min_count", "mine 时候选最低出现次数；最低不同用户数由 self_learning.min_users 配置。").
 		Integer("limit", "返回/生成数量上限。")
 }

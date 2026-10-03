@@ -71,7 +71,7 @@ func startHealthServer(cfg *config.Config, logger *slog.Logger, version string, 
 				logger.Warn("ELBOT_OPS_ALLOW_UNAUTHENTICATED is enabled; sensitive ops handlers are exposed without authentication", "addr", addr, "loopback", isLoopbackHealthAddr(addr))
 			}
 		} else if logger != nil {
-			logger.Warn("ELBOT_OPS_TOKEN is not set; sensitive ops handlers are disabled and /healthz is not authenticated", "addr", addr, "loopback", isLoopbackHealthAddr(addr))
+			logger.Warn("ELBOT_OPS_TOKEN is not set; /healthz and sensitive ops handlers are disabled", "addr", addr, "loopback", isLoopbackHealthAddr(addr))
 		}
 	}
 

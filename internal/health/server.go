@@ -22,7 +22,7 @@ type ServerOptions struct {
 	Checkers      []Checker
 	ExtraHandlers map[string]http.Handler
 	// ExtraHandlerToken protects /tasks, /metrics, /diagnostics, any other
-	// extra handler, and /healthz. Empty means extra handlers are disabled
+	// extra handler, and /healthz. Empty means those endpoints are disabled
 	// unless AllowUnauthenticatedExtraHandlers is explicitly true.
 	ExtraHandlerToken string
 	// AllowUnauthenticatedExtraHandlers is an explicit opt-in for exposing
@@ -33,7 +33,9 @@ type ServerOptions struct {
 	ReadHeaderTimeout                 time.Duration
 }
 
-// Server exposes /live, /ready and /healthz for internal or loopback access.
+// Server exposes /live and /ready for internal or loopback access. /healthz is
+// only registered when an ops token protects it or the caller explicitly opts
+// into unauthenticated extra handlers.
 type Server struct {
 	addr              string
 	state             *State
@@ -68,10 +70,16 @@ func NewServer(opts ServerOptions) (*Server, error) {
 	mux.HandleFunc("/live", s.handleLive)
 	mux.HandleFunc("/ready", s.handleReady)
 	healthzHandler := http.Handler(http.HandlerFunc(s.handleHealthz))
-	if s.extraHandlerToken != "" {
-		healthzHandler = s.requireExtraHandlerToken(healthzHandler)
+	switch {
+	case s.extraHandlerToken != "":
+		mux.Handle("/healthz", s.requireExtraHandlerToken(healthzHandler))
+	case opts.AllowUnauthenticatedExtraHandlers:
+		mux.Handle("/healthz", healthzHandler)
+	default:
+		// Secure default: without a token the detailed snapshot stays
+		// unregistered, so only /live and /ready are exposed. This matches the
+		// documented behaviour instead of silently leaking checker errors.
 	}
-	mux.Handle("/healthz", healthzHandler)
 	for path, handler := range opts.ExtraHandlers {
 		if handler == nil {
 			continue

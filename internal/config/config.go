@@ -323,11 +323,17 @@ func (c AngelMemoryConfig) IsEnabled() bool {
 
 // SelfLearningConfig controls the clean-room expression/jargon learning layer.
 type SelfLearningConfig struct {
-	Enabled         *bool `toml:"enabled"`
-	RetentionDays   int   `toml:"retention_days"`
-	MinCount        int   `toml:"min_count"`
-	MaxMeaningRunes int   `toml:"max_meaning_runes"`
-	MaxContextRunes int   `toml:"max_context_runes"`
+	Enabled                       *bool `toml:"enabled"`
+	RetentionDays                 int   `toml:"retention_days"`
+	MinCount                      int   `toml:"min_count"`
+	MinUsers                      int   `toml:"min_users"`
+	MaxMeaningRunes               int   `toml:"max_meaning_runes"`
+	MaxContextRunes               int   `toml:"max_context_runes"`
+	MaxObservationRunes           int   `toml:"max_observation_runes"`
+	MaxObservationsPerScope       int   `toml:"max_observations_per_scope"`
+	MaxObservationWritesPerMinute int   `toml:"max_observation_writes_per_minute"`
+	MaxMineChars                  int   `toml:"max_mine_chars"`
+	MineTimeoutSeconds            int   `toml:"mine_timeout_seconds"`
 }
 
 func (c SelfLearningConfig) IsEnabled() bool {

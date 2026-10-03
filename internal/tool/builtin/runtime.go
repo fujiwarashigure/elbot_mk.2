@@ -112,8 +112,14 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	var selfLearningService *selflearning.Service
 	if selfLearningStore != nil {
 		selfLearningService = selflearning.NewService(selfLearningStore, selflearning.Options{
-			MaxMeaningRunes: opts.SelfLearning.MaxMeaningRunes,
-			MaxContextRunes: opts.SelfLearning.MaxContextRunes,
+			MinUsers:                      opts.SelfLearning.MinUsers,
+			MaxMeaningRunes:               opts.SelfLearning.MaxMeaningRunes,
+			MaxContextRunes:               opts.SelfLearning.MaxContextRunes,
+			MaxObservationRunes:           opts.SelfLearning.MaxObservationRunes,
+			MaxObservationsPerScope:       opts.SelfLearning.MaxObservationsPerScope,
+			MaxObservationWritesPerMinute: opts.SelfLearning.MaxObservationWritesPerMinute,
+			MaxMineChars:                  opts.SelfLearning.MaxMineChars,
+			MineTimeout:                   time.Duration(opts.SelfLearning.MineTimeoutSeconds) * time.Second,
 		})
 	}
 	var groupAnalysisService *groupanalysis.Service

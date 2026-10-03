@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,6 +25,10 @@ import (
 )
 
 const defaultDoctorTimeout = 60 * time.Second
+
+// errHealthzDisabled marks the secure default where /healthz is not registered
+// because no ops token is configured.
+var errHealthzDisabled = errors.New("/healthz is disabled because no ops token is configured")
 
 type DoctorOptions struct {
 	ConfigPath      string
@@ -119,9 +124,14 @@ func RunDoctor(ctx context.Context, opts DoctorOptions) (DoctorReport, error) {
 		add("platform", "configured", "passed", strings.Join(enabled, ", "), nil)
 	}
 	if healthURL != "" {
-		if snapshot, err := fetchHealthSnapshot(ctx, healthURL, resolveDoctorOpsToken(cfg)); err != nil {
-			add("platform", "connection", "failed", healthURL, err)
-			report.PlatformOK = false
+		opsToken := resolveDoctorOpsToken(cfg)
+		if snapshot, err := fetchHealthSnapshot(ctx, healthURL, opsToken); err != nil {
+			if opsToken == "" && errors.Is(err, errHealthzDisabled) && !opts.RequirePlatform {
+				add("platform", "connection", "skipped", err.Error(), nil)
+			} else {
+				add("platform", "connection", "failed", healthURL, err)
+				report.PlatformOK = false
+			}
 		} else {
 			status, detail, err := doctorPlatformConnection(snapshot, enabled, opts.RequirePlatform)
 			add("platform", "connection", status, detail, err)
@@ -282,6 +292,9 @@ func fetchHealthSnapshot(ctx context.Context, baseURL, opsToken string) (health.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return health.Snapshot{}, fmt.Errorf("%w; set %s to re-enable it", errHealthzDisabled, healthOpsTokenEnv)
+		}
 		return health.Snapshot{}, fmt.Errorf("/healthz returned HTTP %d", resp.StatusCode)
 	}
 	var snapshot health.Snapshot

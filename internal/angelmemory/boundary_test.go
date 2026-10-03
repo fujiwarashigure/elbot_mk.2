@@ -3,8 +3,10 @@ package angelmemory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -98,6 +100,85 @@ func TestStoreLimitsCanBeConfiguredDirectly(t *testing.T) {
 	}
 	if _, err := store.Remember(ctx, &Memory{Platform: "p", ScopeID: "s", Content: "23456"}); !errors.Is(err, ErrScopeFull) {
 		t.Fatalf("Remember second error = %v, want ErrScopeFull", err)
+	}
+}
+
+func TestRememberInvalidBodiesDoNotConsumeWriteBudget(t *testing.T) {
+	ctx := context.Background()
+	_, service := openMemoryService(t, Options{MaxContentRunes: 5, MaxWritesPerMinute: 2, MaxPerScope: 100})
+	for i := 0; i < 20; i++ {
+		if _, err := service.Remember(ctx, "p", "s", strings.Repeat("长", 6), "", "test"); !errors.Is(err, ErrContentTooLong) {
+			t.Fatalf("oversized Remember %d error = %v, want ErrContentTooLong", i, err)
+		}
+		if _, err := service.Remember(ctx, "p", "s", "   ", "", "test"); err == nil {
+			t.Fatalf("empty Remember %d was accepted", i)
+		}
+	}
+	for i, content := range []string{"记忆一", "记忆二"} {
+		if _, err := service.Remember(ctx, "p", "s", content, "", "test"); err != nil {
+			t.Fatalf("valid Remember %d after invalid bursts: %v", i, err)
+		}
+	}
+	if _, err := service.Remember(ctx, "p", "s", "记忆三", "", "test"); err == nil || !strings.Contains(err.Error(), "rate limit") {
+		t.Fatalf("third valid write error = %v, want rate limit", err)
+	}
+}
+
+func TestRememberFailedStoreWritesDoNotConsumeSuccessBudget(t *testing.T) {
+	ctx := context.Background()
+	_, service := openMemoryService(t, Options{MaxPerScope: 1, MaxWritesPerMinute: 5})
+	if _, err := service.Remember(ctx, "p", "s", "记忆一", "", "test"); err != nil {
+		t.Fatalf("Remember first: %v", err)
+	}
+	// A full scope is a valid request that fails in the store. It must consume
+	// an attempt but be refunded from the success budget.
+	for i := 0; i < 3; i++ {
+		if _, err := service.Remember(ctx, "p", "s", fmt.Sprintf("溢出-%d", i), "", "test"); !errors.Is(err, ErrScopeFull) {
+			t.Fatalf("full-scope Remember %d error = %v, want ErrScopeFull", i, err)
+		}
+	}
+	// Updating the existing entry is still a successful write and must fit in
+	// the remaining success budget.
+	if _, err := service.Remember(ctx, "p", "s", "记忆一", "标签", "test"); err != nil {
+		t.Fatalf("update after failures: %v", err)
+	}
+}
+
+func TestRememberPerScopeLimitIsAtomicUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	store, service := openMemoryService(t, Options{MaxPerScope: 1, MaxWritesPerMinute: 100})
+	const writers = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successes := 0
+	fullErrors := 0
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := service.Remember(ctx, "p", "s", fmt.Sprintf("并发记忆-%d", i), "", "test")
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				successes++
+			case errors.Is(err, ErrScopeFull):
+				fullErrors++
+			default:
+				t.Errorf("unexpected error: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if successes != 1 || fullErrors != writers-1 {
+		t.Fatalf("successes = %d, scope-full = %d; want 1 and %d", successes, fullErrors, writers-1)
+	}
+	count, err := store.Count(ctx, "p", "s")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("stored count = %d, want 1", count)
 	}
 }
 

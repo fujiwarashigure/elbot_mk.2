@@ -31,7 +31,7 @@ jobs:
         run: go test ./...
 
       - name: Go race tests for critical packages
-        run: go test -race ./internal/agent ./internal/app ./internal/config ./internal/storage/...
+        run: go test -race ./internal/agent ./internal/app ./internal/config ./internal/storage/... ./internal/angelmemory ./internal/selflearning ./internal/groupanalysis ./internal/health ./internal/ratelimit ./internal/safecontext ./internal/textmatch
 
 
   deploy:
@@ -73,8 +73,8 @@ jobs:
       - name: Windows service marker test
         run: go test ./internal/app -run TestServiceMarkerNamedMutexConcurrentClaim -count=1
 
-      - name: Portable helper tests
-        run: go test ./internal/safecontext/... ./internal/textmatch/... -count=1
+      - name: Windows native package tests
+        run: go test ./internal/safecontext/... ./internal/textmatch/... ./internal/ratelimit/... ./internal/angelmemory/... ./internal/selflearning/... ./internal/groupanalysis/... -count=1
 
 
   build:

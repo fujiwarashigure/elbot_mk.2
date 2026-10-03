@@ -390,6 +390,31 @@ LIMIT ?`, params...)
 	return messages, nil
 }
 
+// CountRange counts outbound messages in the window without loading their
+// rows. It implements storage.OutboundMessageCounter.
+func (r *OutboundMessageRepository) CountRange(ctx context.Context, req storage.OutboundMessageRangeRequest) (int, error) {
+	if strings.TrimSpace(req.Platform) == "" || strings.TrimSpace(req.PlatformScopeID) == "" {
+		return 0, fmt.Errorf("outbound message range platform and scope are required")
+	}
+	conditions := []string{"platform = ?", "platform_scope_id = ?"}
+	params := []any{req.Platform, req.PlatformScopeID}
+	if req.Since != nil {
+		conditions = append(conditions, "created_at >= ?")
+		params = append(params, storage.FormatTime(*req.Since))
+	}
+	if req.Until != nil {
+		conditions = append(conditions, "created_at <= ?")
+		params = append(params, storage.FormatTime(*req.Until))
+	}
+	var count int
+	if err := r.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM outbound_messages
+WHERE `+strings.Join(conditions, " AND "), params...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count outbound message range: %w", err)
+	}
+	return count, nil
+}
+
 func (r *OutboundMessageRepository) DeleteBefore(ctx context.Context, cutoff time.Time) (int, error) {
 	result, err := r.db.ExecContext(ctx, `DELETE FROM outbound_messages WHERE created_at < ?`, storage.FormatTime(cutoff))
 	if err != nil {

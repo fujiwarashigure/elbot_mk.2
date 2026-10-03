@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
+	"elbot/internal/ratelimit"
 	"elbot/internal/safecontext"
 )
 
@@ -18,6 +18,10 @@ const (
 	defaultMaxWritesPerMinute = 30
 	defaultMaxMemoryLineRunes = 400
 )
+
+// errWriteRateLimited is returned when one scope exceeds its write budget. It is
+// a package-level value so tests and callers can match it with errors.Is.
+var errWriteRateLimited = fmt.Errorf("angel memory write rate limit exceeded for this scope")
 
 // Options bound the amount and rate of long-memory writes and injections.
 type Options struct {
@@ -62,9 +66,10 @@ type StoreLimits struct {
 }
 
 type Service struct {
-	store   *Store
-	opts    Options
-	limiter *writeLimiter
+	store     *Store
+	opts      Options
+	attempts  *ratelimit.Window
+	successes *ratelimit.Window
 }
 
 func NewService(store *Store, options ...Options) *Service {
@@ -78,10 +83,20 @@ func NewService(store *Store, options ...Options) *Service {
 			MaxPerScope:     opts.MaxPerScope,
 		})
 	}
+	// Attempts are bounded separately from successful writes: a burst of
+	// failures (scope full, transient SQLite errors) must not silently eat the
+	// successful-write budget, but it also must not be unlimited. Allowing a
+	// little headroom over the success budget keeps legitimate retries possible
+	// while still blunting request floods.
+	attemptBudget := opts.MaxWritesPerMinute * 2
+	if attemptBudget <= opts.MaxWritesPerMinute {
+		attemptBudget = opts.MaxWritesPerMinute + 1
+	}
 	return &Service{
-		store:   store,
-		opts:    opts,
-		limiter: newWriteLimiter(opts.MaxWritesPerMinute, time.Minute),
+		store:     store,
+		opts:      opts,
+		attempts:  ratelimit.New(attemptBudget, time.Minute),
+		successes: ratelimit.New(opts.MaxWritesPerMinute, time.Minute),
 	}
 }
 
@@ -93,16 +108,39 @@ func (s *Service) Remember(ctx context.Context, platform, scopeID, content, tags
 	if !s.Ready() {
 		return nil, fmt.Errorf("angel memory service is not configured")
 	}
-	if !s.limiter.allow(strings.TrimSpace(platform) + "\x00" + strings.TrimSpace(scopeID)) {
-		return nil, fmt.Errorf("angel memory write rate limit exceeded for this scope")
+	// Reject obviously invalid payloads before touching the limiter so a flood
+	// of empty or oversized requests cannot consume the scope's write budget.
+	platform = strings.TrimSpace(platform)
+	scopeID = strings.TrimSpace(scopeID)
+	content = strings.TrimSpace(content)
+	if platform == "" || scopeID == "" || content == "" {
+		return nil, fmt.Errorf("angel memory platform, scope and content are required")
 	}
-	return s.store.Remember(ctx, &Memory{
+	if max := s.opts.MaxContentRunes; max > 0 && len([]rune(content)) > max {
+		return nil, fmt.Errorf("%w: %d runes (max %d)", ErrContentTooLong, len([]rune(content)), max)
+	}
+	key := platform + "\x00" + scopeID
+	if !s.attempts.Allow(key) {
+		return nil, errWriteRateLimited
+	}
+	// Reserve one unit of the success budget before writing, then refund it if
+	// the store rejects the write. This prevents concurrent callers from
+	// exceeding the budget while keeping failures from consuming it.
+	if !s.successes.Allow(key) {
+		return nil, errWriteRateLimited
+	}
+	memory, err := s.store.Remember(ctx, &Memory{
 		Platform: platform,
 		ScopeID:  scopeID,
 		Content:  content,
 		Tags:     tags,
 		Source:   source,
 	})
+	if err != nil {
+		s.successes.Refund(key)
+		return nil, err
+	}
+	return memory, nil
 }
 
 func (s *Service) Recall(ctx context.Context, platform, scopeID, query string, limit int) ([]Memory, error) {
@@ -172,44 +210,4 @@ func (s *Service) DeleteBefore(ctx context.Context, cutoff time.Time) (int, erro
 		return 0, nil
 	}
 	return s.store.DeleteBefore(ctx, cutoff)
-}
-
-// writeLimiter is a small per-scope sliding-window limiter. It is process-local
-// on purpose: the SQLite store already serializes writes, and this guard only
-// needs to blunt accidental or malicious write bursts.
-type writeLimiter struct {
-	mu     sync.Mutex
-	max    int
-	window time.Duration
-	now    func() time.Time
-	hits   map[string][]time.Time
-}
-
-func newWriteLimiter(max int, window time.Duration) *writeLimiter {
-	if max <= 0 || window <= 0 {
-		return &writeLimiter{}
-	}
-	return &writeLimiter{max: max, window: window, now: time.Now, hits: map[string][]time.Time{}}
-}
-
-func (l *writeLimiter) allow(key string) bool {
-	if l == nil || l.max <= 0 || l.window <= 0 {
-		return true
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := l.now()
-	cutoff := now.Add(-l.window)
-	kept := l.hits[key][:0]
-	for _, at := range l.hits[key] {
-		if at.After(cutoff) {
-			kept = append(kept, at)
-		}
-	}
-	if len(kept) >= l.max {
-		l.hits[key] = kept
-		return false
-	}
-	l.hits[key] = append(kept, now)
-	return true
 }

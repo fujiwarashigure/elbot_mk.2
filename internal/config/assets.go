@@ -286,10 +286,22 @@ enabled = true
 retention_days = 365
 # 候选至少出现多少次才进入 review。
 min_count = 3
+# 候选至少被多少个不同用户说过才进入 review；设为 1 允许单人复读形成候选。
+# min_users = 2
 # 单个候选含义的最大字符数。
 # max_meaning_runes = 200
 # 每轮最多注入多少字符的学习上下文。
 # max_context_runes = 1200
+# 单条观察最大字符数（rune）；超过会被截断后入库。
+# max_observation_runes = 1000
+# 单个会话最多保留多少条观察；超过会拒绝写入。
+# max_observations_per_scope = 5000
+# 每个会话每分钟最多写入多少条观察。
+# max_observation_writes_per_minute = 60
+# 单次挖掘最多扫描多少字符。
+# max_mine_chars = 200000
+# 单次挖掘超时秒数。
+# mine_timeout_seconds = 10
 
 # image_generation 已移到共享的只读 services.toml，避免多个服务各配一份。
 # 旧部署仍可把 [image_generation] 写回这里；写了 services.toml 时以 services.toml 为准。

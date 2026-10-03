@@ -9,7 +9,7 @@
 > **不想在服务器上编译 Go？**
 > 仓库**不提交**预编译 / 离线产物，`deploy/dist/` 默认不存在；需要时先在本地或 CI 运行
 > `deploy/pack/prepare-offline.sh` 生成，再上传服务器。生成方式见 [`pack/README-OFFLINE.md`](pack/README-OFFLINE.md)：
-> - `deploy/dist/elbot-0.6.5-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
+> - `deploy/dist/elbot-0.6.6-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
 > - `deploy/dist/offline-amd64/`：预编译二进制 + Debian 运行时，服务器只需拉约 30MB debian 基础镜像，功能完整；
 > - 如果从仓库里找不到 `deploy/dist/`，属于正常现象，请先自行生成。
 
@@ -392,7 +392,7 @@ Compose 默认通过环境变量启用独立健康接口，并只映射到宿主
 
 - `GET /live`：只表示进程仍在运行。进程存活时 HTTP 200，不判断调度心跳、模型或平台。
 - `GET /ready`：进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期。平台未连接、模型 API 故障不会让它失败。
-- `GET /healthz`：汇总状态。平台/模型故障显示为 `degraded`；调度心跳过期时返回 `not_ready`。**不应仅凭它自动重启本机服务**。
+- `GET /healthz`：汇总状态。设置 `ELBOT_OPS_TOKEN` 时需要鉴权；未设置且未显式允许无鉴权时该接口不注册（只保留 `/live`、`/ready`）。平台/模型故障显示为 `degraded`；调度心跳过期时返回 `not_ready`。**不应仅凭它自动重启本机服务**。
 - `GET /tasks`：当前活跃的 turn / tool / hook / 上下文压缩任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。
 - `GET /metrics`：任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台和模型状态、Provider 熔断状态、限速阈值/拒绝原因和生图队列状态。
 - `GET /diagnostics`：面向“机器人没回复”的聚合诊断，包含排队/超时、限速命中、熔断状态和最近一次重启原因。
@@ -611,7 +611,7 @@ bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.
 
 ```bash
 # 1 / 0 / auto 之外，也接受 required / require / true / yes / false / no / off
-RESTORE_VERIFY_START=required RESTORE_VERIFY_IMAGE=elbot:0.6.5 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
+RESTORE_VERIFY_START=required RESTORE_VERIFY_IMAGE=elbot:0.6.6 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
 # 等待 /ready 的上限，默认 45 秒：
 RESTORE_VERIFY_START_TIMEOUT=90 ...
 # 关闭隔离启动检查：
@@ -687,7 +687,7 @@ bash rollback.sh
 `upgrade.sh` 只从**当前工作区**构建镜像，不会自动切换代码，所以它有两条硬性保护：
 
 - `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免“只给旧代码贴新版本号”；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
-- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.5 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
+- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.6 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
 
 重建之后 `upgrade.sh` 会等待容器 healthcheck 变成 `healthy`，再在容器内执行 `elbot doctor --no-model` 作为验收；任一步失败都会提示回滚命令并以非 0 退出。需要跳过或加严：
 
@@ -759,14 +759,14 @@ s3_secret_key_env = "ELBOT_S3_SECRET_ACCESS_KEY"
 
 ```bash
 docker login registry.cn-hangzhou.aliyuncs.com
-bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.5
+bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.6
 ```
 
 ### 9.2 腾讯云 TCR
 
 ```bash
 docker login ccr.ccs.tencentyun.com
-bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.5
+bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.6
 ```
 
 ### 9.3 服务器使用远端镜像
@@ -774,7 +774,7 @@ bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.5
 编辑 `deploy/.env`：
 
 ```dotenv
-ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.5
+ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.6
 ```
 
 服务器登录私有仓库后：
@@ -798,7 +798,7 @@ Dockerfile 的 `VERSION` 构建参数只影响镜像内的版本字符串与 OCI
 
 ```bash
 PLATFORM=linux/amd64,linux/arm64 \
-  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.5
+  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.6
 ```
 
 多平台只能 `--push`（buildx 限制），脚本已处理。Dockerfile 的构建阶段固定在

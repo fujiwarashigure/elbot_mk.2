@@ -75,7 +75,7 @@ func (c learningCommand) Info() command.Info {
 	return command.Info{
 		Name:        "learning",
 		Aliases:     []string{"selflearning"},
-		Usage:       "/learning status | mine | review [status] | approve <id> [meaning] | reject <id> | undo <id>",
+		Usage:       "/learning status | mine | review [status] | approve <id> [meaning] | reject <id> | undo <id> | history <id>",
 		Description: "管理 clean-room 表达/黑话候选；只有 approved 的内容会注入上下文。",
 		MinRole:     security.RoleSuperadmin,
 		Help: strings.TrimSpace(`Usage:
@@ -84,7 +84,8 @@ func (c learningCommand) Info() command.Info {
   /learning review [pending|approved|rejected]
   /learning approve <id> [含义]
   /learning reject <id>
-  /learning undo <id>`),
+  /learning undo <id>
+  /learning history <id>`),
 	}
 }
 
@@ -110,7 +111,14 @@ func (c learningCommand) Handle(ctx context.Context, req command.Request) (*comm
 		if err != nil {
 			return nil, err
 		}
-		return &command.Result{Content: fmt.Sprintf("候选挖掘完成：新增 %d 条，更新 %d 条，跳过 %d 条。", stats.Created, stats.Updated, stats.Skipped)}, nil
+		summary := fmt.Sprintf("候选挖掘完成：新增 %d 条，更新 %d 条，跳过 %d 条；扫描 %d 条 / %d 字。", stats.Created, stats.Updated, stats.Skipped, stats.Scanned, stats.TotalChars)
+		if stats.Truncated {
+			summary += " 已达到挖掘预算，结果可能不完整。"
+		}
+		if stats.TimedOut {
+			summary += " 挖掘超时，结果可能不完整。"
+		}
+		return &command.Result{Content: summary}, nil
 	case "review":
 		status := "pending"
 		if len(args) > 1 {
@@ -152,8 +160,24 @@ func (c learningCommand) Handle(ctx context.Context, req command.Request) (*comm
 			return nil, err
 		}
 		return &command.Result{Content: fmt.Sprintf("候选 %s 已撤回为待审。", args[1])}, nil
+	case "history":
+		if len(args) < 2 {
+			return &command.Result{Content: "history 需要候选 ID。"}, nil
+		}
+		records, err := c.deps.SelfLearning.History(ctx, scope.Platform, scope.PlatformScopeID, args[1], 20)
+		if err != nil {
+			return nil, err
+		}
+		if len(records) == 0 {
+			return &command.Result{Content: "没有审核记录。"}, nil
+		}
+		lines := []string{fmt.Sprintf("审核历史 %d 条：", len(records))}
+		for i, record := range records {
+			lines = append(lines, fmt.Sprintf("%d. %s → %s by %s", i+1, record.FromStatus, record.ToStatus, record.Reviewer))
+		}
+		return &command.Result{Content: strings.Join(lines, "\n")}, nil
 	default:
-		return &command.Result{Content: "用法：/learning status|mine|review|approve|reject|undo"}, nil
+		return &command.Result{Content: "用法：/learning status|mine|review|approve|reject|undo|history"}, nil
 	}
 }
 

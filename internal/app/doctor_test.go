@@ -1,11 +1,41 @@
 package app
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"elbot/internal/health"
 )
+
+func TestFetchHealthSnapshotReportsDisabledHealthz(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	if _, err := fetchHealthSnapshot(context.Background(), server.URL, ""); !errors.Is(err, errHealthzDisabled) {
+		t.Fatalf("fetchHealthSnapshot error = %v, want errHealthzDisabled", err)
+	}
+}
+
+func TestFetchHealthSnapshotSendsConfiguredToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer ops-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+	snapshot, err := fetchHealthSnapshot(context.Background(), server.URL, "ops-secret")
+	if err != nil || snapshot.Status != "ok" {
+		t.Fatalf("fetchHealthSnapshot = %#v, %v", snapshot, err)
+	}
+}
 
 func TestDoctorPlatformConnectionFailsDisconnectedPlatform(t *testing.T) {
 	snapshot := health.Snapshot{

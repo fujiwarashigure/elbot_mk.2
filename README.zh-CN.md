@@ -120,7 +120,7 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 ## 本地定制版：相对原版 v0.5.0 的新增功能
 
-当前定制版版本：`0.6.5`。
+当前定制版版本：`0.6.6`。
 
 本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
 
@@ -156,7 +156,7 @@ ElBot 提供不依赖 Elnis 的独立运维 HTTP 接口：
 | --- | --- |
 | `/live` | 只表示进程仍在运行；不判断调度心跳、模型或平台。 |
 | `/ready` | 进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期；平台/模型故障不会让它失败。 |
-| `/healthz` | 汇总状态。设置 `ELBOT_OPS_TOKEN` 后需要鉴权；平台/模型故障显示为 `degraded`；调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。不应仅凭它自动重启。 |
+| `/healthz` | 汇总状态。设置 `ELBOT_OPS_TOKEN` 后需要鉴权；未设置且未显式允许无鉴权时该接口不注册（只保留 `/live`、`/ready`）。平台/模型故障显示为 `degraded`；调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。不应仅凭它自动重启。 |
 | `/tasks` | 当前活跃的 turn / tool / hook / 上下文压缩任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。 |
 | `/metrics` | 任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台/模型/熔断状态、限速阈值与拒绝原因、生图队列状态。 |
 | `/diagnostics` | 面向“机器人没回复”的聚合诊断：排队/超时、限速命中、熔断状态和最近一次重启原因。 |
@@ -564,15 +564,15 @@ docker compose up -d
 ```bash
 bash deploy/pack/prepare-offline.sh
 # 或使用已下载产物
-docker load -i elbot-0.6.5-linux-amd64.tar.gz
+docker load -i elbot-0.6.6-linux-amd64.tar.gz
 ```
 
 多架构构建：
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/Dockerfile --build-arg VERSION=0.6.5 \
-  --push -t <registry>/<namespace>/elbot:0.6.5 .
+  -f deploy/Dockerfile --build-arg VERSION=0.6.6 \
+  --push -t <registry>/<namespace>/elbot:0.6.6 .
 ```
 
 构建参数：

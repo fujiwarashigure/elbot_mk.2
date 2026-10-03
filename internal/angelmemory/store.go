@@ -141,17 +141,26 @@ func (s *Store) Remember(ctx context.Context, memory *Memory) (*Memory, error) {
 	if max := s.limits.MaxContentRunes; max > 0 && len([]rune(memory.Content)) > max {
 		return nil, fmt.Errorf("%w: %d runes (max %d)", ErrContentTooLong, len([]rune(memory.Content)), max)
 	}
+	// The existence check, scope count and insert must be one atomic unit:
+	// SetMaxOpenConns(1) only serialises individual statements, so without a
+	// transaction two concurrent writers could both observe "one slot left".
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin angel memory write: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	if max := s.limits.MaxPerScope; max > 0 {
 		var existingID string
-		err := s.db.QueryRowContext(ctx, `
+		checkErr := tx.QueryRowContext(ctx, `
 SELECT id FROM memories WHERE platform = ? AND scope_id = ? AND content = ?`,
 			memory.Platform, memory.ScopeID, memory.Content).Scan(&existingID)
 		switch {
-		case err == nil:
+		case checkErr == nil:
 			// Updating an existing entry is always allowed.
-		case errors.Is(err, sql.ErrNoRows):
+		case errors.Is(checkErr, sql.ErrNoRows):
 			var count int
-			if countErr := s.db.QueryRowContext(ctx, `
+			if countErr := tx.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM memories WHERE platform = ? AND scope_id = ?`,
 				memory.Platform, memory.ScopeID).Scan(&count); countErr != nil {
 				return nil, fmt.Errorf("count angel memory scope: %w", countErr)
@@ -160,7 +169,7 @@ SELECT COUNT(*) FROM memories WHERE platform = ? AND scope_id = ?`,
 				return nil, fmt.Errorf("%w: %d entries (max %d)", ErrScopeFull, count, max)
 			}
 		default:
-			return nil, fmt.Errorf("check angel memory entry: %w", err)
+			return nil, fmt.Errorf("check angel memory entry: %w", checkErr)
 		}
 	}
 	if memory.Strength <= 0 {
@@ -183,7 +192,7 @@ SELECT COUNT(*) FROM memories WHERE platform = ? AND scope_id = ?`,
 		memory.LastAccessedAt = now
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memories (id, platform, scope_id, content, tags, strength, source, created_at, updated_at, last_accessed_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(platform, scope_id, content) DO UPDATE SET
@@ -202,9 +211,11 @@ ON CONFLICT(platform, scope_id, content) DO UPDATE SET
 		storage.FormatTime(memory.CreatedAt),
 		storage.FormatTime(memory.UpdatedAt),
 		storage.FormatTime(memory.LastAccessedAt),
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("remember angel memory: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit angel memory write: %w", err)
 	}
 	rows, err := s.Recall(ctx, RecallQuery{Platform: memory.Platform, ScopeID: memory.ScopeID, Text: memory.Content, Limit: 1})
 	if err != nil {

@@ -26,9 +26,17 @@ const (
 	KindJargon     = "jargon"
 )
 
-// ErrCandidateNotFound means the review target does not exist in the requested
-// platform/scope.
-var ErrCandidateNotFound = errors.New("self learning candidate not found")
+var (
+	// ErrCandidateNotFound means the review target does not exist in the
+	// requested platform/scope.
+	ErrCandidateNotFound = errors.New("self learning candidate not found")
+	// ErrObservationTooLong is returned by the store when one observation
+	// exceeds the configured rune budget.
+	ErrObservationTooLong = errors.New("self learning observation is too long")
+	// ErrObservationLimit is returned when a scope reached its stored
+	// observation count limit.
+	ErrObservationLimit = errors.New("self learning observation scope limit reached")
+)
 
 type Candidate struct {
 	ID         string
@@ -46,12 +54,29 @@ type Candidate struct {
 	ReviewedBy string
 }
 
+// ReviewRecord is one entry in a candidate's append-only audit trail.
+type ReviewRecord struct {
+	ID          string
+	CandidateID string
+	Platform    string
+	ScopeID     string
+	FromStatus  string
+	ToStatus    string
+	Meaning     string
+	Reviewer    string
+	CreatedAt   time.Time
+}
+
 // MineStats separates real inserts from pending-row refreshes and unchanged or
-// already-decided candidates.
+// already-decided candidates, and reports how much of the corpus was scanned.
 type MineStats struct {
-	Created int
-	Updated int
-	Skipped int
+	Created    int
+	Updated    int
+	Skipped    int
+	Scanned    int
+	TotalChars int
+	Truncated  bool
+	TimedOut   bool
 }
 
 func (m MineStats) Total() int { return m.Created + m.Updated + m.Skipped }
@@ -66,8 +91,34 @@ type DecideRequest struct {
 	Reviewer string
 }
 
+// StoreLimits are write-side limits enforced directly by the SQLite store.
+type StoreLimits struct {
+	MaxObservationRunes     int
+	MaxObservationsPerScope int
+	MaxMineChars            int
+}
+
+// SetLimits applies write-side limits. It is intended to be called once while
+// the store is being constructed, before concurrent use.
+func (s *Store) SetLimits(limits StoreLimits) {
+	if s == nil {
+		return
+	}
+	if limits.MaxObservationRunes <= 0 {
+		limits.MaxObservationRunes = defaultMaxObservationRunes
+	}
+	if limits.MaxObservationsPerScope <= 0 {
+		limits.MaxObservationsPerScope = defaultMaxObservationsPerScope
+	}
+	if limits.MaxMineChars <= 0 {
+		limits.MaxMineChars = defaultMaxMineChars
+	}
+	s.limits = limits
+}
+
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	limits StoreLimits
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -121,6 +172,20 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_selflearning_candidates_scope_status
 ON candidates(kind, platform, scope_id, status, count);
+
+CREATE TABLE IF NOT EXISTS candidate_reviews (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    from_status TEXT NOT NULL DEFAULT '',
+    to_status TEXT NOT NULL,
+    meaning TEXT NOT NULL DEFAULT '',
+    reviewer TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_selflearning_reviews_candidate
+ON candidate_reviews(candidate_id, created_at);
 `); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate self learning sqlite: %w", err)
@@ -135,7 +200,14 @@ ON candidates(kind, platform, scope_id, status, count);
 			return nil, fmt.Errorf("migrate self learning candidates: %w", err)
 		}
 	}
-	return &Store{db: db}, nil
+	return &Store{
+		db: db,
+		limits: StoreLimits{
+			MaxObservationRunes:     defaultMaxObservationRunes,
+			MaxObservationsPerScope: defaultMaxObservationsPerScope,
+			MaxMineChars:            defaultMaxMineChars,
+		},
+	}, nil
 }
 
 func (s *Store) Close() error {
@@ -149,31 +221,63 @@ func (s *Store) Observe(ctx context.Context, platform, scopeID, userID, text str
 	if s == nil || s.db == nil {
 		return fmt.Errorf("self learning store is not open")
 	}
+	platform = strings.TrimSpace(platform)
+	scopeID = strings.TrimSpace(scopeID)
+	userID = strings.TrimSpace(userID)
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `
+	if platform == "" || scopeID == "" {
+		return fmt.Errorf("self learning observation platform and scope are required")
+	}
+	if max := s.limits.MaxObservationRunes; max > 0 && len([]rune(text)) > max {
+		return fmt.Errorf("%w: %d runes (max %d)", ErrObservationTooLong, len([]rune(text)), max)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin self learning observation write: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if max := s.limits.MaxObservationsPerScope; max > 0 {
+		var count int
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM observations WHERE platform = ? AND scope_id = ?`,
+			platform, scopeID).Scan(&count); err != nil {
+			return fmt.Errorf("count self learning observations: %w", err)
+		}
+		if count >= max {
+			return fmt.Errorf("%w: %d rows (max %d)", ErrObservationLimit, count, max)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO observations (id, platform, scope_id, user_id, text, created_at)
 VALUES (?, ?, ?, ?, ?, ?)`,
-		storage.NewID(), strings.TrimSpace(platform), strings.TrimSpace(scopeID), strings.TrimSpace(userID), text, storage.FormatTime(storage.Now()))
-	if err != nil {
+		storage.NewID(), platform, scopeID, userID, text, storage.FormatTime(storage.Now())); err != nil {
 		return fmt.Errorf("observe self learning message: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit self learning observation: %w", err)
 	}
 	return nil
 }
 
 // Mine scans recent observations and creates reviewable frequent-pattern
 // candidates. CJK n-grams 2-4 run only inside contiguous letter/digit runs,
-// ASCII words length >= 3 are extracted once per message, and each message
-// contributes at most one count per token.
-func (s *Store) Mine(ctx context.Context, platform, scopeID string, minCount, limit int) (MineStats, error) {
+// ASCII words length >= 3 are extracted once per message, each message
+// contributes at most one count per token, and a candidate must be supported by
+// at least minUsers distinct users. The scan is bounded by row count, total
+// characters and the caller's context.
+func (s *Store) Mine(ctx context.Context, platform, scopeID string, minCount, minUsers, limit int) (MineStats, error) {
 	var stats MineStats
 	if s == nil || s.db == nil {
 		return stats, fmt.Errorf("self learning store is not open")
 	}
 	if minCount <= 0 {
-		minCount = 3
+		minCount = defaultMinCount
+	}
+	if minUsers <= 0 {
+		minUsers = defaultMinUsers
 	}
 	if limit <= 0 || limit > 500 {
 		limit = 200
@@ -195,11 +299,20 @@ LIMIT 1000`, platform, scopeID)
 		users map[string]struct{}
 	}
 	counts := map[string]*tokenStat{}
+	budget := s.limits.MaxMineChars
 	for rows.Next() {
 		var text, userID string
 		if err := rows.Scan(&text, &userID); err != nil {
 			return stats, fmt.Errorf("scan self learning observation: %w", err)
 		}
+		text = strings.TrimSpace(text)
+		size := len([]rune(text))
+		if budget > 0 && stats.TotalChars+size > budget && stats.Scanned > 0 {
+			stats.Truncated = true
+			break
+		}
+		stats.TotalChars += size
+		stats.Scanned++
 		userID = strings.TrimSpace(userID)
 		seen := map[string]struct{}{}
 		for _, token := range extractCandidates(text) {
@@ -221,6 +334,10 @@ LIMIT 1000`, platform, scopeID)
 	if err := rows.Err(); err != nil {
 		return stats, fmt.Errorf("iterate self learning observations: %w", err)
 	}
+	// Release the single SQLite connection before the upsert transactions
+	// below, especially when the character budget broke out of the row loop
+	// early. database/sql only auto-closes on a complete iteration.
+	_ = rows.Close()
 
 	type ranked struct {
 		token string
@@ -229,7 +346,7 @@ LIMIT 1000`, platform, scopeID)
 	}
 	ordered := make([]ranked, 0, len(counts))
 	for token, entry := range counts {
-		if entry.count < minCount || isStopCandidate(token) {
+		if entry.count < minCount || len(entry.users) < minUsers || isStopCandidate(token) {
 			continue
 		}
 		ordered = append(ordered, ranked{token: token, count: entry.count, users: len(entry.users)})
@@ -278,21 +395,31 @@ const (
 func (s *Store) upsertCandidate(ctx context.Context, kind, platform, scopeID, pattern string, count, userCount int) (upsertResult, error) {
 	platform = strings.TrimSpace(platform)
 	scopeID = strings.TrimSpace(scopeID)
+	// The SELECT and INSERT/UPDATE run in one transaction so two concurrent
+	// mining passes cannot both decide a candidate is missing and then race to
+	// insert it. SetMaxOpenConns(1) serialises statements, not this sequence.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return upsertSkipped, fmt.Errorf("begin self learning candidate upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	var existingID, existingStatus string
 	var existingCount, existingUserCount int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 SELECT id, status, count, user_count FROM candidates
 WHERE kind = ? AND platform = ? AND scope_id = ? AND pattern = ?`,
 		kind, platform, scopeID, pattern).Scan(&existingID, &existingStatus, &existingCount, &existingUserCount)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		now := storage.FormatTime(storage.Now())
-		_, insertErr := s.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 INSERT INTO candidates (id, kind, platform, scope_id, pattern, meaning, count, user_count, status, created_at, updated_at, reviewed_at, reviewed_by)
 VALUES (?, ?, ?, ?, ?, '', ?, ?, 'pending', ?, ?, '', '')`,
-			storage.NewID(), kind, platform, scopeID, pattern, count, userCount, now, now)
-		if insertErr != nil {
-			return upsertSkipped, fmt.Errorf("insert self learning candidate: %w", insertErr)
+			storage.NewID(), kind, platform, scopeID, pattern, count, userCount, now, now); err != nil {
+			return upsertSkipped, fmt.Errorf("insert self learning candidate: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return upsertSkipped, fmt.Errorf("commit self learning candidate insert: %w", err)
 		}
 		return upsertCreated, nil
 	case err != nil:
@@ -304,10 +431,13 @@ VALUES (?, ?, ?, ?, ?, '', ?, ?, 'pending', ?, ?, '', '')`,
 	if count == existingCount && userCount == existingUserCount {
 		return upsertSkipped, nil
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 UPDATE candidates SET count = ?, user_count = ?, updated_at = ? WHERE id = ?`,
 		count, userCount, storage.FormatTime(storage.Now()), existingID); err != nil {
 		return upsertSkipped, fmt.Errorf("update self learning candidate: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return upsertSkipped, fmt.Errorf("commit self learning candidate update: %w", err)
 	}
 	return upsertUpdated, nil
 }
@@ -355,23 +485,96 @@ func (s *Store) Decide(ctx context.Context, req DecideRequest) error {
 	if id == "" || platform == "" || scopeID == "" {
 		return fmt.Errorf("self learning decide requires id, platform and scope")
 	}
+	meaning := strings.TrimSpace(req.Meaning)
+	reviewer := strings.TrimSpace(req.Reviewer)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin self learning decide: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var fromStatus string
+	if err := tx.QueryRowContext(ctx, `
+SELECT status FROM candidates WHERE id = ? AND platform = ? AND scope_id = ?`,
+		id, platform, scopeID).Scan(&fromStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCandidateNotFound
+		}
+		return fmt.Errorf("load self learning candidate for decide: %w", err)
+	}
 	now := storage.FormatTime(storage.Now())
-	result, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 UPDATE candidates
 SET status = ?, meaning = ?, reviewed_at = ?, reviewed_by = ?, updated_at = ?
 WHERE id = ? AND platform = ? AND scope_id = ?`,
-		status, strings.TrimSpace(req.Meaning), now, strings.TrimSpace(req.Reviewer), now, id, platform, scopeID)
-	if err != nil {
+		status, meaning, now, reviewer, now, id, platform, scopeID); err != nil {
 		return fmt.Errorf("decide self learning candidate: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("decide self learning candidate rows affected: %w", err)
+	if err := insertReviewRecord(ctx, tx, ReviewRecord{
+		CandidateID: id,
+		Platform:    platform,
+		ScopeID:     scopeID,
+		FromStatus:  fromStatus,
+		ToStatus:    status,
+		Meaning:     meaning,
+		Reviewer:    reviewer,
+		CreatedAt:   storage.Now(),
+	}); err != nil {
+		return err
 	}
-	if affected == 0 {
-		return ErrCandidateNotFound
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit self learning decide: %w", err)
 	}
 	return nil
+}
+
+func insertReviewRecord(ctx context.Context, tx *sql.Tx, record ReviewRecord) error {
+	createdAt := record.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = storage.Now()
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO candidate_reviews (id, candidate_id, platform, scope_id, from_status, to_status, meaning, reviewer, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		storage.NewID(), record.CandidateID, record.Platform, record.ScopeID, record.FromStatus, record.ToStatus, record.Meaning, record.Reviewer, storage.FormatTime(createdAt)); err != nil {
+		return fmt.Errorf("record self learning review: %w", err)
+	}
+	return nil
+}
+
+// History returns the review trail for one candidate inside the requested
+// scope, newest first.
+func (s *Store) History(ctx context.Context, platform, scopeID, candidateID string, limit int) ([]ReviewRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("self learning store is not open")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, candidate_id, platform, scope_id, from_status, to_status, meaning, reviewer, created_at
+FROM candidate_reviews
+WHERE platform = ? AND scope_id = ? AND candidate_id = ?
+ORDER BY created_at DESC, id DESC
+LIMIT ?`,
+		strings.TrimSpace(platform), strings.TrimSpace(scopeID), strings.TrimSpace(candidateID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list self learning review history: %w", err)
+	}
+	defer rows.Close()
+	out := []ReviewRecord{}
+	for rows.Next() {
+		var record ReviewRecord
+		var createdAt string
+		if err := rows.Scan(&record.ID, &record.CandidateID, &record.Platform, &record.ScopeID, &record.FromStatus, &record.ToStatus, &record.Meaning, &record.Reviewer, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan self learning review history: %w", err)
+		}
+		record.CreatedAt, _ = storage.ParseTime(createdAt)
+		out = append(out, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate self learning review history: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) ApprovedContext(ctx context.Context, platform, scopeID, query string, limit int) ([]Candidate, error) {
@@ -457,6 +660,9 @@ func (s *Store) DeleteBefore(ctx context.Context, cutoff time.Time) (int, int, e
 	observations, err := s.db.ExecContext(ctx, `DELETE FROM observations WHERE created_at < ?`, formatted)
 	if err != nil {
 		return 0, 0, fmt.Errorf("delete old self learning observations: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM candidate_reviews WHERE created_at < ?`, formatted); err != nil {
+		return 0, 0, fmt.Errorf("delete old self learning review history: %w", err)
 	}
 	candidateRows, _ := candidates.RowsAffected()
 	observationRows, _ := observations.RowsAffected()
@@ -600,21 +806,42 @@ func (s *Store) Undo(ctx context.Context, req DecideRequest) error {
 	if id == "" || platform == "" || scopeID == "" {
 		return fmt.Errorf("self learning undo requires id, platform and scope")
 	}
+	reviewer := strings.TrimSpace(req.Reviewer)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin self learning undo: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var fromStatus string
+	if err := tx.QueryRowContext(ctx, `
+SELECT status FROM candidates WHERE id = ? AND platform = ? AND scope_id = ?`,
+		id, platform, scopeID).Scan(&fromStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCandidateNotFound
+		}
+		return fmt.Errorf("load self learning candidate for undo: %w", err)
+	}
 	now := storage.FormatTime(storage.Now())
-	result, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 UPDATE candidates
 SET status = 'pending', reviewed_at = ?, reviewed_by = ?, updated_at = ?
 WHERE id = ? AND platform = ? AND scope_id = ?`,
-		now, strings.TrimSpace(req.Reviewer), now, id, platform, scopeID)
-	if err != nil {
+		now, reviewer, now, id, platform, scopeID); err != nil {
 		return fmt.Errorf("undo self learning candidate: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("undo self learning candidate rows affected: %w", err)
+	if err := insertReviewRecord(ctx, tx, ReviewRecord{
+		CandidateID: id,
+		Platform:    platform,
+		ScopeID:     scopeID,
+		FromStatus:  fromStatus,
+		ToStatus:    StatusPending,
+		Reviewer:    reviewer,
+		CreatedAt:   storage.Now(),
+	}); err != nil {
+		return err
 	}
-	if affected == 0 {
-		return ErrCandidateNotFound
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit self learning undo: %w", err)
 	}
 	return nil
 }

@@ -493,6 +493,13 @@ type OutboundMessageRepository interface {
 	DeleteBefore(ctx context.Context, cutoff time.Time) (int, error)
 }
 
+// OutboundMessageCounter is an optional capability for counting outbound
+// messages in a time window without loading their rows. Group analysis uses it
+// so outbound statistics do not depend on memory-heavy paging.
+type OutboundMessageCounter interface {
+	CountRange(ctx context.Context, req OutboundMessageRangeRequest) (int, error)
+}
+
 type ContextSummaryRepository interface {
 	Create(ctx context.Context, summary *ContextSummary) error
 	LatestBySession(ctx context.Context, sessionID string) (*ContextSummary, error)

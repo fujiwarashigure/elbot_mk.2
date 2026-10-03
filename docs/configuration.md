@@ -215,7 +215,7 @@ ELBOT_HEALTH_LIVE_STALE_SECONDS=90
 
 - `GET /live`：只表示进程仍在运行；进程存活时 HTTP 返回 200，不判断模型、平台或调度心跳。
 - `GET /ready`：进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期。平台未连接、模型 API 故障不会让它失败。
-- `GET /healthz`：汇总状态。设置 `ELBOT_OPS_TOKEN` 后，`/healthz` 也需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`；平台或模型故障显示为 `degraded`，调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。HTTP 状态不应单独作为自动重启依据。
+- `GET /healthz`：汇总状态。设置 `ELBOT_OPS_TOKEN` 后，`/healthz` 需要 `Authorization: Bearer <token>` 或 `X-Elbot-Ops-Token: <token>`；未设置且未显式允许无鉴权时该接口不注册（只保留 `/live`、`/ready`）。平台或模型故障显示为 `degraded`，调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。HTTP 状态不应单独作为自动重启依据。
 - `GET /tasks`：活跃任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。
 - `GET /metrics`：任务/资源/平台/模型状态、熔断状态、限速阈值与拒绝计数、生图队列状态。
 - `GET /diagnostics`：面向“机器人没回复”的聚合诊断，包含排队/超时、限速命中、熔断状态和最近一次重启原因。
@@ -857,11 +857,12 @@ report_days = 1
 ```
 
 - `enabled`：默认 `true`；为 `false` 时不注册 `group_analysis` 工具。
-- `max_messages`：单次统计每条方向（入站/出站）最多读取多少条本地历史消息，默认 5000，硬上限 200000。服务层按 5000 条分页完整读取；达到上限时报告会标注 `truncated` 和实际扫描条数。工具参数 `limit` 不能超过它。
+- `max_messages`：单次统计入站最多读取多少条本地历史消息，默认 5000，硬上限 200000。入站按 5000 条分页逐页聚合、不保留全部正文；出站优先用专用 `COUNT` 查询（底层不支持时回退分页计数）。达到上限时报告分别标注 `inbound_truncated` / `outbound_truncated`（兼容字段 `truncated`）和实际扫描条数。工具参数 `limit` 不能超过它。
 - `report_enabled`：默认 `false`；开启后注册 Cron 日报，把统计和可选 LLM 摘要发送到 `report_platform` / `report_scope_id`。
 - `report_schedule`：Cron 表达式，默认 `0 9 * * *`。
 - `report_days`：日报统计最近多少天，默认 1。
 - 摘要使用当前默认 Session 模式对应的默认模型（`state.toml` 的 `mode_models` / `session.default_mode`）；不再单独引入 work 模型 slot。
+- 摘要前会把成员昵称、平台/会话字段折叠为单行并限长，整个报告放进 `<group_report>` 边界并转义后再交给模型；摘要本身带有输出 token、累积字符和超时预算，失败或超时不会影响确定性统计报告继续发送。
 - 消息数按聊天记录统计（纯图片、文件等无文本消息也计入消息量和活跃成员）；字数只统计文本。统计区间按本地时区计算并显示在报告中。
 - 当前实现只读取本地 `chat_history` 与 `outbound_messages`，不复制第三方群分析插件的模板、图片或 Prompt。
 - OneBot 适配器额外实现可选 `get_group_msg_history` / `get_group_info` / `get_group_member_list` 能力；Telegram 实现群信息和管理员列表；平台不提供时调用方回退到本地历史。
@@ -887,6 +888,8 @@ max_context_runes = 1200
 - 召回会先做关键词 / 中文 2-4 字 n-gram 匹配与相关度排序；没有命中时，自动注入会谨慎回退到少量高强度记忆；
 - 注入内容会统一转义边界字符、折叠控制字符、按条限长并按总预算截断，单条超长记忆不会挡住后面的短记忆；
 - `llm.turn.prepared` 会按当前平台/会话检索记忆并追加临时 system 上下文，不写入 Session 历史；
+- `max_writes_per_minute` 只计算成功写入：空内容、超长内容在限流前先被拒绝，失败写入会退还不占成功配额，但仍受单独的请求尝试上限保护；
+- `max_per_scope` 的“检查 + 写入”在同一个 SQLite 写事务内完成，并发写入不会突破容量上限；
 - `retention_days <= 0` 时不做时间清理；`max_content_runes`、`max_per_scope`、`max_writes_per_minute`、`max_context_runes` 未设置时使用内置默认值。
 
 ## 自主学习
@@ -896,6 +899,18 @@ max_context_runes = 1200
 enabled = true
 retention_days = 365
 min_count = 3
+# 至少多少个不同用户重复说过才算候选；1 表示允许单人复读
+min_users = 2
+# 单条观察最大字符数；超过会截断
+max_observation_runes = 1000
+# 单个会话最多保留多少条观察
+max_observations_per_scope = 5000
+# 每个会话每分钟最多写入多少条观察
+max_observation_writes_per_minute = 60
+# 单次挖掘最多扫描多少字符
+max_mine_chars = 200000
+# 单次挖掘超时秒数
+mine_timeout_seconds = 10
 # 单个候选含义的最大字符数
 max_meaning_runes = 200
 # 每轮最多注入多少字符的学习上下文
@@ -903,9 +918,10 @@ max_context_runes = 1200
 ```
 
 - 使用本地 SQLite `self_learning.db`；
-- 观察消息并生成表达/黑话候选；挖掘会按连续词段提取、单条消息内去重，并结合出现次数和不同用户数排序；
+- 观察消息并生成表达/黑话候选；挖掘会按连续词段提取、单条消息内去重，并结合出现次数和不同用户数排序，默认要求至少 2 个不同用户；
+- 观察写入受单条长度、每 scope 容量和速率限制；`Mine` 受总字符预算和超时限制，超限时返回扫描 / 截断统计；
 - 候选先进入 `pending`，只有管理员通过 `/learning` 或 `self_learning_review` 批准为 `approved` 后才会注入上下文；
-- 审核按 `id + platform + scope_id` 定位，不存在的候选返回错误，并记录审核人和审核时间；`/learning undo <id>` 可撤回为待审；
+- 审核按 `id + platform + scope_id` 定位，不存在的候选返回错误；每次批准 / 拒绝 / 撤回都会追加写入 `candidate_reviews` 审计表，`/learning history <id>` 或 `self_learning_review` 的 `history` 动作可查看完整轨迹；
 - 已审核上下文优先选择与当前话题相关的条目，注入内容同样做边界转义和长度限制；
 - `/learning` 和 `self_learning_review` 仅超级管理员可用。
 

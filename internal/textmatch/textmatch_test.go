@@ -1,7 +1,9 @@
 package textmatch
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +38,48 @@ func TestKeywordsDeduplicatesAndBounds(t *testing.T) {
 	}
 	if len(got) > maxKeywords {
 		t.Fatalf("Keywords() returned %d terms, want <= %d", len(got), maxKeywords)
+	}
+}
+
+func TestKeywordsKeepsEntityAtTailOfLongInput(t *testing.T) {
+	value := strings.Repeat("无关填充", 400) + "关键实体在句尾"
+	got := Keywords(value)
+	if !contains(got, "关键") {
+		t.Fatalf("Keywords() = %#v, tail entity was dropped", got)
+	}
+}
+
+func TestKeywordsDoesNotLetASCIIStarveCJK(t *testing.T) {
+	words := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		words = append(words, fmt.Sprintf("word%02d", i))
+	}
+	value := strings.Join(words, " ") + " 关键实体在句尾"
+	got := Keywords(value)
+	if !contains(got, "关键") {
+		t.Fatalf("Keywords() = %#v, CJK term was crowded out by ASCII words", got)
+	}
+	if !contains(got, "word00") {
+		t.Fatalf("Keywords() = %#v, ASCII word missing", got)
+	}
+	if len(got) > maxKeywords {
+		t.Fatalf("Keywords() returned %d terms, want <= %d", len(got), maxKeywords)
+	}
+}
+
+func TestKeywordsBoundsVeryLongInput(t *testing.T) {
+	value := strings.Repeat("很长很长的输入文本", 20000)
+	got := Keywords(value)
+	if len(got) == 0 || len(got) > maxKeywords {
+		t.Fatalf("Keywords() returned %d terms, want 1..%d", len(got), maxKeywords)
+	}
+}
+
+func BenchmarkKeywordsLongInput(b *testing.B) {
+	value := strings.Repeat("这是一个用于压测的较长句子，包含中文和 english words 以及标点。", 40)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = Keywords(value)
 	}
 }
 

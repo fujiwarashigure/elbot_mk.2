@@ -11,13 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"elbot/internal/safecontext"
 	"elbot/internal/storage"
 )
 
 const (
-	defaultRangeLimit = 5000
-	maxRangeLimit     = 200000
-	maxTopSenders     = 10
+	defaultRangeLimit  = 5000
+	maxRangeLimit      = 200000
+	maxTopSenders      = 10
+	maxSenderNameRunes = 32
 )
 
 // Request selects one platform conversation and time window for analysis.
@@ -50,9 +52,13 @@ type Report struct {
 	TotalChars       int
 	HourlyCounts     [24]int
 	TopSenders       []SenderStat
-	// Truncated is true when the configured read limit was reached and more
-	// messages may exist in the requested window.
+	// Truncated is true when either direction reached the configured read
+	// limit and more messages may exist in the requested window.
 	Truncated bool
+	// InboundTruncated and OutboundTruncated pinpoint which direction was cut
+	// off, because outbound rows are only counted and inbound rows aggregated.
+	InboundTruncated  bool
+	OutboundTruncated bool
 	// ScannedMessages is the number of inbound rows actually read.
 	ScannedMessages int
 }
@@ -112,60 +118,63 @@ func (s *Service) Analyze(ctx context.Context, req Request) (Report, error) {
 	}
 	senders := map[string]*SenderStat{}
 
-	rows, inboundTruncated, err := s.listInbound(ctx, platform, scopeID, since, until, limit)
+	// Inbound rows are aggregated page by page and never retained as a whole,
+	// so a 200k-message window does not have to fit in memory.
+	scanned, inboundTruncated, err := s.scanInbound(ctx, platform, scopeID, since, until, limit, func(page []storage.ChatMessage) {
+		for _, row := range page {
+			// A message counts even when it has no text (for example a pure
+			// image or file message with segments). Chars remain text-only.
+			report.InboundMessages++
+			text := strings.TrimSpace(row.Text)
+			report.TotalChars += len([]rune(text))
+			if !row.CreatedAt.IsZero() {
+				report.HourlyCounts[row.CreatedAt.In(loc).Hour()]++
+			}
+			senderID := strings.TrimSpace(row.SenderID)
+			if senderID == "" {
+				continue
+			}
+			stat := senders[senderID]
+			if stat == nil {
+				stat = &SenderStat{SenderID: senderID, SenderName: strings.TrimSpace(row.SenderName)}
+				senders[senderID] = stat
+			}
+			if stat.SenderName == "" && strings.TrimSpace(row.SenderName) != "" {
+				stat.SenderName = strings.TrimSpace(row.SenderName)
+			}
+			stat.Messages++
+			stat.Chars += len([]rune(text))
+		}
+	})
 	if err != nil {
 		return Report{}, fmt.Errorf("list group analysis history: %w", err)
 	}
-	for _, row := range rows {
-		// A message counts even when it has no text (for example a pure image
-		// or file message with segments). Chars remain text-only.
-		report.InboundMessages++
-		text := strings.TrimSpace(row.Text)
-		report.TotalChars += len([]rune(text))
-		if !row.CreatedAt.IsZero() {
-			report.HourlyCounts[row.CreatedAt.In(loc).Hour()]++
-		}
-		senderID := strings.TrimSpace(row.SenderID)
-		if senderID == "" {
-			continue
-		}
-		stat := senders[senderID]
-		if stat == nil {
-			stat = &SenderStat{SenderID: senderID, SenderName: strings.TrimSpace(row.SenderName)}
-			senders[senderID] = stat
-		}
-		if stat.SenderName == "" && strings.TrimSpace(row.SenderName) != "" {
-			stat.SenderName = strings.TrimSpace(row.SenderName)
-		}
-		stat.Messages++
-		stat.Chars += len([]rune(text))
-	}
-	report.ScannedMessages = len(rows)
-	report.Truncated = inboundTruncated
+	report.ScannedMessages = scanned
+	report.InboundTruncated = inboundTruncated
 
 	if s.outbound != nil {
-		outboundRows, outboundTruncated, err := s.listOutbound(ctx, platform, scopeID, since, until, limit)
+		outboundCount, outboundTruncated, err := s.countOutbound(ctx, platform, scopeID, since, until, limit)
 		if err != nil {
-			return Report{}, fmt.Errorf("list group analysis outbound messages: %w", err)
+			return Report{}, fmt.Errorf("count group analysis outbound messages: %w", err)
 		}
-		report.OutboundMessages = len(outboundRows)
-		if outboundTruncated {
-			report.Truncated = true
-		}
+		report.OutboundMessages = outboundCount
+		report.OutboundTruncated = outboundTruncated
 	}
 
+	report.Truncated = report.InboundTruncated || report.OutboundTruncated
 	report.ActiveSenders = len(senders)
 	report.TopSenders = topSenders(senders, maxTopSenders)
 	return report, nil
 }
 
-// listInbound reads up to totalLimit inbound rows in 5000-row pages so a
-// high-volume group is no longer silently cut off at the first page.
-func (s *Service) listInbound(ctx context.Context, platform, scopeID string, since, until time.Time, totalLimit int) ([]storage.ChatMessage, bool, error) {
-	rows := make([]storage.ChatMessage, 0, minInt(totalLimit, defaultRangeLimit))
+// scanInbound reads up to totalLimit inbound rows in 5000-row pages and hands
+// each page to visit as it arrives. Nothing beyond the current page is
+// retained, so a high-volume window does not have to fit in memory.
+func (s *Service) scanInbound(ctx context.Context, platform, scopeID string, since, until time.Time, totalLimit int, visit func([]storage.ChatMessage)) (int, bool, error) {
+	scanned := 0
 	var afterSeq int64
-	for len(rows) < totalLimit {
-		fetch := totalLimit - len(rows)
+	for scanned < totalLimit {
+		fetch := totalLimit - scanned
 		if fetch > defaultRangeLimit {
 			fetch = defaultRangeLimit
 		}
@@ -178,14 +187,17 @@ func (s *Service) listInbound(ctx context.Context, platform, scopeID string, sin
 			Limit:           fetch,
 		})
 		if err != nil {
-			return nil, false, err
+			return scanned, false, err
 		}
-		rows = append(rows, page...)
+		if len(page) > 0 {
+			visit(page)
+			scanned += len(page)
+			afterSeq = page[len(page)-1].Seq
+		}
 		if len(page) < fetch {
-			return rows, false, nil
+			return scanned, false, nil
 		}
-		afterSeq = page[len(page)-1].Seq
-		if len(rows) >= totalLimit {
+		if scanned >= totalLimit {
 			probe, err := s.history.ListRange(ctx, storage.ChatHistoryRangeRequest{
 				Platform:        platform,
 				PlatformScopeID: scopeID,
@@ -195,20 +207,34 @@ func (s *Service) listInbound(ctx context.Context, platform, scopeID string, sin
 				Limit:           1,
 			})
 			if err != nil {
-				return nil, false, err
+				return scanned, false, err
 			}
-			return rows, len(probe) > 0, nil
+			return scanned, len(probe) > 0, nil
 		}
 	}
-	return rows, false, nil
+	return scanned, false, nil
 }
 
-// listOutbound mirrors listInbound for the outbound message store.
-func (s *Service) listOutbound(ctx context.Context, platform, scopeID string, since, until time.Time, totalLimit int) ([]storage.OutboundMessage, bool, error) {
-	rows := make([]storage.OutboundMessage, 0, minInt(totalLimit, defaultRangeLimit))
+// countOutbound returns the outbound message count for the window. Repositories
+// that implement storage.OutboundMessageCounter answer with one COUNT query;
+// the fallback pages through rows without retaining them.
+func (s *Service) countOutbound(ctx context.Context, platform, scopeID string, since, until time.Time, totalLimit int) (int, bool, error) {
+	if counter, ok := s.outbound.(storage.OutboundMessageCounter); ok {
+		count, err := counter.CountRange(ctx, storage.OutboundMessageRangeRequest{
+			Platform:        platform,
+			PlatformScopeID: scopeID,
+			Since:           &since,
+			Until:           &until,
+		})
+		if err != nil {
+			return 0, false, err
+		}
+		return count, false, nil
+	}
+	count := 0
 	var afterSeq int64
-	for len(rows) < totalLimit {
-		fetch := totalLimit - len(rows)
+	for count < totalLimit {
+		fetch := totalLimit - count
 		if fetch > defaultRangeLimit {
 			fetch = defaultRangeLimit
 		}
@@ -221,14 +247,14 @@ func (s *Service) listOutbound(ctx context.Context, platform, scopeID string, si
 			Limit:           fetch,
 		})
 		if err != nil {
-			return nil, false, err
+			return count, false, err
 		}
-		rows = append(rows, page...)
+		count += len(page)
 		if len(page) < fetch {
-			return rows, false, nil
+			return count, false, nil
 		}
 		afterSeq = page[len(page)-1].Seq
-		if len(rows) >= totalLimit {
+		if count >= totalLimit {
 			probe, err := s.outbound.ListRange(ctx, storage.OutboundMessageRangeRequest{
 				Platform:        platform,
 				PlatformScopeID: scopeID,
@@ -238,12 +264,12 @@ func (s *Service) listOutbound(ctx context.Context, platform, scopeID string, si
 				Limit:           1,
 			})
 			if err != nil {
-				return nil, false, err
+				return count, false, err
 			}
-			return rows, len(probe) > 0, nil
+			return count, len(probe) > 0, nil
 		}
 	}
-	return rows, false, nil
+	return count, false, nil
 }
 
 // FormatText renders a compact, deterministic report suitable for platform
@@ -259,23 +285,30 @@ func (r Report) FormatText() string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "群聊分析报告\n")
-	fmt.Fprintf(&b, "平台：%s\n", r.Platform)
-	fmt.Fprintf(&b, "会话：%s\n", r.ScopeID)
+	fmt.Fprintf(&b, "平台：%s\n", reportInline(r.Platform, maxSenderNameRunes))
+	fmt.Fprintf(&b, "会话：%s\n", reportInline(r.ScopeID, maxSenderNameRunes))
 	fmt.Fprintf(&b, "统计区间：%s ~ %s（%s）\n", formatTime(r.Since, loc), formatTime(r.Until, loc), timeZone)
 	fmt.Fprintf(&b, "消息数：入站 %d，出站 %d\n", r.InboundMessages, r.OutboundMessages)
 	fmt.Fprintf(&b, "实际扫描：入站 %d 条\n", r.ScannedMessages)
 	fmt.Fprintf(&b, "活跃成员：%d\n", r.ActiveSenders)
 	fmt.Fprintf(&b, "总字数：%d\n", r.TotalChars)
 	fmt.Fprintf(&b, "说明：消息数按聊天记录统计，字数只统计文本；短时间窗按本地时区 %s 计算。\n", timeZone)
-	if r.Truncated {
+	switch {
+	case r.InboundTruncated && r.OutboundTruncated:
+		b.WriteString("注意：入站和出站消息都达到了读取上限，统计可能不完整；请缩小时间范围或提高 max_messages。\n")
+	case r.InboundTruncated:
+		b.WriteString("注意：入站消息达到读取上限，入站统计可能不完整；请缩小时间范围或提高 max_messages。\n")
+	case r.OutboundTruncated:
+		b.WriteString("注意：出站消息达到读取上限，出站统计可能不完整；请缩小时间范围或提高 max_messages。\n")
+	case r.Truncated:
 		b.WriteString("注意：已达到读取上限，统计可能不完整；请缩小时间范围或提高 max_messages。\n")
 	}
 	if len(r.TopSenders) > 0 {
 		b.WriteString("活跃成员 Top：\n")
 		for i, stat := range r.TopSenders {
-			name := stat.SenderName
+			name := reportInline(stat.SenderName, maxSenderNameRunes)
 			if name == "" {
-				name = stat.SenderID
+				name = reportInline(stat.SenderID, maxSenderNameRunes)
 			}
 			fmt.Fprintf(&b, "%d. %s：%d 条 / %d 字\n", i+1, name, stat.Messages, stat.Chars)
 		}
@@ -317,6 +350,13 @@ func peakHour(counts [24]int) (int, int) {
 	return hour, count
 }
 
+// reportInline folds one untrusted report field into a single bounded line so a
+// nickname cannot inject newlines, control characters or prompt boundaries into
+// the deterministic report or the summariser prompt.
+func reportInline(value string, limit int) string {
+	return safecontext.TruncateRunes(safecontext.Inline(value), limit)
+}
+
 func formatTime(value time.Time, loc *time.Location) string {
 	if value.IsZero() {
 		return "-"
@@ -325,11 +365,4 @@ func formatTime(value time.Time, loc *time.Location) string {
 		loc = time.Local
 	}
 	return value.In(loc).Format("2006-01-02 15:04")
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

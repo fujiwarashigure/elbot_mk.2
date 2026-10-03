@@ -2,34 +2,58 @@ package selflearning
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"elbot/internal/ratelimit"
 	"elbot/internal/safecontext"
 )
 
 const (
-	defaultMinCount        = 3
-	defaultContextLimit    = 8
-	defaultMaxMeaningRunes = 200
-	defaultMaxContextRunes = 1200
-	defaultMaxLineRunes    = 400
+	defaultMinCount                   = 3
+	defaultMinUsers                   = 2
+	defaultContextLimit               = 8
+	defaultMaxMeaningRunes            = 200
+	defaultMaxContextRunes            = 1200
+	defaultMaxLineRunes               = 400
+	defaultMaxObservationRunes        = 1000
+	defaultMaxObservationsPerScope    = 5000
+	defaultObservationWritesPerMinute = 60
+	defaultMaxMineChars               = 200000
+	defaultMineTimeout                = 10 * time.Second
 )
 
-// Options bound how much learned text can be persisted or injected into a
-// prompt in one turn.
+// errObservationRateLimited is returned when one scope exceeds its observation
+// write budget. It is a package-level value so callers can match it.
+var errObservationRateLimited = errors.New("self learning observation write rate limit exceeded for this scope")
+
+// Options bound how much learned text can be persisted, injected, or scanned in
+// one operation.
 type Options struct {
-	MaxMeaningRunes int
-	MaxContextRunes int
-	MaxLineRunes    int
+	MaxMeaningRunes               int
+	MaxContextRunes               int
+	MaxLineRunes                  int
+	MinUsers                      int
+	MaxObservationRunes           int
+	MaxObservationsPerScope       int
+	MaxObservationWritesPerMinute int
+	MaxMineChars                  int
+	MineTimeout                   time.Duration
 }
 
 func DefaultOptions() Options {
 	return Options{
-		MaxMeaningRunes: defaultMaxMeaningRunes,
-		MaxContextRunes: defaultMaxContextRunes,
-		MaxLineRunes:    defaultMaxLineRunes,
+		MaxMeaningRunes:               defaultMaxMeaningRunes,
+		MaxContextRunes:               defaultMaxContextRunes,
+		MaxLineRunes:                  defaultMaxLineRunes,
+		MinUsers:                      defaultMinUsers,
+		MaxObservationRunes:           defaultMaxObservationRunes,
+		MaxObservationsPerScope:       defaultMaxObservationsPerScope,
+		MaxObservationWritesPerMinute: defaultObservationWritesPerMinute,
+		MaxMineChars:                  defaultMaxMineChars,
+		MineTimeout:                   defaultMineTimeout,
 	}
 }
 
@@ -44,12 +68,31 @@ func (o Options) normalized() Options {
 	if o.MaxLineRunes <= 0 {
 		o.MaxLineRunes = defaults.MaxLineRunes
 	}
+	if o.MinUsers <= 0 {
+		o.MinUsers = defaults.MinUsers
+	}
+	if o.MaxObservationRunes <= 0 {
+		o.MaxObservationRunes = defaults.MaxObservationRunes
+	}
+	if o.MaxObservationsPerScope <= 0 {
+		o.MaxObservationsPerScope = defaults.MaxObservationsPerScope
+	}
+	if o.MaxObservationWritesPerMinute <= 0 {
+		o.MaxObservationWritesPerMinute = defaults.MaxObservationWritesPerMinute
+	}
+	if o.MaxMineChars <= 0 {
+		o.MaxMineChars = defaults.MaxMineChars
+	}
+	if o.MineTimeout <= 0 {
+		o.MineTimeout = defaults.MineTimeout
+	}
 	return o
 }
 
 type Service struct {
-	store *Store
-	opts  Options
+	store          *Store
+	opts           Options
+	observeLimiter *ratelimit.Window
 }
 
 func NewService(store *Store, options ...Options) *Service {
@@ -57,20 +100,52 @@ func NewService(store *Store, options ...Options) *Service {
 	if len(options) > 0 {
 		opts = options[0].normalized()
 	}
-	return &Service{store: store, opts: opts}
+	if store != nil {
+		store.SetLimits(StoreLimits{
+			MaxObservationRunes:     opts.MaxObservationRunes,
+			MaxObservationsPerScope: opts.MaxObservationsPerScope,
+			MaxMineChars:            opts.MaxMineChars,
+		})
+	}
+	return &Service{
+		store:          store,
+		opts:           opts,
+		observeLimiter: ratelimit.New(opts.MaxObservationWritesPerMinute, time.Minute),
+	}
 }
 
 func (s *Service) Ready() bool {
 	return s != nil && s.store != nil
 }
 
+// Observe stores one observed message. The text is truncated to the configured
+// per-message budget, empty messages are ignored, and each scope has a write
+// rate limit so a single fast sender cannot grow the corpus without bound.
 func (s *Service) Observe(ctx context.Context, platform, scopeID, userID, text string) error {
 	if !s.Ready() {
 		return nil
 	}
+	platform = strings.TrimSpace(platform)
+	scopeID = strings.TrimSpace(scopeID)
+	userID = strings.TrimSpace(userID)
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if platform == "" || scopeID == "" {
+		return fmt.Errorf("self learning observation platform and scope are required")
+	}
+	if max := s.opts.MaxObservationRunes; max > 0 && len([]rune(text)) > max {
+		text = string([]rune(text)[:max])
+	}
+	if !s.observeLimiter.Allow(platform + "\x00" + scopeID) {
+		return errObservationRateLimited
+	}
 	return s.store.Observe(ctx, platform, scopeID, userID, text)
 }
 
+// Mine scans recent observations and creates reviewable frequent-pattern
+// candidates. It is bounded by row count, total characters and a timeout.
 func (s *Service) Mine(ctx context.Context, platform, scopeID string, minCount, limit int) (MineStats, error) {
 	if !s.Ready() {
 		return MineStats{}, fmt.Errorf("self learning service is not configured")
@@ -78,7 +153,16 @@ func (s *Service) Mine(ctx context.Context, platform, scopeID string, minCount, 
 	if minCount <= 0 {
 		minCount = defaultMinCount
 	}
-	return s.store.Mine(ctx, platform, scopeID, minCount, limit)
+	if timeout := s.opts.MineTimeout; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	stats, err := s.store.Mine(ctx, platform, scopeID, minCount, s.opts.MinUsers, limit)
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		stats.TimedOut = true
+	}
+	return stats, err
 }
 
 func (s *Service) Review(ctx context.Context, platform, scopeID, status string, limit int) ([]Candidate, error) {
@@ -117,6 +201,14 @@ func (s *Service) Undo(ctx context.Context, platform, scopeID, id, reviewer stri
 		ScopeID:  scopeID,
 		Reviewer: reviewer,
 	})
+}
+
+// History returns the review trail for one candidate, newest first.
+func (s *Service) History(ctx context.Context, platform, scopeID, candidateID string, limit int) ([]ReviewRecord, error) {
+	if !s.Ready() {
+		return nil, fmt.Errorf("self learning service is not configured")
+	}
+	return s.store.History(ctx, platform, scopeID, candidateID, limit)
 }
 
 func (s *Service) Context(ctx context.Context, platform, scopeID, query string, limit int) (string, error) {
