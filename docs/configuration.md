@@ -742,12 +742,32 @@ group_burst = 10
 rate_limit_idle_ttl_seconds = 600
 # 可选：超过并发上限时允许短暂排队。turn 通常不建议排队。
 queue_max_size = 20
+queue_max_per_user = 2
+queue_max_per_scope = 8
 queue_wait_timeout_seconds = 10
 queue_wait_kinds = ["tool", "hook", "compress"]
+# 可选：Provider 实际调用并发与等待队列；0 表示不限制。
+provider_max_concurrent = 4
+provider_queue_max_size = 8
+provider_wait_timeout_seconds = 10
 # 可选：Provider 连续失败后的熔断；0 表示关闭。
 circuit_breaker_failure_threshold = 0
 circuit_breaker_open_cooldown_seconds = 60
 circuit_breaker_half_open_max = 1
+```
+
+```toml
+[budget_limits]
+# 可选：全局 / 单用户每日额度；0 表示不限制。
+# 生图/视觉按成功预占的调用次数；chat 按 token 与费用统计。
+global_image_daily = 0
+user_image_daily = 0
+global_vision_daily = 0
+user_vision_daily = 0
+global_chat_tokens_daily = 0
+user_chat_tokens_daily = 0
+global_chat_cost_daily = 0
+user_chat_cost_daily = 0
 ```
 
 - 工具、Hook 和上下文压缩的超时通过 `context` 取消；超时后请求会结束并记录错误，释放并发占用。
@@ -755,6 +775,9 @@ circuit_breaker_half_open_max = 1
 - 限速是保护机制，不保证公平调度：用户级额度按 `平台 + 用户` 统计，同一用户在多个群共享同一份额度；群级被拒绝时，本次请求已经消耗的用户额度不会退回，“单个成员是否会耗尽全群额度”取决于两组阈值怎么配。配置阈值和最近拒绝原因可以通过 `/metrics.rate_limit` 观察。
 - `/metrics.rate_limit` 会返回配置阈值、总拒绝数、用户级/群级拒绝数、最近一次拒绝原因和时间。
 - `queue_wait_kinds` 决定哪些请求类型在并发满时允许排队；`turn` 默认不允许排队，队列满或排队超时会明确拒绝。
+- `queue_max_per_user` / `queue_max_per_scope` 分别限制单个公平 key（含用户）和单个 `平台:scope` 的排队长度；`queue_max_size` 仍是全局上限。任一上限先达到都会返回明确的 `ErrQueueFull`，避免单个用户或单个群用等待队列撑爆全局容量。
+- `provider_max_concurrent` / `provider_queue_max_size` / `provider_wait_timeout_seconds` 按 provider 限制真实 LLM 调用并发；等待队满或超时会拒绝本轮，而不是把并发压力透传给 provider。
+- `/metrics.tasks` 会返回队列指标：全局排队长度、最老等待时间、平均等待时间，以及 `queue_busy_rejected` / `queue_full_rejected` / `queue_timeout_rejected` / `queue_cancel_rejected` 计数。
 - 熔断按 Provider 统计连接失败、首包超时、5xx 和 stream error；连续失败达到阈值后打开，冷却后放少量半开探测。用户取消和整轮 response timeout 不计入熔断。
 
 Provider 可配置备用模型与切换时机：
@@ -871,6 +894,25 @@ report_days = 1
 - 消息数按聊天记录统计（纯图片、文件等无文本消息也计入消息量和活跃成员）；字数只统计文本。统计区间按本地时区计算并显示在报告中。
 - 当前实现只读取本地 `chat_history` 与 `outbound_messages`，不复制第三方群分析插件的模板、图片或 Prompt。
 - OneBot 适配器额外实现可选 `get_group_msg_history` / `get_group_info` / `get_group_member_list` 能力；Telegram 实现群信息和管理员列表；平台不提供时调用方回退到本地历史。
+
+## 群级策略
+
+群级策略由服务端按 `平台 + 群 scope` 判断，不依赖角色提示词，也不允许通过命令参数指定别的群。策略写入 `state.toml` 的 `group_policy` 表；可用 `/*grouppolicy` 查看和修改，详见 `docs/commands.md`。
+
+- 每群可独立设置唤醒词、响应模式、默认会话模式、默认模型与模型目录、工具白名单、生图/视觉额度、静默时段和功能开关。
+- 响应模式 `mention` 为默认：命令、唤醒词、@ 机器人或回复机器人消息会触发；`all` 响应所有普通群消息；`keyword` 只认唤醒词；`reply` 只认回复；`off` 关闭普通响应。转发内容不会进入唤醒/命令匹配视图；直接消息里的 `@` 和唤醒词才会触发。
+- 群管理员只能改当前群的普通策略；`allowed-models`、`learning-moderation`、`learning-moderation-actions` 只能由超级管理员配置。群管理员不能修改其他群、provider/密钥或全局 Shell 权限。
+- 模型目录 `allowed-models` 为空时，群默认模型只能从已配置的模型别名/profile 中选择；显式填入 `provider/model` 或 `*` 才会放开对应范围。模型别名解析后仍会对最终 `provider/model` 再做一次目录校验。
+- 工具白名单由服务端在工具解析后和执行前分别校验：`clear` 表示继承全局工具策略，`none` 表示当前群禁止全部工具。`discover_tool` 也是普通工具，只有显式写入白名单才可用；工具 profile 会被展开为具体工具名，因此通过 `@use:`、技能或缓存间接调用也必须命中白名单。`discover_tool` 在受限群里还会收到当前白名单过滤器，列表和详情只返回本群允许的工具。群分析摘要模型也会在工具执行前按当前群模型目录重新授权。
+- 工具白名单和每日额度在请求排队后、真正执行前重新校验；排队期间被管理员关闭的工具不会继续执行。私聊、定时任务和后台任务没有群 scope 时使用全局安全策略，不套用某个群的策略。
+- 生图/视觉额度按“调用前原子预占、按唯一调用 ID 防重复计数”的每日次数账本执行，写入 `state.toml` 的 `budget.reservations`，重启后保留。同一调用 ID 会被绑定到参数摘要（`budget.digests`）；重放相同参数不重复计数，复用 ID 但参数不同会被拒绝。预占在账本无法可靠落盘时会回滚并拒绝受限调用；已经发出的 provider 调用不会因本地超时/取消自动退款，重启后结果未知时按保守占用处理。
+- 额度支持群、群内单用户、全局和全局单用户四个维度：群策略可设置 `image-quota` / `vision-quota` / `user-image-quota` / `user-vision-quota` / `chat-tokens-quota` / `chat-cost-quota`，应用配置 `[budget_limits]` 可设置全局与单用户维度。chat token/费用在执行前检查，provider 返回 usage 后按 `[maintenance.daily_report].prices` 计价写入 `budget.tokens` / `budget.costs`。
+- 工具执行幂等账本位于 `budget.executions`：同一 scope + actor + 工具调用 ID 只允许一个参数摘要首次执行，重放相同 ID 会被抑制，ID 复用不同参数会被拒绝；provider 重试单独记录在 `budget.retries`，不会静默增加调用次数额度。
+- 群分析、学习、历史记录的开关可在群级关闭；旧群未配置时保持原有全局行为。
+- `history=off` 的语义是“停止新增可检索历史”，不是拒绝当前消息，也不是删除旧记录：入站原文、解析后文本、转发展开、图片描述、助手回复、工具结果摘要、会话摘要/命名、缓存元数据以及 chat_history/outbound 写入口都会停止落盘；当前轮仍在内存中处理。历史上已经存在的行不会被自动删除；历史查询工具在关闭期间继续拒绝。
+- `learning=off` 会覆盖采集 → 暂存 → 挖掘 → 审核 → 入库 → 检索注入的完整生命周期：观察 hook 直接丢弃新文本，已排队的挖掘/审核/入库操作在处理前再次检查策略并返回 `learning disabled`，`self_learning_review` 与 `/learning` 继续拒绝；既有候选和已批准内容仍保留在 self_learning 库中，但关闭期间不会注入模型上下文。
+- `learning-moderation-actions` 可细分为 `view`（查看候选/状态/历史）、`decide`（approve/reject/undo）、`mine`（触发挖掘）、`delete`、`export`、`policy`；默认只给 `view,decide`。权限每次命令执行时从当前群策略和当前群管理员身份重新计算，不缓存。
+- 实际执行的模型目标也会再次校验：群默认模型、turn hook、cron override、压缩模型与视觉 fallback 在真正调用 provider 前都会按本群 `allowed-models` / `default-model` 重新授权，避免通过 fallback 或动态配置绕过目录。
 
 ## 长期记忆
 
@@ -1241,6 +1283,13 @@ access_token_env = "QQONEBOT_ACCESS_TOKEN"
 api_timeout_seconds = 15 # OneBot 写入和响应等待的基础超时
 trigger_keywords = ["bot"]
 send_file_mode = "base64" # 本地图片、文件、语音默认用 base64；共享文件系统可改为 file_uri
+forward_max_nodes = 50 # 合并转发最多展开节点数（同一条消息内多个转发 id 共享）
+forward_max_runes = 20000 # 合并转发展开后的总字符预算（整条消息共享）
+forward_max_depth = 4 # 合并转发最大嵌套深度
+forward_max_fetches = 8 # get_forward_msg 最多拉取次数
+forward_max_result_bytes = 1048576 # 单次 get_forward_msg 返回体大小上限
+forward_max_non_text = 20 # 转发中图片/文件/语音等非文本节点上限
+forward_fetch_timeout_seconds = 5 # 单次 get_forward_msg 超时
 ```
 
 > **容器部署注意**：`ws_url` 是 **ElBot 容器内**要访问的地址。`ws://127.0.0.1:6700/` 在容器内指向 ElBot 自身。OneBot 在同一个 Compose 项目（或同一 Docker 网络）的服务中用服务名，例如 `ws://onebot:6700/`；OneBot 在宿主机时，需要配置容器可访问的宿主机地址（Linux 可加 `extra_hosts: ["host.docker.internal:host-gateway"]` 后写 `ws://host.docker.internal:6700/`）；OneBot 在另一台机器时写其 IP / 域名。
@@ -1248,6 +1297,8 @@ send_file_mode = "base64" # 本地图片、文件、语音默认用 base64；共
 `access_token_env` 指向保存 Access Token 的环境变量名；原有 `access_token` 仍然兼容且优先于 `access_token_env`。OneBot 不要求鉴权时，两项都可省略。
 
 `send_file_mode` 同时控制 QQ OneBot 本地图片、文件和 `record` 语音的发送方式。`base64` 适用于 ElBot 与 OneBot 不共享文件系统的部署；`file_uri` 仅适用于双方能访问同一本地路径的场景。
+
+OneBot 入站文本会保留原始换行、缩进和连续空白；唤醒判断使用单独规范化后的匹配视图，不会为了匹配关键词而重排模型输入，也不会让转发里的 `@`、唤醒词或命令进入匹配视图。合并转发消息会展开为带发送者、时间、消息 ID 的引用文本，并通过 `forward_max_nodes`、`forward_max_runes`、`forward_max_depth` 限制节点数、总字符数和嵌套深度；`forward_max_fetches`、`forward_max_result_bytes`、`forward_max_non_text`、`forward_fetch_timeout_seconds` 进一步限制拉取次数、单次返回体、非文本节点和拉取超时。同一条消息内所有转发 id 共享节点/字符预算；循环引用会被拒绝，重复引用会标记省略，拉取失败或节点缺字段会稳定降级为文本标记。转发内容始终作为不可信用户数据传入，不会构造成 system/developer 消息。
 
 `api_timeout_seconds` 分别作为 OneBot 帧写入和 API 响应等待的基础超时。大帧写入会按编码后大小每完整 1 MiB 增加 1 秒，最多增加到基础超时本身；写入失败或超时后 ElBot 会断开并重连 OneBot，避免一个慢发送长期占住后续消息。发送仍会同步等待平台回执。
 

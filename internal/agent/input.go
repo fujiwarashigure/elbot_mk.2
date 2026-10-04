@@ -164,6 +164,9 @@ func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session
 	case turn.PhaseAwaitAppendConfirm:
 		return a.handleAppendConfirmationInput(ctx, session, text)
 	case turn.PhaseLLM:
+		for _, requestID := range a.requests.SessionIDs(session.ID) {
+			a.markTurnCanceled(requestID)
+		}
 		a.requests.CancelSession(session.ID)
 		if !a.turns.InterruptLLMInput(session.ID, inboundTurnInput(ctx, text)) {
 			return nil
@@ -232,7 +235,8 @@ func (a *Agent) sessionForInput(ctx context.Context, text string) (*storage.Sess
 			return a.sessions.Fork(ctx, a.scope(ctx), msg.ForkFromMessageID)
 		}
 	}
-	return a.sessions.GetOrCreateCurrent(ctx, a.scope(ctx), text)
+	mode := a.groupDefaultSessionMode(ctx)
+	return a.sessions.GetOrCreateCurrentWithMode(ctx, a.scope(ctx), text, mode)
 }
 
 func (a *Agent) handleRiskConfirmationInput(ctx context.Context, sessionID, text string) error {

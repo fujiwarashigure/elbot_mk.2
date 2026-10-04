@@ -12,17 +12,18 @@ import (
 )
 
 type commandExecutor struct {
-	router        *command.Router
-	sessions      *session.Service
-	turns         *turn.Manager
-	scope         func(context.Context) session.Scope
-	compactActive func(string) bool
-	sendChat      func(context.Context, string)
-	sendNotice    func(context.Context, string) error
-	audit         func(string, ...any)
-	handleAppend  func(context.Context, *storage.Session, string) error
-	handleRisk    func(context.Context, string, string) error
-	continueInput func(context.Context, command.Continuation) error
+	router          *command.Router
+	sessions        *session.Service
+	turns           *turn.Manager
+	scope           func(context.Context) session.Scope
+	compactActive   func(string) bool
+	sendChat        func(context.Context, string)
+	sendNotice      func(context.Context, string) error
+	audit           func(string, ...any)
+	handleAppend    func(context.Context, *storage.Session, string) error
+	handleRisk      func(context.Context, string, string) error
+	continueInput   func(context.Context, command.Continuation) error
+	groupAdminGrant func(context.Context, string) bool
 }
 
 func (e *commandExecutor) Handle(ctx context.Context, text string) (bool, error) {
@@ -53,10 +54,19 @@ func (e *commandExecutor) Handle(ctx context.Context, text string) (bool, error)
 	}
 
 	actor, _ := security.ActorFromContext(ctx)
-	if hasInfo && !command.CanAccess(info, actor) {
+	allowed := hasInfo && command.CanAccess(info, actor)
+	if hasInfo && info.GroupAdminNeedsGrant {
+		// Group admin access is explicitly delegated per group. Do not let
+		// AllowGroupAdmin alone grant this command; only the server-side grant
+		// callback (or superadmin) may unlock it.
+		allowed = actor.Role == security.RoleSuperadmin || (e.groupAdminGrant != nil && e.groupAdminGrant(ctx, parsed.Name))
+	}
+	if hasInfo && !allowed {
 		e.audit("permission_denied", "actor_id", actor.ID, "command", text, "reason", "slash_command_requires_superadmin")
 		required := "超级管理员"
-		if info.AllowGroupAdmin {
+		if info.GroupAdminNeedsGrant {
+			required = "超级管理员，或已由超级管理员显式授权的当前群管理员"
+		} else if info.AllowGroupAdmin {
 			required = "超级管理员或群管理员"
 		}
 		e.sendChat(ctx, fmt.Sprintf("命令 %s%s 需要%s权限。", parsed.Prefix, parsed.Name, required))

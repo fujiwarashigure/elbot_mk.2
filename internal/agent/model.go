@@ -491,6 +491,7 @@ func (a *Agent) attachLLMRetryNotifier(client llm.LLM, providerName string) {
 		if event.Err == nil || errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return
 		}
+		a.recordProviderRetry(ctx, providerName)
 		safe := redact.Summarize(event.Err.Error(), maxUserErrorRunes)
 		text := fmt.Sprintf("LLM 请求失败，正在重试 %d/%d（%s 后）：%s", event.Attempt, event.MaxRetries, event.Delay.Round(time.Millisecond), safe)
 		if providerName != "" {
@@ -581,6 +582,11 @@ func (a *Agent) applyRuntimeState(state *config.StateConfig) error {
 		}
 	}
 	a.setContextOverflowSnapshot(state.ContextOverflow)
+	a.setGroupPolicySnapshot(state.GroupPolicy)
+	a.setBudgetSnapshot(state.Budget.Reservations)
+	a.setBudgetDigestSnapshot(state.Budget.Digests)
+	a.setBudgetUsageSnapshot(state.Budget.Tokens, state.Budget.Costs, state.Budget.Retries)
+	a.setBudgetExecutionSnapshot(state.Budget.Executions)
 	return nil
 }
 
@@ -590,12 +596,18 @@ func (a *Agent) saveRuntimeState() error {
 	}
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
+	now := time.Now()
+	reservations, digests := a.budgetStateSnapshot()
+	tokens, costs, retries := a.budgetUsageSnapshot()
+	executions := a.budgetExecutionSnapshot()
 	if err := config.SaveState(a.statePath, config.StateConfig{
 		Session:         config.StateSessionConfig{DefaultMode: a.sessions.DefaultMode()},
 		ModeModels:      a.modeModelsSnapshot(),
 		CompactModel:    a.contextRuntime.configuredCompactModel(),
 		NamingModel:     a.configuredNamingModel(),
 		ContextOverflow: a.contextOverflowSnapshot(),
+		GroupPolicy:     a.groupPolicySnapshot(),
+		Budget:          config.StateBudgetConfig{Reservations: pruneBudgetReservations(reservations, now), Digests: pruneBudgetDigests(digests, now), Tokens: pruneBudgetUsage(tokens, now), Costs: pruneBudgetUsage(costs, now), Retries: pruneBudgetUsage(retries, now), Executions: pruneBudgetDigests(executions, now)},
 	}); err != nil {
 		return err
 	}

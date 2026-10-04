@@ -55,6 +55,13 @@ func NewServiceWithConfig(store storage.Store, cfg Config, titleGen TitleGenerat
 }
 
 func (s *Service) GetOrCreateCurrent(ctx context.Context, scope Scope, firstMessage string) (*storage.Session, error) {
+	return s.GetOrCreateCurrentWithMode(ctx, scope, firstMessage, "")
+}
+
+// GetOrCreateCurrentWithMode is GetOrCreateCurrent with an explicit mode for a
+// new session. An empty mode keeps the service default. Existing sessions are
+// never changed by a group-level default.
+func (s *Service) GetOrCreateCurrentWithMode(ctx context.Context, scope Scope, firstMessage, mode string) (*storage.Session, error) {
 	current, err := s.Current(ctx, scope)
 	if err == nil {
 		return current, nil
@@ -63,7 +70,7 @@ func (s *Service) GetOrCreateCurrent(ctx context.Context, scope Scope, firstMess
 		return nil, err
 	}
 
-	return s.Create(ctx, scope, CreateRequest{Title: defaultTitle(firstMessage)})
+	return s.Create(ctx, scope, CreateRequest{Title: defaultTitle(firstMessage), Mode: mode})
 }
 
 func (s *Service) Create(ctx context.Context, scope Scope, req CreateRequest) (*storage.Session, error) {

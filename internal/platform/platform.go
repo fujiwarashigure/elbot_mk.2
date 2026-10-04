@@ -21,6 +21,35 @@ type PlatformHandler interface {
 	HandleMessage(ctx context.Context, text string) error
 }
 
+// EventKind is the platform-neutral class of a non-message event.
+type EventKind string
+
+const (
+	EventNotice    EventKind = "notice"
+	EventRequest   EventKind = "request"
+	EventMetaEvent EventKind = "meta_event"
+)
+
+// PlatformEvent is the platform-neutral view of a notice, request or lifecycle
+// event. It is intentionally small: adapters keep platform-specific fields in
+// Meta/Raw, while the local event policy only needs stable routing fields.
+type PlatformEvent struct {
+	Platform  string
+	Kind      EventKind
+	Type      string
+	ScopeID   string
+	UserID    string
+	MessageID string
+	Raw       json.RawMessage
+	Meta      map[string]any
+}
+
+// PlatformEventHandler is implemented by handlers that want deterministic
+// notice/request/lifecycle events in addition to chat messages.
+type PlatformEventHandler interface {
+	HandlePlatformEvent(ctx context.Context, event PlatformEvent) error
+}
+
 // ConnectNotifier is implemented by adapters that can report successful platform connections.
 type ConnectNotifier interface {
 	SetConnectNotifier(func(context.Context, string))
@@ -164,11 +193,16 @@ type MessageContext struct {
 	Reply                 ReplyContext
 	Meta                  map[string]any
 	RawText               string
-	PlatformMessage       json.RawMessage
-	Bot                   Identity
-	Mentions              []Mention
-	TriggerKeywords       []string
-	MediaResolver         MediaResolver
+	// MatchText is the wake/command matching view. It excludes untrusted
+	// forwarded content. MatchTextSet distinguishes a deliberate empty match
+	// view (forward-only message) from an adapter that does not provide one.
+	MatchText       string
+	MatchTextSet    bool
+	PlatformMessage json.RawMessage
+	Bot             Identity
+	Mentions        []Mention
+	TriggerKeywords []string
+	MediaResolver   MediaResolver
 }
 
 type messageContextKey struct{}

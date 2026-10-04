@@ -65,6 +65,33 @@ func (a *Agent) describeVisionMessages(ctx context.Context, messages []llm.LLMMe
 	if len(slots) > a.visionImageLimit() {
 		return nil, false
 	}
+	if strings.TrimSpace(a.visionSelection.Provider) != "" && strings.TrimSpace(a.visionSelection.Model) != "" {
+		if err := a.authorizeExecutionModelSelection(ctx, a.visionSelection); err != nil {
+			a.audit("model_denied", "kind", "vision", "provider", a.visionSelection.Provider, "model", a.visionSelection.Model, "reason", err.Error(), "scope", contextOverflowKey(a.scope(ctx)))
+			return nil, false
+		}
+	}
+	// Reserve the daily vision quota before opening any provider connection.
+	// The reservation is idempotent per turn/media index and survives restarts.
+	reservationRequests := make([]budgetReservationRequest, 0, len(slots))
+	for index, selected := range slots {
+		segment := out[selected.message].Segments[selected.segment]
+		mediaID := strings.TrimSpace(segment.MediaID)
+		if mediaID == "" {
+			mediaID = "unknown"
+		}
+		turnID := turnRequestIDFromContext(ctx)
+		if strings.TrimSpace(turnID) == "" {
+			turnID = shortHash(mediaID)
+		}
+		callID := fmt.Sprintf("%s:%s:%d", turnID, mediaID, index)
+		digest := shortHash(mediaID + "\x00" + string(segment.Type) + "\x00" + segment.MIMEType + "\x00" + segment.Name)
+		reservationRequests = append(reservationRequests, budgetReservationRequest{CallID: callID, Digest: digest})
+	}
+	if ok, reason := a.reserveBudgetBatchRequests(ctx, "vision", reservationRequests); !ok {
+		a.audit("budget_denied", "kind", "vision", "reason", reason, "scope", contextOverflowKey(a.scope(ctx)))
+		return nil, false
+	}
 
 	// One shared budget for the whole batch; without it a message with several
 	// images could keep the turn busy for (images x per-image timeout).

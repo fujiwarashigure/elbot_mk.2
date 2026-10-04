@@ -14,11 +14,11 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `elbot-0.6.7-linux-amd64.tar.gz` | 手工构造的 `docker save` 格式镜像，`docker load` 后直接可跑（scratch 精简版，**无 /bin/sh**） |
-| `elbot-0.6.7-linux-arm64.tar.gz` | 同上，ARM64 |
+| `elbot-0.6.8-linux-amd64.tar.gz` | 手工构造的 `docker save` 格式镜像，`docker load` 后直接可跑（scratch 精简版，**无 /bin/sh**） |
+| `elbot-0.6.8-linux-arm64.tar.gz` | 同上，ARM64 |
 | `elbot-linux-amd64` / `elbot-linux-arm64` | 静态 Linux 二进制（CGO_ENABLED=0） |
 | `offline-amd64/` / `offline-arm64/` | **完整功能版**部署包（预编译二进制 + Debian 运行时 Dockerfile + compose + 反代/服务单元/备份脚本） |
-| `elbot-0.6.7-offline-amd64.tar.gz` / `-arm64` | 上面两个目录的单文件打包，便于上传 |
+| `elbot-0.6.8-offline-amd64.tar.gz` / `-arm64` | 上面两个目录的单文件打包，便于上传 |
 | `prepare-offline.sh` | 重新生成所有产物的脚本（需要 Go 1.26） |
 | `build-image-tar.py` / `verify-image-tar.py` | 构造 / 离线校验镜像 tar 的脚本 |
 | `README-BAOTA-CONFIG.md` | 宝塔面板改配置速查 + 可直接粘贴的配置片段 |
@@ -32,9 +32,9 @@
 ## 通用准备（A / B 方案都要做）
 
 ```bash
-# 上传 elbot-0.6.7-offline-amd64.tar.gz 到服务器后解压
+# 上传 elbot-0.6.8-offline-amd64.tar.gz 到服务器后解压
 mkdir -p /opt/elbot && cd /opt/elbot
-tar -xzf /path/to/elbot-0.6.7-offline-amd64.tar.gz   # 得到 offline-amd64/
+tar -xzf /path/to/elbot-0.6.8-offline-amd64.tar.gz   # 得到 offline-amd64/
 cd /opt/elbot/offline-amd64
 
 # 关键：bind mount 会用宿主机目录的属主，容器内进程是 uid 10001，
@@ -79,7 +79,7 @@ ELNIS_HOME_TOKEN=请换成随机长字符串
 cd /opt/elbot/offline-amd64
 
 # 1. 载入镜像（约 9MB）
-docker load -i ../elbot-0.6.7-linux-amd64.tar.gz
+docker load -i ../elbot-0.6.8-linux-amd64.tar.gz
 docker images | grep elbot
 
 # 2. 直接启动（镜像已存在，compose 有 build 段也不会重新构建）
@@ -149,7 +149,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ```bash
 # 不需要 Docker：校验镜像 tar 的 manifest / config / layer 摘要
 # 建议带 --tag 校验版本号；不带则只做结构校验（不会因为版本号不同而误报）
-python3 verify-image-tar.py --tag elbot:0.6.7 elbot-0.6.7-linux-amd64.tar.gz
+python3 verify-image-tar.py --tag elbot:0.6.8 elbot-0.6.8-linux-amd64.tar.gz
 
 # 校验传输后的文件完整性
 sha256sum -c SHA256SUMS

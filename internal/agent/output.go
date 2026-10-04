@@ -17,6 +17,9 @@ func (a *Agent) SetOutputManager(manager delivery.Manager) {
 }
 
 func (a *Agent) sendOutputs(ctx context.Context, outputs []delivery.Output) error {
+	if !a.turnOutputAllowed(ctx) {
+		return nil
+	}
 	manager := a.outputs
 	manager.Sender = agentOutputSender{agent: a, ctx: ctx}
 	if manager.Logger == nil {
@@ -110,6 +113,9 @@ func (a *Agent) prepareAssistantOutput(ctx context.Context, point hook.Point, te
 }
 
 func (a *Agent) sendChatWithReceipt(ctx context.Context, text string) (delivery.Receipt, error) {
+	if !a.turnOutputAllowed(ctx) {
+		return delivery.Receipt{}, nil
+	}
 	if strings.TrimSpace(text) == "" && bufferAssistantOutput(ctx) {
 		return delivery.Receipt{}, nil
 	}
@@ -179,6 +185,9 @@ func (a *Agent) RegisterPlatformSender(name string, sender delivery.MessageSende
 }
 
 func (a *Agent) SendNotice(ctx context.Context, notice delivery.Notice) (delivery.Receipt, error) {
+	if !a.turnOutputAllowed(ctx) {
+		return delivery.Receipt{}, nil
+	}
 	manager := a.outputs
 	manager.Sender = agentOutputSender{agent: a, ctx: ctx}
 	if manager.Logger == nil {

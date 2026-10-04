@@ -157,6 +157,12 @@ func metadataToolNames(value any) []string {
 }
 
 func (a *Agent) persistTurnMessage(ctx context.Context, message *storage.Message, operation string) error {
+	if !a.historyEnabled(ctx) {
+		// history=off means "do not add new persistent transcript rows";
+		// the current turn still uses the in-memory message and existing
+		// rows are not deleted by this path.
+		return nil
+	}
 	if a.media != nil && message.Segments != "" {
 		segments := a.materializeMedia(ctx, messageSegmentsFromStorage(message.Segments))
 		message.Segments = storedMessageSegments(segments)

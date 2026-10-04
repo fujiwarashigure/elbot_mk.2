@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"elbot/internal/ratelimit"
@@ -28,6 +29,11 @@ const (
 // errObservationRateLimited is returned when one scope exceeds its observation
 // write budget. It is a package-level value so callers can match it.
 var errObservationRateLimited = errors.New("self learning observation write rate limit exceeded for this scope")
+
+// ErrLearningDisabled is returned by lifecycle operations when the current
+// platform/scope has self-learning turned off. Observe is intentionally
+// silent because it runs on the hot inbound path and should simply drop data.
+var ErrLearningDisabled = errors.New("self learning is disabled for this scope")
 
 // Options bound how much learned text can be persisted, injected, or scanned in
 // one operation.
@@ -93,6 +99,9 @@ type Service struct {
 	store          *Store
 	opts           Options
 	observeLimiter *ratelimit.Window
+
+	policyMu        sync.RWMutex
+	enabledForScope func(platform, scopeID string) bool
 }
 
 func NewService(store *Store, options ...Options) *Service {
@@ -118,6 +127,30 @@ func (s *Service) Ready() bool {
 	return s != nil && s.store != nil
 }
 
+// SetScopeEnabledPolicy installs the server-side lifecycle gate. It is called
+// once by the Agent after construction and may be updated on policy reload.
+func (s *Service) SetScopeEnabledPolicy(fn func(platform, scopeID string) bool) {
+	if s == nil {
+		return
+	}
+	s.policyMu.Lock()
+	s.enabledForScope = fn
+	s.policyMu.Unlock()
+}
+
+func (s *Service) enabledFor(platform, scopeID string) bool {
+	if s == nil {
+		return false
+	}
+	s.policyMu.RLock()
+	fn := s.enabledForScope
+	s.policyMu.RUnlock()
+	if fn == nil {
+		return true
+	}
+	return fn(strings.TrimSpace(platform), strings.TrimSpace(scopeID))
+}
+
 // Observe stores one observed message. The text is truncated to the configured
 // per-message budget, empty messages are ignored, and each scope has a write
 // rate limit so a single fast sender cannot grow the corpus without bound.
@@ -130,6 +163,9 @@ func (s *Service) Observe(ctx context.Context, platform, scopeID, userID, text s
 	userID = strings.TrimSpace(userID)
 	text = strings.TrimSpace(text)
 	if text == "" {
+		return nil
+	}
+	if !s.enabledFor(platform, scopeID) {
 		return nil
 	}
 	if platform == "" || scopeID == "" {
@@ -150,6 +186,9 @@ func (s *Service) Mine(ctx context.Context, platform, scopeID string, minCount, 
 	if !s.Ready() {
 		return MineStats{}, fmt.Errorf("self learning service is not configured")
 	}
+	if !s.enabledFor(platform, scopeID) {
+		return MineStats{}, ErrLearningDisabled
+	}
 	if minCount <= 0 {
 		minCount = defaultMinCount
 	}
@@ -169,6 +208,9 @@ func (s *Service) Review(ctx context.Context, platform, scopeID, status string, 
 	if !s.Ready() {
 		return nil, fmt.Errorf("self learning service is not configured")
 	}
+	if !s.enabledFor(platform, scopeID) {
+		return nil, ErrLearningDisabled
+	}
 	return s.store.ListCandidates(ctx, platform, scopeID, status, limit)
 }
 
@@ -177,6 +219,9 @@ func (s *Service) Review(ctx context.Context, platform, scopeID, status string, 
 func (s *Service) Decide(ctx context.Context, platform, scopeID, id, status, meaning, reviewer string) error {
 	if !s.Ready() {
 		return fmt.Errorf("self learning service is not configured")
+	}
+	if !s.enabledFor(platform, scopeID) {
+		return ErrLearningDisabled
 	}
 	meaning = safecontext.TruncateRunes(strings.TrimSpace(meaning), s.opts.MaxMeaningRunes)
 	return s.store.Decide(ctx, DecideRequest{
@@ -195,6 +240,9 @@ func (s *Service) Undo(ctx context.Context, platform, scopeID, id, reviewer stri
 	if !s.Ready() {
 		return fmt.Errorf("self learning service is not configured")
 	}
+	if !s.enabledFor(platform, scopeID) {
+		return ErrLearningDisabled
+	}
 	return s.store.Undo(ctx, DecideRequest{
 		ID:       id,
 		Platform: platform,
@@ -208,11 +256,17 @@ func (s *Service) History(ctx context.Context, platform, scopeID, candidateID st
 	if !s.Ready() {
 		return nil, fmt.Errorf("self learning service is not configured")
 	}
+	if !s.enabledFor(platform, scopeID) {
+		return nil, ErrLearningDisabled
+	}
 	return s.store.History(ctx, platform, scopeID, candidateID, limit)
 }
 
 func (s *Service) Context(ctx context.Context, platform, scopeID, query string, limit int) (string, error) {
 	if !s.Ready() {
+		return "", nil
+	}
+	if !s.enabledFor(platform, scopeID) {
 		return "", nil
 	}
 	if limit <= 0 || limit > 50 {

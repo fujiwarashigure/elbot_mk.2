@@ -19,6 +19,11 @@ type Info struct {
 	// AllowGroupAdmin permits group owners/admins in addition to superadmins.
 	// It does not grant access to regular group members.
 	AllowGroupAdmin bool
+	// GroupAdminNeedsGrant makes AllowGroupAdmin conditional on a server-side
+	// group policy grant checked by the command executor. This is used for
+	// sensitive commands such as /learning moderation, where a group admin
+	// must be explicitly authorized by a superadmin for that group.
+	GroupAdminNeedsGrant bool
 }
 
 func CanAccess(info Info, actor security.Actor) bool {

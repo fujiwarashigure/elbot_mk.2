@@ -48,6 +48,27 @@ type RunRequest struct {
 	AssistantRawText string
 	CachedTools      []CachedTool
 	Actor            security.Actor
+	// AllowedTools, when non-nil, is a server-side allowlist for tool names.
+	// It is enforced before confirmation/execution so a model cannot invoke a
+	// tool that only exists in its prompt or in cached discovery.
+	AllowedTools map[string]bool
+	// AuthorizeTool is the authoritative server-side tool check. It is called
+	// after alias/canonical resolution and again immediately before execution,
+	// after any queue wait, so a policy revoked while the request was queued
+	// still denies the call. A nil callback keeps the legacy behavior (allow
+	// after AllowedTools).
+	AuthorizeTool func(ctx context.Context, call llm.ToolCallRequest, resolved ResolvedTool) (bool, string)
+	// BeforeExecute runs after confirmation and after the request queue slot is
+	// acquired but before the tool executes. A non-nil error denies the call
+	// without executing it; this is where the daily quota ledger reserves.
+	BeforeExecute func(ctx context.Context, call llm.ToolCallRequest, resolved ResolvedTool) error
+}
+
+func (r RunRequest) authorize(ctx context.Context, call llm.ToolCallRequest, resolved ResolvedTool) (bool, string) {
+	if r.AuthorizeTool == nil {
+		return true, ""
+	}
+	return r.AuthorizeTool(ctx, call, resolved)
 }
 
 type RunResult struct {
@@ -79,7 +100,25 @@ func (m *Manager) Run(ctx context.Context, deps RunnerDeps, req RunRequest) RunR
 			continue
 		}
 		preparedCalls = append(preparedCalls, call)
+		if !toolAllowed(req.AllowedTools, call.Name) {
+			deps.AuditToolDenied(ctx, sessionID, call, tool.RiskHigh, "tool_not_in_group_allowlist")
+			message := toolMessage(call.Name, call.ID, fmt.Sprintf("tool call %s denied: tool is not in this group's allowlist", call.Name))
+			content := llm.SegmentsContentText(message.Segments)
+			deps.RecordToolCall(ctx, sessionID, call, "denied", startedAt, content, fmt.Errorf("tool not in group allowlist"))
+			messages = append(messages, message)
+			transcript = append(transcript, deps.ToolResultMessage(sessionID, message))
+			continue
+		}
 		resolved := m.Resolve(ctx, call.Name, req.CachedTools)
+		if allowed, reason := req.authorize(ctx, call, resolved); !allowed {
+			deps.AuditToolDenied(ctx, sessionID, call, tool.RiskHigh, reason)
+			message := toolMessage(call.Name, call.ID, fmt.Sprintf("tool call %s denied: %s", call.Name, reason))
+			content := llm.SegmentsContentText(message.Segments)
+			deps.RecordToolCall(ctx, sessionID, call, "denied", startedAt, content, fmt.Errorf("%s", reason))
+			messages = append(messages, message)
+			transcript = append(transcript, deps.ToolResultMessage(sessionID, message))
+			continue
+		}
 		toolCtx := deps.PrepareToolContext(ctx, req.Session, call)
 		assessment, riskText := m.assessForRun(toolCtx, resolved, call)
 		deps.AddToolUse(sessionID, call.Name)
@@ -121,6 +160,29 @@ func (m *Manager) Run(ctx context.Context, deps RunnerDeps, req RunRequest) RunR
 			continue
 		}
 		runToolCtx = deps.PrepareToolContext(runToolCtx, req.Session, call)
+		if allowed, reason := req.authorize(runToolCtx, call, resolved); !allowed {
+			done()
+			deps.AuditToolDenied(ctx, sessionID, call, tool.RiskHigh, reason)
+			message := toolMessage(call.Name, call.ID, fmt.Sprintf("tool call %s denied: %s", call.Name, reason))
+			content := llm.SegmentsContentText(message.Segments)
+			deps.RecordToolCall(ctx, sessionID, call, "denied", startedAt, content, fmt.Errorf("%s", reason))
+			messages = append(messages, message)
+			transcript = append(transcript, deps.ToolResultMessage(sessionID, message))
+			continue
+		}
+		if req.BeforeExecute != nil {
+			if err := req.BeforeExecute(runToolCtx, call, resolved); err != nil {
+				done()
+				reason := err.Error()
+				deps.AuditToolDenied(ctx, sessionID, call, tool.RiskHigh, reason)
+				message := toolMessage(call.Name, call.ID, fmt.Sprintf("tool call %s denied: %s", call.Name, reason))
+				content := llm.SegmentsContentText(message.Segments)
+				deps.RecordToolCall(ctx, sessionID, call, riskText, startedAt, content, err)
+				messages = append(messages, message)
+				transcript = append(transcript, deps.ToolResultMessage(sessionID, message))
+				continue
+			}
+		}
 		if m.Media != nil {
 			if err := m.Media.RetainSessionToolArguments(runToolCtx, sessionID, call.Arguments); err != nil {
 				done()
@@ -226,6 +288,14 @@ func (m *Manager) assessForRun(ctx context.Context, resolved ResolvedTool, call 
 
 func toolMessage(name, id, content string) llm.LLMMessage {
 	return llm.LLMMessage{Role: llm.RoleTool, Name: name, ToolCallID: id, Segments: llm.TextSegments(content)}
+}
+
+func toolAllowed(allowlist map[string]bool, name string) bool {
+	if allowlist == nil {
+		return true
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	return allowlist[name]
 }
 
 func previewArguments(args string) string {

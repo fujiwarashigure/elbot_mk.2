@@ -836,6 +836,40 @@ func TestSaveState(t *testing.T) {
 	}
 }
 
+func TestSaveStateRemovesBackupAndTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.toml")
+	if err := SaveState(path, StateConfig{Session: StateSessionConfig{DefaultMode: "work"}}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasSuffix(name, ".bak") || strings.Contains(name, ".tmp-") {
+			t.Fatalf("stale state artifact left behind: %s", name)
+		}
+	}
+}
+
+func TestLoadStateRecoversBackupAfterInterruptedSwap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.toml")
+	backup := path + ".bak"
+	if err := SaveState(backup, StateConfig{Session: StateSessionConfig{DefaultMode: "chat"}}); err != nil {
+		t.Fatalf("SaveState backup: %v", err)
+	}
+	loaded, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("LoadState fallback: %v", err)
+	}
+	if loaded.Session.DefaultMode != "chat" {
+		t.Fatalf("recovered mode = %q, want chat", loaded.Session.DefaultMode)
+	}
+}
+
 func TestLoadMissingAppConfig(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "missing.toml"))
 	if err == nil {

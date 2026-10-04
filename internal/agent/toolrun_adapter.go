@@ -65,7 +65,7 @@ func (d agentToolRunDeps) CompleteToolCall(ctx context.Context, session *storage
 }
 
 func (d agentToolRunDeps) StartToolRequest(ctx context.Context, sessionID, toolName string) (context.Context, time.Time, func(), error) {
-	toolReq, toolCtx, done, err := d.agent.requests.Start(ctx, request.StartRequest{ParentID: turnRequestIDFromContext(ctx), SessionID: sessionID, Kind: request.KindTool, Label: toolName, Timeout: d.agent.toolTimeout})
+	toolReq, toolCtx, done, err := d.agent.requests.Start(ctx, request.StartRequest{ParentID: turnRequestIDFromContext(ctx), SessionID: sessionID, Kind: request.KindTool, Label: toolName, ScopeKey: d.agent.requestScopeKey(ctx), Timeout: d.agent.toolTimeout})
 	if err != nil {
 		return ctx, time.Time{}, func() {}, err
 	}
@@ -78,6 +78,11 @@ func (d agentToolRunDeps) PrepareToolContext(ctx context.Context, session *stora
 		return ctx
 	}
 	ctx = tool.WithShownRuleCardFormats(ctx, decodeSessionMetadata(session.Metadata).ShownRuleCardFormats)
+	if allow := d.agent.groupToolAllowlist(ctx); allow != nil {
+		ctx = tool.WithDiscoverFilter(ctx, func(_ context.Context, info tool.Info) bool {
+			return allow[strings.ToLower(strings.TrimSpace(info.Name))]
+		})
+	}
 	if isBackgroundSession(session) {
 		return ctx
 	}

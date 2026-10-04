@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,14 +20,20 @@ type Transport struct {
 	URL         string
 	AccessToken string
 	Timeout     time.Duration
+	// ReadLimitBytes bounds one get_forward_msg response while it is being read
+	// from the websocket. Other action responses and normal events are read
+	// without this extra limit, so a large inbound image frame is unaffected.
+	ReadLimitBytes int64
 
-	mu        sync.Mutex
-	logger    *slog.Logger
-	writeOnce sync.Once
-	writeGate chan struct{}
-	conn      *websocket.Conn
-	pending   map[string]chan response
-	seq       atomic.Uint64
+	mu          sync.Mutex
+	readLimitMu sync.Mutex
+	readLimited bool
+	logger      *slog.Logger
+	writeOnce   sync.Once
+	writeGate   chan struct{}
+	conn        *websocket.Conn
+	pending     map[string]chan response
+	seq         atomic.Uint64
 }
 
 type request struct {
@@ -162,6 +169,24 @@ func (t *Transport) GetMessage(ctx context.Context, messageID string) (getMessag
 	return data, nil
 }
 
+func (t *Transport) GetForwardMsg(ctx context.Context, messageID string) (json.RawMessage, error) {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return nil, fmt.Errorf("forward message id is empty")
+	}
+	limit := int64(0)
+	if t.ReadLimitBytes > 0 {
+		// Leave a small envelope allowance for JSON keys/echo over the
+		// configured result-body budget; the body itself is still bounded.
+		limit = t.ReadLimitBytes + 64*1024
+	}
+	resp, err := t.callWithLimit(ctx, "get_forward_msg", map[string]any{"message_id": messageID}, limit)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(append([]byte(nil), resp.Data...)), nil
+}
+
 func (t *Transport) GetImage(ctx context.Context, file string) (getImageData, error) {
 	resp, err := t.call(ctx, "get_image", map[string]any{"file": file})
 	if err != nil {
@@ -202,6 +227,33 @@ func (t *Transport) Call(ctx context.Context, action string, params map[string]a
 	return t.call(ctx, action, params)
 }
 
+func (t *Transport) setReadLimit(limit int64) {
+	if t == nil || limit <= 0 {
+		return
+	}
+	t.readLimitMu.Lock()
+	defer t.readLimitMu.Unlock()
+	if conn := t.currentConn(); conn != nil {
+		conn.SetReadLimit(limit)
+		t.readLimited = true
+	}
+}
+
+func (t *Transport) clearReadLimit() {
+	if t == nil {
+		return
+	}
+	t.readLimitMu.Lock()
+	defer t.readLimitMu.Unlock()
+	if !t.readLimited {
+		return
+	}
+	t.readLimited = false
+	if conn := t.currentConn(); conn != nil {
+		conn.SetReadLimit(0)
+	}
+}
+
 func (t *Transport) sendMessage(ctx context.Context, action string, params map[string]any) (string, error) {
 	resp, err := t.call(ctx, action, params)
 	if err != nil {
@@ -218,6 +270,10 @@ func (t *Transport) sendMessage(ctx context.Context, action string, params map[s
 }
 
 func (t *Transport) call(ctx context.Context, action string, params map[string]any) (_ response, callErr error) {
+	return t.callWithLimit(ctx, action, params, 0)
+}
+
+func (t *Transport) callWithLimit(ctx context.Context, action string, params map[string]any, maxResponseBytes int64) (_ response, callErr error) {
 	startedAt := time.Now()
 	var encodedAt, acquiredAt, writtenAt time.Time
 	frameBytes := 0
@@ -246,6 +302,10 @@ func (t *Transport) call(ctx context.Context, action string, params map[string]a
 	t.pending[echo] = ch
 	t.mu.Unlock()
 	defer t.removePending(echo)
+	if maxResponseBytes > 0 {
+		t.setReadLimit(maxResponseBytes)
+		defer t.clearReadLimit()
+	}
 
 	writeCtx, cancelWrite := context.WithTimeout(ctx, t.writeTimeout(frameBytes))
 	release, err := t.acquireWrite(writeCtx)

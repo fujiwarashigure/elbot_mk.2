@@ -332,12 +332,29 @@ group_burst = 0
 rate_limit_idle_ttl_seconds = 600
 # 可选：超过并发上限时允许短暂排队。turn 通常不建议排队，避免用户侧卡住。
 queue_max_size = 0
+queue_max_per_user = 0
+queue_max_per_scope = 0
 queue_wait_timeout_seconds = 0
 queue_wait_kinds = ["tool", "hook", "compress"]
+# 可选：Provider 实际调用并发上限与等待队列；0 表示不限制。
+provider_max_concurrent = 0
+provider_queue_max_size = 0
+provider_wait_timeout_seconds = 0
 # 可选：Provider 连续失败后的熔断；0 表示关闭。
 circuit_breaker_failure_threshold = 0
 circuit_breaker_open_cooldown_seconds = 60
 circuit_breaker_half_open_max = 1
+
+[budget_limits]
+# 可选：全局 / 单用户每日额度；0 表示不限制。生图/视觉按调用次数，chat 按 token 与费用统计。
+global_image_daily = 0
+user_image_daily = 0
+global_vision_daily = 0
+user_vision_daily = 0
+global_chat_tokens_daily = 0
+user_chat_tokens_daily = 0
+global_chat_cost_daily = 0
+user_chat_cost_daily = 0
 
 [resident_memory]
 # Memory length units: CJK characters count as one each; English/digits count by word.

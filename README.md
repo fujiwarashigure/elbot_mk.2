@@ -112,7 +112,17 @@ Development plan and task decomposition: [devdocs](devdocs/).
 
 ## Local Fork: Deployment & Operations Enhancements
 
-Current fork version: `0.6.3`.
+Current fork version: `0.6.8`.
+
+### v0.6.8 Highlights
+
+- Closed-loop group authorization: default-deny tool allowlists, alias-resolution then re-authorization, granular learning review actions, and rechecks after queueing or revocation.
+- `history=off` / `learning=off` now cover the full lifecycle: new writes and knowledge injection stop, the current turn still runs, and old records are never auto-deleted.
+- Four-dimension daily ledger: group / group-user / global / global-user for image, vision, chat tokens, and cost; tool execution idempotency and provider retries are tracked separately and survive restarts.
+- Late-output gate for recall/cancel: streaming output, tool results, and final sends all check the turn terminal state.
+- Unified real-execution model authorization for chat, compaction, vision fallback, and group-analysis summaries before any provider call.
+- Queue capacity limits per user/scope plus full/timeout/cancel/wait metrics; provider-level concurrency limits stop pressure spikes from reaching the upstream API.
+- OneBot merged forwards are size-limited while reading from the websocket and always treated as untrusted user data.
 
 This fork keeps the upstream Agent/Chatbot core and adds a production-oriented Docker deployment and operations layer for VPS / BaoTa Linux environments and local Windows Docker Desktop. The goal is to avoid the "container is healthy, but the bot is already stuck" failure mode, without ever implementing "kill the process whenever CPU is high".
 

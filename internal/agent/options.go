@@ -31,9 +31,14 @@ type Options struct {
 	Providers       map[string]config.ProviderConfig
 	StatePath       string
 	ContextOverflow map[string]config.ContextOverflowConfig
+	GroupPolicy     map[string]config.GroupPolicyConfig
 	Store           storage.Store
 	Media           *media.Manager
 	VisionDescriber VisionDescriber
+	VisionSelection config.ModelSelection
+	// GroupAnalysisSelection is the model used by the group_analysis summary
+	// route. It is authorized against group policy before the tool runs.
+	GroupAnalysisSelection config.ModelSelection
 	// VisionParallelism, VisionMaxImages and VisionBudget bound the automatic
 	// multi-image fallback: how many images are described at once, how large a
 	// batch may be, and how long one batch may take when the caller context has
@@ -53,6 +58,8 @@ type Options struct {
 	CharacterStore        *character.Store
 	LLMRequestConfig      config.LLMRequestConfig
 	Ops                   config.OpsConfig
+	BudgetLimits          config.BudgetLimitsConfig
+	Pricing               config.DailyReportConfig
 	HookService           agentcommands.HookService
 	HookManager           hook.Manager
 	HookRuntime           HookRouter
@@ -107,6 +114,12 @@ func validateOptions(opts Options) error {
 		return err
 	}
 	if err := validateOptionalModelSelection("compact_model", opts.CompactModel, opts.Providers); err != nil {
+		return err
+	}
+	if err := validateOptionalModelSelection("vision_model", opts.VisionSelection, opts.Providers); err != nil {
+		return err
+	}
+	if err := validateOptionalModelSelection("group_analysis_model", opts.GroupAnalysisSelection, opts.Providers); err != nil {
 		return err
 	}
 	if opts.SessionConfig.DefaultMode == "" {

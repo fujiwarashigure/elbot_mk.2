@@ -570,3 +570,30 @@ func TestBuilderBuildsInfoAndSchema(t *testing.T) {
 		t.Fatalf("object property missing: %#v", schema)
 	}
 }
+
+func TestDiscoverToolHonorsContextFilter(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(fakeTool{name: "alpha", source: SourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(fakeTool{name: "beta", source: SourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithDiscoverFilter(context.Background(), func(_ context.Context, info Info) bool {
+		return info.Name == "alpha"
+	})
+	result, err := NewDiscoverTool(registry).Call(ctx, CallRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(result.Data), "beta") {
+		t.Fatalf("context filter leaked beta: %s", result.Data)
+	}
+	if !strings.Contains(string(result.Data), "alpha") {
+		t.Fatalf("context filter hid alpha: %s", result.Data)
+	}
+	args, _ := json.Marshal(map[string]string{"name": "beta"})
+	if _, err := NewDiscoverTool(registry).Call(ctx, CallRequest{Arguments: args}); err == nil {
+		t.Fatal("context filter should deny detail query for hidden tool")
+	}
+}

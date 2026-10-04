@@ -10,6 +10,7 @@ import (
 
 	"elbot/internal/config"
 	elcron "elbot/internal/cron"
+	"elbot/internal/historygate"
 	"elbot/internal/logging"
 	"elbot/internal/maintenance"
 	"elbot/internal/storage"
@@ -61,8 +62,9 @@ func (defaultFoundationFactory) Build(ctx context.Context, req FoundationRequest
 	}
 	lifecycle.chatHistoryStore = chatHistoryStore
 	req.Profiler.Mark("chat history sqlite.New")
-	chatHistory := chatHistoryStore.Repository()
-	outboundMessages := chatHistoryStore.Outbound()
+	historyPolicy := historygate.NewPolicy()
+	chatHistory := historygate.WrapChat(chatHistoryStore.Repository(), historyPolicy)
+	outboundMessages := historygate.WrapOutbound(chatHistoryStore.Outbound(), historyPolicy)
 
 	maint := maintenance.NewServiceWithConfig(logs, store, chatHistory, outboundMessages, cfg, logger)
 	cronManager := elcron.NewManager(store.CronJobs(), logger)
@@ -74,6 +76,7 @@ func (defaultFoundationFactory) Build(ctx context.Context, req FoundationRequest
 
 	return &FoundationComponents{
 		Maintenance:      maint,
+		HistoryPolicy:    historyPolicy,
 		Config:           cfg,
 		Logs:             logs,
 		Logger:           logger,

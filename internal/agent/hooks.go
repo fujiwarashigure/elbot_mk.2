@@ -53,7 +53,7 @@ func (a *Agent) routeHook(ctx context.Context, event hook.Event) (hook.Event, bo
 		return event, false, nil
 	}
 	if id := a.hookRuntime.RouteHookID(event); id != "" && a.requests != nil {
-		_, requestCtx, done, err := a.requests.Start(ctx, request.StartRequest{ParentID: turnRequestIDFromContext(ctx), Kind: request.KindHook, Label: id + " continuation"})
+		_, requestCtx, done, err := a.requests.Start(ctx, request.StartRequest{ParentID: turnRequestIDFromContext(ctx), Kind: request.KindHook, Label: id + " continuation", ScopeKey: a.requestScopeKey(ctx)})
 		if err == nil {
 			defer done()
 			ctx = requestCtx
@@ -115,6 +115,7 @@ func (a *Agent) observeHookRun(ctx context.Context, event hook.Event, info hook.
 		SessionID: sessionID,
 		Kind:      request.KindHook,
 		Label:     label,
+		ScopeKey:  a.requestScopeKey(ctx),
 		Timeout:   a.hookTimeout,
 	})
 	if err != nil {

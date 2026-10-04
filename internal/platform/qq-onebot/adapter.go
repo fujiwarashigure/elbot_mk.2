@@ -31,19 +31,26 @@ const (
 )
 
 type Config struct {
-	Enabled                  bool     `toml:"enabled"`
-	URL                      string   `toml:"ws_url"`
-	AccessToken              string   `toml:"access_token"`
-	AccessTokenEnv           string   `toml:"access_token_env"`
-	ReconnectIntervalSeconds int      `toml:"reconnect_interval_seconds"`
-	APITimeoutSeconds        int      `toml:"api_timeout_seconds"`
-	TriggerKeywords          []string `toml:"trigger_keywords"`
-	SendFileMode             string   `toml:"send_file_mode"`
-	AttachmentDir            string   `toml:"-"`
-	MaxReceiveFileBytes      int64    `toml:"-"`
-	DownloadTimeoutSecs      int      `toml:"-"`
-	Superadmins              []string `toml:"-"`
-	CommandPrefixes          []string `toml:"-"`
+	Enabled                    bool     `toml:"enabled"`
+	URL                        string   `toml:"ws_url"`
+	AccessToken                string   `toml:"access_token"`
+	AccessTokenEnv             string   `toml:"access_token_env"`
+	ReconnectIntervalSeconds   int      `toml:"reconnect_interval_seconds"`
+	APITimeoutSeconds          int      `toml:"api_timeout_seconds"`
+	TriggerKeywords            []string `toml:"trigger_keywords"`
+	SendFileMode               string   `toml:"send_file_mode"`
+	ForwardMaxNodes            int      `toml:"forward_max_nodes"`
+	ForwardMaxRunes            int      `toml:"forward_max_runes"`
+	ForwardMaxDepth            int      `toml:"forward_max_depth"`
+	ForwardMaxFetches          int      `toml:"forward_max_fetches"`
+	ForwardMaxResultBytes      int      `toml:"forward_max_result_bytes"`
+	ForwardMaxNonText          int      `toml:"forward_max_non_text"`
+	ForwardFetchTimeoutSeconds int      `toml:"forward_fetch_timeout_seconds"`
+	AttachmentDir              string   `toml:"-"`
+	MaxReceiveFileBytes        int64    `toml:"-"`
+	DownloadTimeoutSecs        int      `toml:"-"`
+	Superadmins                []string `toml:"-"`
+	CommandPrefixes            []string `toml:"-"`
 }
 
 func qqTextPages(text string) []string {
@@ -139,6 +146,39 @@ func applyDefaults(cfg *Config) {
 	if cfg.DownloadTimeoutSecs <= 0 {
 		cfg.DownloadTimeoutSecs = 60
 	}
+	if cfg.ForwardMaxNodes <= 0 {
+		cfg.ForwardMaxNodes = defaultForwardMaxNodes
+	}
+	if cfg.ForwardMaxRunes <= 0 {
+		cfg.ForwardMaxRunes = defaultForwardMaxRunes
+	}
+	if cfg.ForwardMaxDepth <= 0 {
+		cfg.ForwardMaxDepth = defaultForwardMaxDepth
+	}
+	if cfg.ForwardMaxFetches <= 0 {
+		cfg.ForwardMaxFetches = defaultForwardMaxFetches
+	}
+	if cfg.ForwardMaxResultBytes <= 0 {
+		cfg.ForwardMaxResultBytes = defaultForwardMaxResultBytes
+	}
+	if cfg.ForwardMaxNonText <= 0 {
+		cfg.ForwardMaxNonText = defaultForwardMaxNonText
+	}
+	if cfg.ForwardFetchTimeoutSeconds <= 0 {
+		cfg.ForwardFetchTimeoutSeconds = int(defaultForwardFetchTimeout / time.Second)
+	}
+}
+
+func (a *Adapter) forwardLimits() ForwardLimits {
+	return ForwardLimits{
+		MaxNodes:       a.cfg.ForwardMaxNodes,
+		MaxRunes:       a.cfg.ForwardMaxRunes,
+		MaxDepth:       a.cfg.ForwardMaxDepth,
+		MaxFetches:     a.cfg.ForwardMaxFetches,
+		MaxResultBytes: a.cfg.ForwardMaxResultBytes,
+		MaxNonText:     a.cfg.ForwardMaxNonText,
+		FetchTimeout:   time.Duration(a.cfg.ForwardFetchTimeoutSeconds) * time.Second,
+	}
 }
 
 func validateSendFileMode(mode string) error {
@@ -162,10 +202,11 @@ func New(cfg Config, store storage.Store, chatHistory storage.ChatHistoryReposit
 		store:       store,
 		chatHistory: chatHistory,
 		transport: &Transport{
-			URL:         cfg.URL,
-			AccessToken: cfg.AccessToken,
-			Timeout:     timeout,
-			logger:      logger,
+			URL:            cfg.URL,
+			AccessToken:    cfg.AccessToken,
+			Timeout:        timeout,
+			ReadLimitBytes: int64(cfg.ForwardMaxResultBytes),
+			logger:         logger,
 		},
 		logger: logger,
 	}
@@ -562,12 +603,58 @@ func (a *Adapter) readLoop(ctx context.Context, handler platform.PlatformHandler
 			go a.handleEvent(ctx, handler, event)
 			continue
 		}
+		switch event.PostType {
+		case "notice", "request", "meta_event":
+			go a.handlePlatformEvent(ctx, handler, event)
+		}
+	}
+}
+
+func (a *Adapter) handlePlatformEvent(ctx context.Context, handler platform.PlatformHandler, event Event) {
+	eventHandler, ok := handler.(platform.PlatformEventHandler)
+	if !ok {
+		return
+	}
+	noticeType := strings.ToLower(strings.TrimSpace(event.NoticeType))
+	userID := firstNonZero(event.OperatorID, event.UserID)
+	if strings.Contains(noticeType, "decrease") || strings.Contains(noticeType, "ban") {
+		userID = firstNonZero(event.UserID, event.TargetID)
+	}
+	messageID := ""
+	if event.MessageID != 0 {
+		messageID = strconv.FormatInt(event.MessageID, 10)
+	}
+	platformEvent := platform.PlatformEvent{
+		Platform:  a.Name(),
+		Kind:      platform.EventKind(event.PostType),
+		Type:      firstNonEmpty(event.NoticeType, event.RequestType, event.PostType),
+		ScopeID:   eventScopeID(event),
+		UserID:    strconv.FormatInt(userID, 10),
+		MessageID: messageID,
+		Meta: map[string]any{
+			"qq_onebot.post_type":    event.PostType,
+			"qq_onebot.message_type": event.MessageType,
+			"qq_onebot.sub_type":     event.SubType,
+			"qq_onebot.notice_type":  event.NoticeType,
+			"qq_onebot.request_type": event.RequestType,
+			"qq_onebot.group_id":     strconv.FormatInt(event.GroupID, 10),
+			"qq_onebot.user_id":      strconv.FormatInt(event.UserID, 10),
+			"qq_onebot.operator_id":  strconv.FormatInt(event.OperatorID, 10),
+			"qq_onebot.target_id":    strconv.FormatInt(event.TargetID, 10),
+		},
+	}
+	if data, err := json.Marshal(event); err == nil {
+		platformEvent.Raw = data
+	}
+	if err := eventHandler.HandlePlatformEvent(ctx, platformEvent); err != nil {
+		a.logWarn("handle qq platform event failed", "post_type", event.PostType, "type", platformEvent.Type, "error", err)
 	}
 }
 
 func (a *Adapter) handleEvent(ctx context.Context, handler platform.PlatformHandler, event Event) {
-	normalized := normalizeMessage(event.Message, event.RawMessage, event.SelfID)
+	normalized := normalizeMessageWithLimits(event.Message, event.RawMessage, event.SelfID, a.forwardLimits())
 	normalized = a.resolveAtSegments(ctx, event, normalized)
+	normalized = a.resolveForwardSegments(ctx, event, normalized)
 	if event.MessageType != "private" && event.MessageType != "group" {
 		a.recordChatMessage(ctx, event, normalized, platform.ReplyContext{})
 		return
@@ -591,6 +678,8 @@ func (a *Adapter) handleEvent(ctx context.Context, handler platform.PlatformHand
 		BufferAssistantOutput: true,
 		Segments:              finalMessageSegments(text, currentSegments, nil),
 		RawText:               normalized.Text,
+		MatchText:             normalized.MatchText,
+		MatchTextSet:          true,
 		PlatformMessage:       append(json.RawMessage(nil), event.Message...),
 		Bot:                   platform.Identity{UserID: strconv.FormatInt(event.SelfID, 10)},
 		Mentions:              append([]platform.Mention(nil), normalized.Mentions...),
@@ -638,6 +727,85 @@ func (a *Adapter) handleEvent(ctx context.Context, handler platform.PlatformHand
 	if err := handler.HandleMessage(msgCtx, text); err != nil {
 		a.logWarn("handle qq message failed", "error", err, "message_id", event.MessageID)
 	}
+}
+
+func (a *Adapter) resolveForwardSegments(ctx context.Context, event Event, msg NormalizedMessage) NormalizedMessage {
+	if len(msg.ForwardIDs) == 0 {
+		return msg
+	}
+	if a.transport == nil {
+		return msg
+	}
+	state := newForwardParseState(a.forwardLimits())
+	var sb strings.Builder
+	sb.WriteString(msg.Text)
+	seen := map[string]bool{}
+	for _, id := range msg.ForwardIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if seen[id] {
+			writeForwardFallback(&sb, "[重复转发引用 id:"+id+"，已省略]")
+			continue
+		}
+		seen[id] = true
+		if state.fetches >= state.limits.MaxFetches {
+			state.truncated = true
+			writeForwardFallback(&sb, "[转发拉取次数达到上限，剩余转发已省略]")
+			break
+		}
+		state.fetches++
+		fetchCtx := ctx
+		cancel := func() {}
+		if state.limits.FetchTimeout > 0 {
+			fetchCtx, cancel = context.WithTimeout(ctx, state.limits.FetchTimeout)
+		}
+		raw, err := a.transport.GetForwardMsg(fetchCtx, id)
+		cancel()
+		if err != nil {
+			a.logWarn("get qq forward message failed", "message_id", id, "error", err)
+			writeForwardFallback(&sb, "[转发消息 id:"+id+" 拉取失败]")
+			continue
+		}
+		if len(raw) > state.limits.MaxResultBytes {
+			state.truncated = true
+			writeForwardFallback(&sb, "[转发消息 id:"+id+" 超过体积上限，已省略]")
+			continue
+		}
+		body, parsedID, _ := renderForwardData(raw, state)
+		if strings.TrimSpace(body) == "" && parsedID != "" {
+			body = "[转发消息 id:" + parsedID + "]"
+		}
+		if strings.TrimSpace(body) == "" {
+			writeForwardFallback(&sb, "[转发消息 id:"+id+" 无可展示文本]")
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(forwardTrustMarker)
+		sb.WriteString("\n")
+		sb.WriteString(body)
+	}
+	if state.truncated {
+		sb.WriteString(forwardTruncatedMarker)
+	}
+	msg.Text = cleanText(sb.String())
+	if len(msg.Segments) == 0 && msg.Text != "" {
+		msg.Segments = []platform.MessageSegment{{Type: platform.SegmentText, Text: msg.Text}}
+	}
+	return msg
+}
+
+func writeForwardFallback(sb *strings.Builder, text string) {
+	if sb == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	if sb.Len() > 0 {
+		sb.WriteString("\n")
+	}
+	sb.WriteString(text)
 }
 
 func (a *Adapter) resolveAtSegments(ctx context.Context, event Event, msg NormalizedMessage) NormalizedMessage {
@@ -790,6 +958,25 @@ func scopeID(event Event) string {
 		return fmt.Sprintf("group:%d", event.GroupID)
 	}
 	return fmt.Sprintf("private:%d", event.UserID)
+}
+
+func eventScopeID(event Event) string {
+	if event.GroupID != 0 {
+		return fmt.Sprintf("group:%d", event.GroupID)
+	}
+	if event.UserID != 0 {
+		return fmt.Sprintf("private:%d", event.UserID)
+	}
+	return ""
+}
+
+func firstNonZero(values ...int64) int64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func sleepContext(ctx context.Context, d time.Duration) bool {

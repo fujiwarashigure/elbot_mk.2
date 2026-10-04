@@ -14,6 +14,9 @@ import (
 )
 
 func (a *Agent) CompactCurrent(ctx context.Context, triggerReason string) (string, error) {
+	if !a.historyEnabled(ctx) {
+		return "", fmt.Errorf("本群已关闭历史记录，不能压缩或生成新的会话摘要")
+	}
 	current, err := a.sessions.Current(ctx, a.scope(ctx))
 	if err != nil {
 		return "", err
@@ -24,6 +27,9 @@ func (a *Agent) CompactCurrent(ctx context.Context, triggerReason string) (strin
 
 func (a *Agent) compactSession(ctx context.Context, current *storage.Session, triggerReason string, fallback config.ModelSelection) (*storage.Session, string, error) {
 	selection := a.contextRuntime.compactSelection(fallback)
+	if err := a.authorizeExecutionModelSelection(ctx, selection); err != nil {
+		return nil, "", err
+	}
 	next, err := a.contextRuntime.compactSession(ctx, current, a.scope(ctx), triggerReason, selection)
 	if err != nil {
 		return nil, "", err
@@ -35,7 +41,7 @@ func (r *contextRuntimeState) compactSession(ctx context.Context, current *stora
 	if len(r.requests.ListBySession(current.ID)) > 0 {
 		return nil, fmt.Errorf("当前会话有正在运行的请求，无法压缩")
 	}
-	_, reqCtx, done, err := r.requests.Start(ctx, request.StartRequest{SessionID: current.ID, Kind: request.KindCompress, Label: "compact", Timeout: r.compressTimeout})
+	_, reqCtx, done, err := r.requests.Start(ctx, request.StartRequest{SessionID: current.ID, Kind: request.KindCompress, Label: "compact", ScopeKey: requestScopeKeyFromScope(scope), Timeout: r.compressTimeout})
 	if err != nil {
 		return nil, err
 	}

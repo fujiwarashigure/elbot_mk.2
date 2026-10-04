@@ -95,6 +95,19 @@ type ContextPolicyService interface {
 	ResetContextPolicy(ctx context.Context, target string) (string, error)
 }
 
+type GroupPolicyService interface {
+	GroupPolicyStatus(ctx context.Context) string
+	SetGroupPolicy(ctx context.Context, field, value string) (string, error)
+	ResetGroupPolicy(ctx context.Context, field string) (string, error)
+	// AuthorizeLearningAction gates one granular learning action for the
+	// current group. It is evaluated on every command, so revoking a grant or
+	// losing the group admin role takes effect immediately.
+	AuthorizeLearningAction(ctx context.Context, action string) bool
+	// GroupLearningEnabled reports whether the current group allows the
+	// self-learning feature. Non-group scopes keep the global behavior.
+	GroupLearningEnabled(ctx context.Context) bool
+}
+
 type ToolService interface {
 	List() []tool.Info
 	Unregister(name string) error
@@ -126,6 +139,7 @@ type Deps struct {
 	Compact       CompactService
 	ContextStatus ContextStatusService
 	ContextPolicy ContextPolicyService
+	GroupPolicy   GroupPolicyService
 	Tools         ToolService
 	Hooks         HookService
 	SessionState  *SessionCommandState
@@ -162,6 +176,7 @@ func DefaultModules() []Module {
 		SessionModule{},
 		CompactModule{},
 		ContextPolicyModule{},
+		GroupPolicyModule{},
 		RequestModule{},
 		LogModule{},
 		ToolModule{},

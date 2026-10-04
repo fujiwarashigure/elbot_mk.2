@@ -15,6 +15,7 @@ import (
 	"elbot/internal/llm"
 	"elbot/internal/platform"
 	"elbot/internal/redact"
+	"elbot/internal/storage"
 )
 
 type llmCallResult struct {
@@ -60,6 +61,14 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 	}
 	selection.Provider = event.LLM.Provider
 	selection.Model = event.LLM.Model
+	if err := a.authorizeExecutionModelSelection(ctx, selection); err != nil {
+		if pending != nil {
+			if persistErr := a.persistTurnMessage(ctx, &pending.message, "append_pending_user_message"); persistErr != nil {
+				err = errors.Join(err, persistErr)
+			}
+		}
+		return llmCallResult{}, fmt.Errorf("llm request hook: %w", err)
+	}
 	tools = event.LLM.Tools
 	requestOptions = mergeLLMRequestOptions(requestOptions, llmRequestOptionsFromPayload(event.LLM))
 	if pending != nil {
@@ -124,6 +133,16 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 	showReasoning := a.shouldShowCLIReasoning(ctx)
 	reasoningOpen := false
 
+	if err := a.checkChatBudget(ctx, selection); err != nil {
+		return llmCallResult{Messages: baseMessages, Stream: stream}, err
+	}
+	usageCallID := storage.NewID()
+	releaseProvider, err := a.acquireProviderSlot(ctx, selection.Provider)
+	if err != nil {
+		a.audit("provider_concurrency_rejected", "provider", selection.Provider, "error", err.Error())
+		return llmCallResult{Messages: baseMessages, Stream: stream}, err
+	}
+	defer releaseProvider()
 	ch, err := a.clientForProvider(selection.Provider).ChatStream(ctx, req)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -131,6 +150,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 		}
 		if shouldFallbackVision(requestMessages, err) && visionFallbackTransparent(assistant.Len(), len(toolCalls), reasoningOpen) && !visionFallbackAttempted(ctx) {
 			a.notifyVisionFallbackOnce(ctx, sessionID, out)
+			releaseProvider()
 			return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
 		}
 		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", redact.Error(err))
@@ -138,6 +158,10 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 		return llmCallResult{}, fmt.Errorf("chat: %w", err)
 	}
 	for chunk := range ch {
+		if !a.turnOutputAllowed(ctx) {
+			content := assistant.String()
+			return llmCallResult{Text: content, RawText: content, Usage: usage, ToolCalls: toolCalls, Messages: baseMessages, Stream: stream}, nil
+		}
 		if chunk.Error != nil {
 			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				content := assistant.String()
@@ -146,6 +170,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 			if shouldFallbackVision(requestMessages, chunk.Error) {
 				if visionFallbackTransparent(assistant.Len(), len(toolCalls), reasoningOpen) && !visionFallbackAttempted(ctx) {
 					a.notifyVisionFallbackOnce(ctx, sessionID, out)
+					releaseProvider()
 					return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
 				}
 				// The image rejection arrived after user-visible output, reasoning
@@ -178,10 +203,18 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 		delta := chunk.DeltaContent
 		assistant.WriteString(delta)
 		if stream != nil && delta != "" {
+			if !a.turnOutputAllowed(ctx) {
+				content := assistant.String()
+				return llmCallResult{Text: content, RawText: content, Usage: usage, ToolCalls: toolCalls, Messages: baseMessages, Stream: stream}, nil
+			}
 			if err := stream.Append(ctx, delta); err != nil {
 				return llmCallResult{}, fmt.Errorf("stream append: %w", err)
 			}
 		}
+	}
+	if !a.turnOutputAllowed(ctx) {
+		content := assistant.String()
+		return llmCallResult{Text: content, RawText: content, Usage: usage, ToolCalls: toolCalls, Messages: baseMessages, Stream: stream}, nil
 	}
 	if reasoningOpen {
 		out.SendReasoning(ctx, "[/thinking]\n\n")
@@ -207,14 +240,19 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 	usage = event.LLM.Usage
 	toolCalls = event.LLM.ToolCalls
 	finalText := event.LLM.Text
-	a.logLLMOutput(sessionID, selection, finalText, event.LLM.SourceText, len(toolCalls), elapsedMs)
+	a.logLLMOutput(ctx, sessionID, selection, finalText, event.LLM.SourceText, len(toolCalls), elapsedMs)
 
 	a.auditUsage(sessionID, selection, usage, elapsedMs)
+	a.recordChatUsage(ctx, selection.Model, usage, usageCallID)
 	return llmCallResult{Text: finalText, RawText: content, Usage: usage, ToolCalls: toolCalls, Outputs: event.Outputs, Messages: baseMessages, Stream: stream}, nil
 }
 
-func (a *Agent) logLLMOutput(sessionID string, selection config.ModelSelection, text, rawText string, toolCallCount int, elapsedMs int64) {
+func (a *Agent) logLLMOutput(ctx context.Context, sessionID string, selection config.ModelSelection, text, rawText string, toolCallCount int, elapsedMs int64) {
 	if a.logger == nil {
+		return
+	}
+	if !a.historyEnabled(ctx) {
+		a.logger.Info("llm output", "event", "assistant_message", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMs, "tool_call_count", toolCallCount, "history", "off")
 		return
 	}
 	a.logger.Info("llm output",

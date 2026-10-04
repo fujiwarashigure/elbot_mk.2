@@ -17,14 +17,14 @@
 
 services:
   elbot:
-    image: ${ELBOT_IMAGE:-elbot:0.6.7}
+    image: ${ELBOT_IMAGE:-elbot:0.6.8}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
       target: ${ELBOT_BUILD_TARGET:-runtime}   # runtime 或 go-runtime
       args:
         GO_VERSION: ${GO_VERSION:-1.26}
-        VERSION: ${ELBOT_VERSION:-0.6.7}
+        VERSION: ${ELBOT_VERSION:-0.6.8}
         # 基础镜像（可覆盖成国内加速路径 / pin digest）。默认值必须非空，
         # 否则 ${VAR:-} 展开成空串会把 FROM 变成 ":1.26-bookworm" 而直接报错。
         GO_BASE_IMAGE: ${GO_BASE_IMAGE:-golang}

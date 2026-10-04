@@ -231,6 +231,9 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		}
 		return nil, err
 	}
+	if foundation.HistoryPolicy != nil {
+		foundation.HistoryPolicy.Set(agt.GroupHistoryEnabledForScope)
+	}
 	cronService.SetRunner(agt)
 	if foundation.Maintenance != nil {
 		foundation.Maintenance.Report = func(ctx context.Context, text string) error {
@@ -442,53 +445,66 @@ func buildAgent(
 	if describer, ok := visionDescriber.(visionChatDescriber); ok {
 		visionMetrics.set("fallback", describer.service)
 	}
+	visionSelection := config.ModelSelection{}
+	if cfg.Vision.IsEnabled() {
+		visionSelection = config.ModelSelection{Provider: cfg.Vision.Provider, Model: cfg.Vision.Model}
+	}
+	groupAnalysisSelection := config.ModelSelection{}
+	if selection := cfg.DefaultModelSelection(); selection.Provider != "" && selection.Model != "" && models.ByProvider[selection.Provider] != nil {
+		groupAnalysisSelection = selection
+	}
 	agt, err := agent.NewWithOptions(agent.Options{
-		Platform:              platforms.Primary,
-		Clients:               models.ByProvider,
-		ModeModels:            cfg.ModeModels,
-		Providers:             cfg.Providers,
-		StatePath:             cfg.StateConfigPath,
-		ContextOverflow:       cfg.ContextOverflow,
-		Store:                 foundation.Store,
-		Media:                 toolRuntime.FileManager.Media,
-		VisionDescriber:       visionDescriber,
-		CommandPrefixes:       cfg.Commands.Prefixes,
-		SessionConfig:         session.Config{NamingConfig: session.NamingConfig{TriggerStep: cfg.Session.Naming.TriggerStep}, DefaultMode: cfg.Session.DefaultMode},
-		NamingSelection:       cfg.NamingModel,
-		NamingNotifier:        namingLogger{logger: foundation.Logger},
-		SoulPath:              cfg.Soul.Path,
-		ResidentMemoryStore:   toolRuntime.ResidentMemoryStore,
-		AngelMemory:           toolRuntime.AngelMemory,
-		SelfLearning:          toolRuntime.SelfLearning,
-		CharacterStore:        toolRuntime.CharacterStore,
-		LLMRequestConfig:      cfg.LLMRequest,
-		Ops:                   cfg.Ops,
-		HookService:           hookService,
-		HookManager:           hooks,
-		HookRuntime:           hookRuntime,
-		OutputManager:         delivery.NewManager(nil, foundation.Logger),
-		Logs:                  foundation.Logs,
-		ToolRegistry:          toolRuntime.Registry,
-		Skills:                toolRuntime.SkillManager,
-		SecurityPolicy:        securityPolicy,
-		ContextConfig:         cfg.Context,
-		ModelMetadata:         cfg.ModelMetadata,
-		CompactModel:          cfg.CompactModel,
-		SessionListPageSize:   cfg.View.SessionListPageSize,
-		CleanupRetentionDays:  cfg.Maintenance.SessionCleanup.RetentionDays,
-		MediaRetentionDays:    cfg.Maintenance.SandboxCleanup.RetentionDays,
-		SessionIdleExpiration: cfg.Session.IdleExpiration,
-		SandboxRoot:           cfg.Sandbox.Root,
-		ToolsConfig:           cfg.Tools,
-		ToolTagsPath:          cfg.ToolTagsConfigPath,
-		ToolTags:              cfg.ToolTags,
-		ModelProfiles:         modelProfiles,
-		ModelAliases:          modelAliases,
-		ToolProfiles:          toolProfiles,
-		ToolAliases:           toolAliases,
-		ImageProfiles:         imageProfiles,
-		ImageAliases:          imageAliases,
-		TurnDirectives:        cfg.TurnDirectives,
+		Platform:               platforms.Primary,
+		Clients:                models.ByProvider,
+		ModeModels:             cfg.ModeModels,
+		Providers:              cfg.Providers,
+		StatePath:              cfg.StateConfigPath,
+		ContextOverflow:        cfg.ContextOverflow,
+		GroupPolicy:            cfg.GroupPolicy,
+		Store:                  foundation.Store,
+		Media:                  toolRuntime.FileManager.Media,
+		VisionDescriber:        visionDescriber,
+		VisionSelection:        visionSelection,
+		GroupAnalysisSelection: groupAnalysisSelection,
+		CommandPrefixes:        cfg.Commands.Prefixes,
+		SessionConfig:          session.Config{NamingConfig: session.NamingConfig{TriggerStep: cfg.Session.Naming.TriggerStep}, DefaultMode: cfg.Session.DefaultMode},
+		NamingSelection:        cfg.NamingModel,
+		NamingNotifier:         namingLogger{logger: foundation.Logger},
+		SoulPath:               cfg.Soul.Path,
+		ResidentMemoryStore:    toolRuntime.ResidentMemoryStore,
+		AngelMemory:            toolRuntime.AngelMemory,
+		SelfLearning:           toolRuntime.SelfLearning,
+		CharacterStore:         toolRuntime.CharacterStore,
+		LLMRequestConfig:       cfg.LLMRequest,
+		Ops:                    cfg.Ops,
+		BudgetLimits:           cfg.BudgetLimits,
+		Pricing:                cfg.Maintenance.DailyReport,
+		HookService:            hookService,
+		HookManager:            hooks,
+		HookRuntime:            hookRuntime,
+		OutputManager:          delivery.NewManager(nil, foundation.Logger),
+		Logs:                   foundation.Logs,
+		ToolRegistry:           toolRuntime.Registry,
+		Skills:                 toolRuntime.SkillManager,
+		SecurityPolicy:         securityPolicy,
+		ContextConfig:          cfg.Context,
+		ModelMetadata:          cfg.ModelMetadata,
+		CompactModel:           cfg.CompactModel,
+		SessionListPageSize:    cfg.View.SessionListPageSize,
+		CleanupRetentionDays:   cfg.Maintenance.SessionCleanup.RetentionDays,
+		MediaRetentionDays:     cfg.Maintenance.SandboxCleanup.RetentionDays,
+		SessionIdleExpiration:  cfg.Session.IdleExpiration,
+		SandboxRoot:            cfg.Sandbox.Root,
+		ToolsConfig:            cfg.Tools,
+		ToolTagsPath:           cfg.ToolTagsConfigPath,
+		ToolTags:               cfg.ToolTags,
+		ModelProfiles:          modelProfiles,
+		ModelAliases:           modelAliases,
+		ToolProfiles:           toolProfiles,
+		ToolAliases:            toolAliases,
+		ImageProfiles:          imageProfiles,
+		ImageAliases:           imageAliases,
+		TurnDirectives:         cfg.TurnDirectives,
 	})
 	if err != nil {
 		return nil, err

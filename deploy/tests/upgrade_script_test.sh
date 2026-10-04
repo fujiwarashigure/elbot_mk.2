@@ -60,7 +60,7 @@ case "${1:-}" in
         ;;
     checkout)
         case "$*" in
-            *" v0.6.7"*) printf '0.6.7
+            *" v0.6.8"*) printf '0.6.8
 ' >"${FAKE_DEPLOY}/VERSION" ;;
         esac
         exit 0
@@ -161,11 +161,11 @@ if ! grep -q 'run .*config check' "${DOCKER_LOG}"; then
 fi
 
 echo "== case 3: GIT_REF alone resolves target version after checkout =="
-if ! run_upgrade "git-ref-only" ELBOT_GIT_REF=v0.6.7 ELBOT_VERSION=; then
+if ! run_upgrade "git-ref-only" ELBOT_GIT_REF=v0.6.8 ELBOT_VERSION=; then
     fail=1
 fi
-if ! grep -q '源码版本 0.6.7' "${TMP}/git-ref-only.log"; then
-    echo "FAIL: 未在切换源码后解析出 0.6.7 目标版本"
+if ! grep -q '源码版本 0.6.8' "${TMP}/git-ref-only.log"; then
+    echo "FAIL: 未在切换源码后解析出 0.6.8 目标版本"
     fail=1
 fi
 

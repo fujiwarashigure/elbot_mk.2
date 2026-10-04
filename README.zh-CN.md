@@ -120,7 +120,17 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 ## 本地定制版：相对原版 v0.5.0 的新增功能
 
-当前定制版版本：`0.6.7`。
+当前定制版版本：`0.6.8`。
+
+### v0.6.8 版本亮点
+
+- 群级权限与策略执行闭环：工具白名单默认拒绝、模型别名解析后再授权、learning 审核动作细分、撤权/排队后重新检查。
+- `history=off` / `learning=off` 覆盖完整生命周期：停止新增写入、停止注入已有知识，但当前轮仍正常处理，旧记录不自动删除。
+- 四维额度账本：群 / 群内单用户 / 全局 / 全局单用户，生图、视觉、chat token 与费用分别计量；工具执行幂等和 provider 重试单独记账，重启不丢。
+- 撤回与取消增加晚到输出闸门：流式输出、工具结果和最终发送前都会检查 turn 终止状态。
+- 实际执行模型统一授权：聊天、压缩、视觉 fallback、群分析摘要都在调用 provider 前按群模型目录重新校验。
+- 请求队列增加每用户/每群上限、队满/超时/取消/等待时间指标；provider 级并发限制避免把瞬时压力透传给上游。
+- OneBot 合并转发在 websocket 读取阶段限制体积，转发内容始终作为不可信用户数据处理。
 
 本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
 
@@ -574,15 +584,15 @@ docker compose up -d
 ```bash
 bash deploy/pack/prepare-offline.sh
 # 或使用已下载产物
-docker load -i elbot-0.6.7-linux-amd64.tar.gz
+docker load -i elbot-0.6.8-linux-amd64.tar.gz
 ```
 
 多架构构建：
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/Dockerfile --build-arg VERSION=0.6.7 \
-  --push -t <registry>/<namespace>/elbot:0.6.7 .
+  -f deploy/Dockerfile --build-arg VERSION=0.6.8 \
+  --push -t <registry>/<namespace>/elbot:0.6.8 .
 ```
 
 构建参数：

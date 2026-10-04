@@ -34,10 +34,16 @@ func (o foregroundTurnOutput) StartStream(ctx context.Context) delivery.MessageS
 }
 
 func (o foregroundTurnOutput) FinishIntermediate(ctx context.Context, streamCtx context.Context, stream delivery.MessageStream, text string, streaming bool) error {
+	if !o.agent.turnOutputAllowed(streamCtx) {
+		return nil
+	}
 	return o.agent.finishIntermediateOutput(ctx, streamCtx, stream, text, streaming)
 }
 
 func (o foregroundTurnOutput) ReplaceAndFinishStream(ctx context.Context, streamCtx context.Context, stream delivery.MessageStream, text string) (delivery.Receipt, error) {
+	if !o.agent.turnOutputAllowed(streamCtx) {
+		return delivery.Receipt{}, nil
+	}
 	return o.agent.replaceAndFinishStream(ctx, streamCtx, stream, text)
 }
 

@@ -97,7 +97,14 @@ rg -n "ELBOT_OPS_TOKEN|WATCHDOG_OPS_TOKEN|restore-verify|fallback_mode|doctor|up
 - `internal/agent/reference.go`：只读提供当前 Session ID，供平台引用续聊/fork 判定。
 - `internal/agent/media_output.go`：发送前归一、发送副本解析与有序媒体回执缓存。
 - `internal/agent/options.go`、`logging.go`、`identity.go`：运行配置、日志和 Actor/Scope 解析。
-- `internal/agent/chat.go`：普通对话主流程。
+- `internal/agent/chat.go`：普通对话主流程；群级默认模型只在本轮没有显式 `@model:` 覆盖时生效。
+- `internal/agent/group_policy.go`：群级策略解析、唤醒/静默判断、模型目录、learning 审核动作授权；策略保存在 `state.toml` 的 `group_policy`。
+- `internal/agent/model_policy.go`：实际执行模型目标的最后一道目录校验，覆盖 turn hook、cron override、压缩、视觉 fallback 和 group_analysis 摘要。
+- `internal/agent/tool_auth.go`：群工具白名单统一授权入口与执行前复核；展开工具 profile，区分“继承全局”和“禁止全部”。
+- `internal/agent/budget.go`：群 / 单用户 / 全局每日账本；生图/视觉调用预占、chat token/费用、provider 重试、工具执行幂等分别写入 `budget`；账本落盘失败时回滚并拒绝受限调用。
+- `internal/historygate/`：统一历史写入门；适配器的 `chat_history` / `outbound_messages` 写入按可信 `平台 + scope` 策略过滤，`history=off` 不删除旧记录但停止新增。
+- `internal/agent/turn_gate.go`：turn 终止状态和晚到输出闸门；流式 flush、工具结果回传和最终发送前检查。
+- `internal/agent/events.go`：notice/request/meta_event 的确定性处理；撤回按消息 ID → turn request 精确取消，成员退群/禁用按 FairKey 定向取消，不调用 LLM。
 - `internal/agent/chat_llm.go`：LLM 调用和消息转换。
 - `internal/agent/chat_tools.go`：工具执行与确认。
 - `internal/agent/turn_output.go`：turn 输出适配。
@@ -121,7 +128,8 @@ rg -n "Handle|Run|Prompt|tool_calls|reasoning|usage|pending|prepared" internal/a
 - `internal/agent/commands/`：内置命令实现。
 - `internal/agent/commands/register.go`：命令模块注册入口。
 - `internal/agent/commands/session_*.go`：按模式、核心、导航、生命周期和格式化拆分的 Session 命令；共享状态由 `SessionCommandState` 按 Scope 隔离。
-- `internal/command/`：通用命令框架和 Router。
+- `internal/agent/commands/group_policy.go`：`/grouppolicy` 群级策略命令；修改入口只接受当前群，`learning-moderation` 额外要求机器人超级管理员。
+- `internal/command/`：通用命令框架和 Router；`Info.GroupAdminNeedsGrant` 用于把群管理员访问绑定到服务端群级授权。
 - `internal/completion/`：平台补全服务。
 - `docs/commands.md`：用户侧命令文档。
 
@@ -138,7 +146,7 @@ rg -n "Register|Info\{|Help:|Complete|Alias|/requests|/model" internal/agent/com
 
 先看：
 
-- `internal/request/`
+- `internal/request/`：并发限制、有界等待队列、全局及每用户/每 scope 队列上限、按 `FairKey` 的公平调度和 `CancelFairKey` 定向取消；`Snapshot` 提供排队长度、平均/最老等待和队满/超时/取消拒绝指标。
 - `internal/turn/`
 - `internal/runtime/`
 - `internal/agent/status.go`：Agent runtime status 发布。
@@ -161,7 +169,7 @@ rg -n "Phase|Request|Cancel|pending|confirm|runtime status|sending" internal/req
 - `internal/tool/`：Tool Runtime 核心类型、builder、discover、executor、sandbox/workspace helper。
 - `internal/tool/media_runtime.go`：shell/Skill 的显式媒体准备、调用期引用、sandbox 导出缓存与受控结果导入；缓存复用刷新 ModTime，沿用既有 sandbox 清理。
 - `internal/tool/runtimeinfo/`：工具运行期常用信息入口，如配置路径、sandbox、文件发送配置、时间源和规则卡转发。
-- `internal/toolrun/`：工具调用中间层、工具视图、命名解析、风险确认，以及实际执行前的 Session 工具参数媒体引用。
+- `internal/toolrun/`：工具调用中间层、工具视图、命名解析、风险确认、执行前 Session 工具参数媒体引用，以及排队后的授权/额度二次校验钩子。
 - `internal/tool/builtin/`：内置工具。
 - `internal/tool/builtin/group_analysis.go`：`group_analysis` 工具，读取本地历史并输出群统计，可选 LLM 摘要。
 - `internal/tool/builtin/angel_memory.go`：`angel_remember` / `angel_recall` 工具。
@@ -195,7 +203,7 @@ rg -n "discover_tool|NewBuilder|Risk|Confirm|ToolRun|Result\{|Outputs|workspace|
 先看：
 
 - `internal/agent/chat_tools.go`：Agent 工具执行主入口。
-- `internal/toolrun/`：执行前解析、过滤、确认和预览。
+- `internal/toolrun/`：执行前解析、过滤、确认、排队后授权复核、额度预占和预览。
 - `internal/tool/executor.go`：Tool Runtime 执行适配。
 - `internal/tool/tool.go`：Tool 核心类型。
 - `internal/agent/tool_transcript.go`：tool message/transcript 落库。
@@ -280,8 +288,9 @@ rg -n "Output|SendChat|SendNotice|Stream|Reasoning|emoticon|receipt" internal/de
 
 先看：
 
-- `internal/platform/platform.go`：平台抽象，以及可选的群历史/群目录/头像/群素材能力接口。
+- `internal/platform/platform.go`：平台抽象，以及可选的群历史/群目录/头像/群素材能力接口；`PlatformEventHandler` 提供 notice/request/meta_event 的非消息事件入口。
 - `internal/platform/qq-onebot/capabilities.go`：OneBot 可选群历史、群信息、成员列表和头像 URL 能力。
+- `internal/platform/qq-onebot/message.go`：入站文本保留原始空白，并生成不含转发内容的唤醒匹配视图；按共享总预算展开 `forward`/`node` 合并转发。`adapter.go` 的 `readLoop` 分发 notice/request/meta_event，并限制 `get_forward_msg` 拉取次数、超时、返回体和拉取失败降级。
 - `internal/platform/telegram/capabilities.go`：Telegram 可选群信息和管理员列表能力；历史与全量成员回退本地历史。
 - `internal/platform/media.go`：Chat History 原始有序 segments 编解码与敏感来源清洗。
 - `internal/platform/refcontext/`：按输出索引、Chat History、平台兜底恢复引用；自己 Session 的最后一条 assistant 自动 Resume，较早 assistant 自动 Fork。

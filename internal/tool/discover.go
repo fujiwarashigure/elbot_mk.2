@@ -16,6 +16,29 @@ type discoverTool struct {
 	beforeDiscover func(context.Context) error
 }
 
+// DiscoverFilter lets the Agent hide tools that are visible to the actor's
+// security policy but not allowed by the current group scope. It is context
+// scoped so the tool package stays independent from Agent policy.
+type DiscoverFilter func(ctx context.Context, info Info) bool
+
+type discoverFilterKey struct{}
+
+// WithDiscoverFilter attaches a group/scope visibility filter to ctx.
+func WithDiscoverFilter(ctx context.Context, filter DiscoverFilter) context.Context {
+	if filter == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, discoverFilterKey{}, filter)
+}
+
+func discoverFilterAllowed(ctx context.Context, info Info) bool {
+	filter, _ := ctx.Value(discoverFilterKey{}).(DiscoverFilter)
+	if filter == nil {
+		return true
+	}
+	return filter(ctx, info)
+}
+
 type discoverArgs struct {
 	Name  string   `json:"name"`
 	Names []string `json:"names"`
@@ -75,7 +98,7 @@ func (t discoverTool) Call(ctx context.Context, req CallRequest) (*Result, error
 		infos := t.registry.List()
 		out := make([]DiscoveredTool, 0, len(infos))
 		for _, info := range infos {
-			if !info.Hidden && InfoAvailableInContext(ctx, info) && (CanAccessTool(actor, policy, info) || info.Name == "discover_tool") {
+			if !info.Hidden && InfoAvailableInContext(ctx, info) && (CanAccessTool(actor, policy, info) || info.Name == "discover_tool") && discoverFilterAllowed(ctx, info) {
 				out = append(out, DiscoveredTool{Info: publicInfo(info)})
 			}
 		}
@@ -83,11 +106,11 @@ func (t discoverTool) Call(ctx context.Context, req CallRequest) (*Result, error
 	} else {
 		names = expandDiscoveryTagNames(t.registry, names, func(candidate Tool) bool {
 			info := candidate.Info()
-			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info)
+			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info) && discoverFilterAllowed(ctx, info)
 		})
 		details, errors := t.registry.DiscoverDetails(names, func(candidate Tool) bool {
 			info := candidate.Info()
-			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info)
+			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info) && discoverFilterAllowed(ctx, info)
 		})
 		for _, discovered := range details {
 			if discovered.Detail == "" {

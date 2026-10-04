@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -27,6 +28,7 @@ type Config struct {
 	Storage             StorageConfig                    `toml:"storage"`
 	Runtime             RuntimeConfig                    `toml:"runtime"`
 	Ops                 OpsConfig                        `toml:"ops"`
+	BudgetLimits        BudgetLimitsConfig               `toml:"budget_limits"`
 	Context             ContextConfig                    `toml:"context"`
 	Commands            CommandsConfig                   `toml:"commands"`
 	Tools               ToolsConfig                      `toml:"tools"`
@@ -55,6 +57,7 @@ type Config struct {
 	TurnDirectives      TurnDirectivesConfig             `toml:"turn_directives"`
 	ToolTags            ToolTagsConfig                   `toml:"-"`
 	ContextOverflow     map[string]ContextOverflowConfig `toml:"-"`
+	GroupPolicy         map[string]GroupPolicyConfig     `toml:"-"`
 	ConfigPath          string                           `toml:"-"`
 	ProvidersConfigPath string                           `toml:"-"`
 	ServicesConfigPath  string                           `toml:"-"`
@@ -228,14 +231,65 @@ type OpsConfig struct {
 	GroupBurst              int      `toml:"group_burst"`
 	RateLimitIdleTTLSeconds int      `toml:"rate_limit_idle_ttl_seconds"`
 	QueueMaxSize            int      `toml:"queue_max_size"`
+	QueueMaxPerUser         int      `toml:"queue_max_per_user"`
+	QueueMaxPerScope        int      `toml:"queue_max_per_scope"`
 	QueueWaitTimeoutSeconds int      `toml:"queue_wait_timeout_seconds"`
 	QueueWaitKinds          []string `toml:"queue_wait_kinds"`
+	ProviderMaxConcurrent   int      `toml:"provider_max_concurrent"`
+	ProviderQueueMaxSize    int      `toml:"provider_queue_max_size"`
+	ProviderWaitTimeoutSecs int      `toml:"provider_wait_timeout_seconds"`
 
 	// Provider 熔断（对应 default config 里 [ops] 的 circuit_breaker_* 键）：
 	// 连续失败达到阈值后打开，冷却后放少量半开探测；0 表示关闭。
 	CircuitBreakerFailureThreshold    int `toml:"circuit_breaker_failure_threshold"`
 	CircuitBreakerOpenCooldownSeconds int `toml:"circuit_breaker_open_cooldown_seconds"`
 	CircuitBreakerHalfOpenMax         int `toml:"circuit_breaker_half_open_max"`
+}
+
+// BudgetLimitsConfig controls daily platform/group/user budgets. Zero means
+// unlimited. Image and vision limits count successful local reservations;
+// chat token/cost limits are checked before each paid LLM call and recorded
+// after the provider returns usage. Cost is in the currency configured by
+// [maintenance.daily_report].currency and stored in micro-units.
+type BudgetLimitsConfig struct {
+	GlobalImageDaily      int     `toml:"global_image_daily"`
+	UserImageDaily        int     `toml:"user_image_daily"`
+	GlobalVisionDaily     int     `toml:"global_vision_daily"`
+	UserVisionDaily       int     `toml:"user_vision_daily"`
+	GlobalChatTokensDaily int64   `toml:"global_chat_tokens_daily"`
+	UserChatTokensDaily   int64   `toml:"user_chat_tokens_daily"`
+	GlobalChatCostDaily   float64 `toml:"global_chat_cost_daily"`
+	UserChatCostDaily     float64 `toml:"user_chat_cost_daily"`
+}
+
+// Normalized clamps negative limits to zero (unlimited).
+func (c BudgetLimitsConfig) Normalized() BudgetLimitsConfig {
+	out := c
+	if out.GlobalImageDaily < 0 {
+		out.GlobalImageDaily = 0
+	}
+	if out.UserImageDaily < 0 {
+		out.UserImageDaily = 0
+	}
+	if out.GlobalVisionDaily < 0 {
+		out.GlobalVisionDaily = 0
+	}
+	if out.UserVisionDaily < 0 {
+		out.UserVisionDaily = 0
+	}
+	if out.GlobalChatTokensDaily < 0 {
+		out.GlobalChatTokensDaily = 0
+	}
+	if out.UserChatTokensDaily < 0 {
+		out.UserChatTokensDaily = 0
+	}
+	if out.GlobalChatCostDaily < 0 {
+		out.GlobalChatCostDaily = 0
+	}
+	if out.UserChatCostDaily < 0 {
+		out.UserChatCostDaily = 0
+	}
+	return out
 }
 
 type ContextConfig struct {
@@ -770,6 +824,83 @@ type ModelPriceConfig struct {
 	OffpeakCacheInputPerMillion float64 `toml:"offpeak_cache_input_per_million"`
 }
 
+var shanghaiLocation = func() *time.Location {
+	if location, err := time.LoadLocation("Asia/Shanghai"); err == nil {
+		return location
+	}
+	return time.FixedZone("CST", 8*3600)
+}()
+
+// PriceFor returns the effective price tier for model at at, applying the
+// configured peak/off-peak rule. It is shared by the scheduled report and the
+// live chat budget ledger so both bill against the same table.
+func (c DailyReportConfig) PriceFor(model string, at time.Time) (ModelPriceConfig, bool) {
+	price, ok := c.Prices[model]
+	if !ok {
+		return ModelPriceConfig{}, false
+	}
+	if !c.IsPeakPricing() || !isOffPeak(at, c.Holidays) {
+		return price, true
+	}
+	return offpeakPrice(price), true
+}
+
+// ComputeCost returns the cost in the configured currency for one usage row.
+func (p ModelPriceConfig) ComputeCost(promptTokens, completionTokens, cacheHitTokens int64) float64 {
+	cacheHit := cacheHitTokens
+	if cacheHit > promptTokens {
+		cacheHit = promptTokens
+	}
+	if cacheHit < 0 {
+		cacheHit = 0
+	}
+	cacheMiss := promptTokens - cacheHit
+	if cacheMiss < 0 {
+		cacheMiss = 0
+	}
+	cachePrice := p.CacheInputPerMillion
+	if cachePrice <= 0 {
+		cachePrice = p.InputPerMillion
+	}
+	return float64(cacheMiss)/1_000_000*p.InputPerMillion +
+		float64(cacheHit)/1_000_000*cachePrice +
+		float64(completionTokens)/1_000_000*p.OutputPerMillion
+}
+
+func offpeakPrice(price ModelPriceConfig) ModelPriceConfig {
+	out := price
+	if price.OffpeakInputPerMillion > 0 {
+		out.InputPerMillion = price.OffpeakInputPerMillion
+	}
+	if price.OffpeakCacheInputPerMillion > 0 {
+		out.CacheInputPerMillion = price.OffpeakCacheInputPerMillion
+	}
+	if price.OffpeakOutputPerMillion > 0 {
+		out.OutputPerMillion = price.OffpeakOutputPerMillion
+	}
+	return out
+}
+
+func isOffPeak(at time.Time, holidays []string) bool {
+	if at.IsZero() {
+		return false
+	}
+	local := at.In(shanghaiLocation)
+	day := local.Format("2006-01-02")
+	for _, holiday := range holidays {
+		if strings.TrimSpace(holiday) == day {
+			return true
+		}
+	}
+	switch local.Weekday() {
+	case time.Saturday, time.Sunday:
+		return true
+	}
+	minutes := local.Hour()*60 + local.Minute()
+	peak := (minutes >= 9*60 && minutes < 12*60) || (minutes >= 14*60 && minutes < 18*60)
+	return !peak
+}
+
 type SandboxConfig struct {
 	Root string `toml:"root"`
 }
@@ -1112,11 +1243,221 @@ type StateConfig struct {
 	NamingModel     ModelSelection                   `toml:"naming_model"`
 	CompactModel    ModelSelection                   `toml:"compact_model"`
 	ContextOverflow map[string]ContextOverflowConfig `toml:"context_overflow,omitempty"`
+	GroupPolicy     map[string]GroupPolicyConfig     `toml:"group_policy,omitempty"`
+	Budget          StateBudgetConfig                `toml:"budget,omitempty"`
 }
 
 type ContextOverflowConfig struct {
 	Chat string `toml:"chat,omitempty"`
 	Work string `toml:"work,omitempty"`
+}
+
+// StateBudgetConfig stores the daily metering ledger. Reservations are keyed by
+// date/kind/scope/actor/call-id, so replayed tool call IDs do not double count.
+// Values are Unix timestamps and are pruned to the current and previous day.
+type StateBudgetConfig struct {
+	Reservations map[string]int64  `toml:"reservations,omitempty"`
+	Digests      map[string]string `toml:"digests,omitempty"`
+	Tokens       map[string]int64  `toml:"tokens,omitempty"`
+	Costs        map[string]int64  `toml:"costs,omitempty"`
+	Retries      map[string]int64  `toml:"retries,omitempty"`
+	Executions   map[string]string `toml:"executions,omitempty"`
+}
+
+// GroupPolicyConfig is the per-group interaction and authorization policy. It
+// is intentionally a local/server-side policy: prompts and roles never decide
+// whether a group admin may change a setting or run a management command.
+type GroupPolicyConfig struct {
+	// WakeKeywords are additive to the platform-level trigger_keywords.
+	WakeKeywords []string `toml:"wake_keywords,omitempty"`
+	// ResponseMode controls when an ordinary group message wakes the LLM:
+	// mention (default), all, keyword, reply or off.
+	ResponseMode string `toml:"response_mode,omitempty"`
+	// DefaultMode is the session mode used for newly created sessions in this
+	// group (work or chat). Empty inherits the global default.
+	DefaultMode string `toml:"default_mode,omitempty"`
+	// DefaultModel is an optional model alias for this group. When
+	// AllowedModels is non-empty the resolved selection must appear there.
+	DefaultModel string `toml:"default_model,omitempty"`
+	// AllowedModels is a superadmin-managed catalog for this group. Empty means
+	// "only configured model aliases/profiles"; a non-empty list additionally
+	// allows exact provider/model entries listed in it. The literal "*" keeps
+	// the profile catalog open but still rejects unconfigured providers.
+	AllowedModels []string `toml:"allowed_models,omitempty"`
+	// ToolAllowlist restricts tool names for this group. ToolAllowlistSet
+	// distinguishes "inherit global tools" (false) from "deny all group tools"
+	// (true with an empty list).
+	ToolAllowlist    []string `toml:"tool_allowlist,omitempty"`
+	ToolAllowlistSet bool     `toml:"tool_allowlist_set,omitempty"`
+	// ImageQuota and VisionQuota are daily per-group call budgets. 0 means no
+	// local limit. UserImageQuota/UserVisionQuota additionally cap one actor
+	// inside this group.
+	ImageQuota      int `toml:"image_quota,omitempty"`
+	VisionQuota     int `toml:"vision_quota,omitempty"`
+	UserImageQuota  int `toml:"user_image_quota,omitempty"`
+	UserVisionQuota int `toml:"user_vision_quota,omitempty"`
+	// ChatTokensQuota and ChatCostQuota cap one group's daily paid chat
+	// usage. Cost is in [maintenance.daily_report].currency and stored in
+	// micro-units. 0 means no local group limit.
+	ChatTokensQuota int64   `toml:"chat_tokens_quota,omitempty"`
+	ChatCostQuota   float64 `toml:"chat_cost_quota,omitempty"`
+	// QuietHours is an optional local-time window such as "23:00-07:30".
+	QuietHours string `toml:"quiet_hours,omitempty"`
+	// Feature switches. nil means enabled (preserves existing behavior).
+	GroupAnalysis *bool `toml:"group_analysis,omitempty"`
+	Learning      *bool `toml:"learning,omitempty"`
+	History       *bool `toml:"history,omitempty"`
+	// LearningModeration grants the current group owner/admin permission to
+	// review this group's learning candidates. Only a superadmin may set it.
+	LearningModeration bool `toml:"learning_moderation,omitempty"`
+	// LearningModerationActions narrows what the grant allows. Empty means the
+	// safe default "view,decide". Only a superadmin may set it.
+	LearningModerationActions []string `toml:"learning_moderation_actions,omitempty"`
+}
+
+// Normalize fills defaults and removes unsafe/empty values.
+const (
+	LearningModerationView   = "view"
+	LearningModerationDecide = "decide"
+	LearningModerationMine   = "mine"
+	LearningModerationDelete = "delete"
+	LearningModerationExport = "export"
+	LearningModerationPolicy = "policy"
+)
+
+var allowedLearningModerationActions = map[string]bool{
+	LearningModerationView:   true,
+	LearningModerationDecide: true,
+	LearningModerationMine:   true,
+	LearningModerationDelete: true,
+	LearningModerationExport: true,
+	LearningModerationPolicy: true,
+}
+
+// Normalize fills defaults and removes unsafe/empty values.
+func (c GroupPolicyConfig) Normalize() GroupPolicyConfig {
+	out := c
+	out.WakeKeywords = normalizeStringList(c.WakeKeywords)
+	out.AllowedModels = normalizeStringList(c.AllowedModels)
+	out.ToolAllowlist = normalizeStringList(c.ToolAllowlist)
+	if c.ToolAllowlist != nil || len(out.ToolAllowlist) > 0 {
+		out.ToolAllowlistSet = true
+	}
+	out.LearningModerationActions = normalizeLearningModerationActions(c.LearningModerationActions)
+	if len(out.LearningModerationActions) == 0 && out.LearningModeration {
+		out.LearningModerationActions = []string{LearningModerationView, LearningModerationDecide}
+	}
+	switch strings.ToLower(strings.TrimSpace(c.ResponseMode)) {
+	case "all":
+		out.ResponseMode = "all"
+	case "keyword", "keywords":
+		out.ResponseMode = "keyword"
+	case "reply", "replies":
+		out.ResponseMode = "reply"
+	case "off", "none", "disabled":
+		out.ResponseMode = "off"
+	default:
+		out.ResponseMode = "mention"
+	}
+	switch strings.ToLower(strings.TrimSpace(c.DefaultMode)) {
+	case "chat":
+		out.DefaultMode = "chat"
+	case "work":
+		out.DefaultMode = "work"
+	default:
+		out.DefaultMode = ""
+	}
+	out.DefaultModel = strings.TrimSpace(c.DefaultModel)
+	out.QuietHours = strings.TrimSpace(c.QuietHours)
+	if out.ImageQuota < 0 {
+		out.ImageQuota = 0
+	}
+	if out.VisionQuota < 0 {
+		out.VisionQuota = 0
+	}
+	if out.UserImageQuota < 0 {
+		out.UserImageQuota = 0
+	}
+	if out.UserVisionQuota < 0 {
+		out.UserVisionQuota = 0
+	}
+	if out.ChatTokensQuota < 0 {
+		out.ChatTokensQuota = 0
+	}
+	if out.ChatCostQuota < 0 {
+		out.ChatCostQuota = 0
+	}
+	return out
+}
+
+func (c GroupPolicyConfig) ResponseModeValue() string {
+	return c.Normalize().ResponseMode
+}
+
+func (c GroupPolicyConfig) WakeKeywordsValue() []string {
+	return c.Normalize().WakeKeywords
+}
+
+func (c GroupPolicyConfig) IsGroupAnalysisEnabled() bool {
+	return c.GroupAnalysis == nil || *c.GroupAnalysis
+}
+
+func (c GroupPolicyConfig) IsLearningEnabled() bool {
+	return c.Learning == nil || *c.Learning
+}
+
+func (c GroupPolicyConfig) IsHistoryEnabled() bool {
+	return c.History == nil || *c.History
+}
+
+func (c GroupPolicyConfig) IsZero() bool {
+	n := c.Normalize()
+	return len(n.WakeKeywords) == 0 && n.ResponseMode == "mention" && n.DefaultMode == "" && n.DefaultModel == "" && len(n.AllowedModels) == 0 && len(n.ToolAllowlist) == 0 && !n.ToolAllowlistSet && n.ImageQuota == 0 && n.VisionQuota == 0 && n.UserImageQuota == 0 && n.UserVisionQuota == 0 && n.ChatTokensQuota == 0 && n.ChatCostQuota == 0 && n.QuietHours == "" && c.GroupAnalysis == nil && c.Learning == nil && c.History == nil && !c.LearningModeration && len(n.LearningModerationActions) == 0
+}
+
+// ToolAllowlistRestricted reports whether a group has an explicit tool policy.
+// A restricted policy with an empty list denies all group tools.
+func (c GroupPolicyConfig) ToolAllowlistRestricted() bool {
+	n := c.Normalize()
+	return n.ToolAllowlistSet || len(n.ToolAllowlist) > 0
+}
+
+// LearningModerationActionsValue returns the effective actions for a granted
+// group admin. It defaults to view+decide for old state files.
+func (c GroupPolicyConfig) LearningModerationActionsValue() []string {
+	n := c.Normalize()
+	if len(n.LearningModerationActions) == 0 && n.LearningModeration {
+		return []string{LearningModerationView, LearningModerationDecide}
+	}
+	return append([]string(nil), n.LearningModerationActions...)
+}
+
+func normalizeLearningModerationActions(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if !allowedLearningModerationActions[value] || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func normalizeStringList(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 type StateSessionConfig struct {
@@ -1126,6 +1467,15 @@ type StateSessionConfig struct {
 func LoadState(path string) (*StateConfig, error) {
 	state := &StateConfig{}
 	if err := loadTOML(path, state); err != nil {
+		// SaveState replaces an existing state file through a backup swap. If
+		// the process crashed after moving the old file aside but before the
+		// new one was renamed into place, recover the last complete version.
+		if errors.Is(err, os.ErrNotExist) {
+			backup := path + ".bak"
+			if backupErr := loadTOML(backup, state); backupErr == nil {
+				return state, nil
+			}
+		}
 		return nil, err
 	}
 	return state, nil
@@ -1136,11 +1486,58 @@ func SaveState(path string, state StateConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal state config: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create state config dir %q: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create state config dir %q: %w", dir, err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write state config %q: %w", path, err)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temporary state config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary state config %q: %w", tmpName, err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temporary state config %q: %w", tmpName, err)
+	}
+	// Flush file contents before the name switch. Without this a crash can
+	// leave a zero-length or partially written state file even though rename
+	// itself succeeded.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temporary state config %q: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary state config %q: %w", tmpName, err)
+	}
+
+	// Use a backup swap instead of falling back to os.WriteFile on platforms
+	// where os.Rename cannot replace an existing file (notably Windows). The
+	// old version stays intact until the new file is fully durable, so a
+	// failed write never silently rolls the ledger back to zero.
+	backup := path + ".bak"
+	hadOriginal := false
+	if _, statErr := os.Stat(path); statErr == nil {
+		hadOriginal = true
+		_ = os.Remove(backup)
+		if err := os.Rename(path, backup); err != nil {
+			return fmt.Errorf("move state config to backup %q: %w", backup, err)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat state config %q: %w", path, statErr)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		if hadOriginal {
+			_ = os.Rename(backup, path)
+		}
+		return fmt.Errorf("replace state config %q: %w", path, err)
+	}
+	if hadOriginal {
+		_ = os.Remove(backup)
 	}
 	return nil
 }
@@ -1420,9 +1817,25 @@ func (c *Config) applyAppDefaults() {
 	if c.Ops.QueueMaxSize < 0 {
 		c.Ops.QueueMaxSize = 0
 	}
+	if c.Ops.QueueMaxPerUser < 0 {
+		c.Ops.QueueMaxPerUser = 0
+	}
+	if c.Ops.QueueMaxPerScope < 0 {
+		c.Ops.QueueMaxPerScope = 0
+	}
 	if c.Ops.QueueWaitTimeoutSeconds < 0 {
 		c.Ops.QueueWaitTimeoutSeconds = 0
 	}
+	if c.Ops.ProviderMaxConcurrent < 0 {
+		c.Ops.ProviderMaxConcurrent = 0
+	}
+	if c.Ops.ProviderQueueMaxSize < 0 {
+		c.Ops.ProviderQueueMaxSize = 0
+	}
+	if c.Ops.ProviderWaitTimeoutSecs < 0 {
+		c.Ops.ProviderWaitTimeoutSecs = 0
+	}
+	c.BudgetLimits = c.BudgetLimits.Normalized()
 	if c.Ops.CircuitBreakerFailureThreshold < 0 {
 		c.Ops.CircuitBreakerFailureThreshold = 0
 	}
@@ -1439,6 +1852,21 @@ func (c *Config) applyAppDefaults() {
 		c.Providers[name] = provider
 	}
 	c.Context = c.Context.Normalized()
+	if len(c.GroupPolicy) > 0 {
+		for key, value := range c.GroupPolicy {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				delete(c.GroupPolicy, key)
+				continue
+			}
+			value = value.Normalize()
+			if value.IsZero() {
+				delete(c.GroupPolicy, key)
+				continue
+			}
+			c.GroupPolicy[key] = value
+		}
+	}
 	if len(c.Commands.Prefixes) == 0 {
 		c.Commands.Prefixes = []string{"/*"}
 	}
@@ -1621,6 +2049,23 @@ func (c *Config) applyState(state *StateConfig) {
 		}
 		for key, value := range state.ContextOverflow {
 			c.ContextOverflow[key] = value
+		}
+	}
+	if len(state.GroupPolicy) > 0 {
+		if c.GroupPolicy == nil {
+			c.GroupPolicy = map[string]GroupPolicyConfig{}
+		}
+		for key, value := range state.GroupPolicy {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			value = value.Normalize()
+			if value.IsZero() {
+				delete(c.GroupPolicy, key)
+				continue
+			}
+			c.GroupPolicy[key] = value
 		}
 	}
 }

@@ -5,12 +5,12 @@
 #   docker compose build
 #   docker compose up -d
 #
-# 如果已经用 `docker load` 载入了 elbot-0.6.7-linux-amd64.tar.gz，
+# 如果已经用 `docker load` 载入了 elbot-0.6.8-linux-amd64.tar.gz，
 # 可直接 `docker compose up -d`，无需 build。
 
 services:
   elbot:
-    image: ${ELBOT_IMAGE:-elbot:0.6.7}
+    image: ${ELBOT_IMAGE:-elbot:0.6.8}
     build:
       context: .
       dockerfile: Dockerfile

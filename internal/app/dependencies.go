@@ -12,6 +12,7 @@ import (
 	elcron "elbot/internal/cron"
 	"elbot/internal/elvena"
 	"elbot/internal/health"
+	"elbot/internal/historygate"
 	"elbot/internal/llm"
 	"elbot/internal/maintenance"
 	"elbot/internal/media"
@@ -58,6 +59,7 @@ type FoundationRequest struct {
 
 type FoundationComponents struct {
 	Maintenance      *maintenance.Service
+	HistoryPolicy    *historygate.Policy
 	Config           *config.Config
 	Logs             LogManager
 	Logger           *slog.Logger

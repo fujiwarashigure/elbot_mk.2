@@ -168,6 +168,33 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 
 权限：Bot 超级管理员和当前群群主/管理员可用。策略覆盖持久化在 `state.toml` 的 `context_overflow` 表。
 
+## 群级策略
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*grouppolicy` | 查看当前群的唤醒、响应、工具与额度策略。 |
+| `/*grouppolicy wake <词1,词2>` | 增加本群唤醒词；只影响当前群。 |
+| `/*grouppolicy response <mention\|all\|keyword\|reply\|off>` | 设置普通群消息的响应模式。 |
+| `/*grouppolicy default-mode <work\|chat\|inherit>` | 设置新 Session 的默认模式。 |
+| `/*grouppolicy default-model <别名\|provider/model\|clear>` | 设置本群默认模型；别名或 `provider/model` 解析后会再次校验本群模型目录。 |
+| `/*grouppolicy allowed-models <别名或provider/model\|*>` | 超级管理员设置本群可选模型目录；空目录只允许已配置的模型别名/profile。 |
+| `/*grouppolicy tool-allow <工具名,工具名\|none\|clear>` | 设置工具白名单；`none` 表示禁止全部工具，`clear` 表示继承全局。 |
+| `/*grouppolicy image-quota <次数>` / `/*grouppolicy vision-quota <次数>` | 设置本群每日生图/视觉调用额度；执行前会原子预占，重启不丢账。 |
+| `/*grouppolicy user-image-quota <次数>` / `/*grouppolicy user-vision-quota <次数>` | 设置本群内单用户每日生图/视觉调用额度。 |
+| `/*grouppolicy chat-tokens-quota <token 数>` | 设置本群每日聊天 token 额度；provider 返回 usage 后记账。 |
+| `/*grouppolicy chat-cost-quota <金额>` | 设置本群每日聊天费用额度，金额使用 `[maintenance.daily_report].currency` 对应的价格表计算。 |
+| `/*grouppolicy quiet <HH:MM-HH:MM\|clear>` | 设置静默时段；命令与超级管理员不受影响。 |
+| `/*grouppolicy analysis/learning/history <on\|off>` | 启停本群群分析、学习观察和历史记录。`history=off` 只停止新写入，不删除旧记录；`learning=off` 停止采集、挖掘、审核入库和上下文注入。 |
+| `/*grouppolicy learning-moderation <on\|off>` | 超级管理员显式授权本群群主/管理员审核本群 learning 候选。 |
+| `/*grouppolicy learning-moderation-actions <view,decide,mine>` | 超级管理员细分授权；默认 `view,decide`，每次命令都会重新校验。 |
+| `/*grouppolicy reset [field]` | 重置当前群策略。 |
+
+权限与边界：
+
+- 群管理员只能修改自己当前群的普通策略；命令不接受“目标群”参数，不能跨群修改。
+- provider、API Key、全局 Shell 权限不通过群策略暴露，仍由服务端全局配置和 `security` 判断。
+- `learning-moderation` 只能由机器人超级管理员设置；群管理员默认没有 `/learning` 管理权限，被显式授权后也只能审核本群候选，不能获得系统级超管权限。
+
 ## 工具与 Skill
 
 | 命令 | 作用 |
@@ -254,7 +281,7 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 说明：
 
 - `/memory` 对应 `angel_memory` SQLite；
-- `/learning` 对应 `self_learning` SQLite；所有 review 类操作仅超级管理员可用；
+- `/learning` 对应 `self_learning` SQLite；默认仅超级管理员可用。超级管理员可在本群执行 `/*grouppolicy learning-moderation on` 并通过 `learning-moderation-actions` 细分授权（`view` / `decide` / `mine` / …）。群管理员审核结果只作用于当前群 scope，不会进入其他群或全局知识域；撤权或群管理员身份变化后，下一次命令立即失效，不依赖旧缓存。
 - 只有 `approved` 的表达/黑话会通过 `llm.turn.prepared` 注入当前请求。
 
 ## 日志和审计

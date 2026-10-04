@@ -50,6 +50,9 @@ func (a *Agent) startChatWithOutput(ctx context.Context, session *storage.Sessio
 
 func (a *Agent) runChatTurnWithOutput(ctx context.Context, session *storage.Session, text string, out turnOutput) (*storage.Session, turn.Input, error) {
 	selection := a.modelSelectionForTurn(ctx, session)
+	if err := a.authorizeExecutionModelSelection(ctx, selection); err != nil {
+		return session, turn.Input{}, err
+	}
 	if a.shouldCompact(ctx, session, selection) {
 		next, content, err := a.compactSession(ctx, session, "auto", selection)
 		if err != nil {
@@ -104,7 +107,11 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		ReplyToPlatformMessageID: inboundReplyMessageID(ctx),
 	}
 	if a.logger != nil {
-		a.logger.Info("user input", "event", "user_message", "session_id", session.ID, "text", previewLogText(userContent))
+		if a.historyEnabled(ctx) {
+			a.logger.Info("user input", "event", "user_message", "session_id", session.ID, "text", previewLogText(userContent))
+		} else {
+			a.logger.Info("user input", "event", "user_message", "session_id", session.ID, "history", "off")
+		}
 	}
 
 	loaded, err := a.contextRuntime.load(ctx, session.ID)
@@ -125,12 +132,16 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	messages := append([]storage.Message{}, loaded.Messages...)
 	messages = append(messages, *userMessage)
 
-	reqCtxInfo, reqCtx, done, err := a.requests.Start(ctx, request.StartRequest{SessionID: session.ID, Kind: request.KindTurn, Label: "chat", Timeout: a.responseTimeout})
+	reqCtxInfo, reqCtx, done, err := a.requests.Start(ctx, request.StartRequest{SessionID: session.ID, Kind: request.KindTurn, Label: "chat", FairKey: a.requestFairKey(ctx), ScopeKey: a.requestScopeKey(ctx), Timeout: a.responseTimeout})
 	if err != nil {
 		return err
 	}
 	defer done()
 	reqCtx = withTurnRequestID(reqCtx, reqCtxInfo.ID)
+	defer a.unregisterMessageWork(reqCtxInfo.ID)
+	if a.registerMessageWork(ctx, session.ID, reqCtxInfo.ID) {
+		return nil
+	}
 
 	turnStartedAt := storage.Now()
 	out.PublishRuntimeStatus(ctx, runtimestatus.Snapshot{SessionID: session.ID, Phase: runtimestatus.PhasePreparing, Provider: selection.Provider, Model: selection.Model, Mode: session.Mode, TurnStartedAt: turnStartedAt, StageStartedAt: turnStartedAt})
@@ -159,6 +170,9 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	}
 	selection.Provider = turnEvent.LLM.Provider
 	selection.Model = turnEvent.LLM.Model
+	if err := a.authorizeExecutionModelSelection(ctx, selection); err != nil {
+		return err
+	}
 	tools = turnEvent.LLM.Tools
 	requestOptions := llmRequestOptionsFromPayload(turnEvent.LLM)
 	out.PublishRuntimeStatus(ctx, runtimestatus.Snapshot{SessionID: session.ID, Phase: runtimestatus.PhasePreparing, Provider: selection.Provider, Model: selection.Model, Mode: session.Mode, TurnStartedAt: turnStartedAt, StageStartedAt: turnStartedAt})
@@ -234,7 +248,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		if len(result.ToolCalls) == 0 {
 			deferredOutputs = append(deferredOutputs, laterOutputs...)
 		}
-		if err := out.SendOutputs(ctx, immediateOutputs); err != nil {
+		if err := out.SendOutputs(reqCtx, immediateOutputs); err != nil {
 			return err
 		}
 		if len(result.ToolCalls) == 0 {
@@ -247,7 +261,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		if err := out.FinishIntermediate(ctx, reqCtx, result.Stream, assistantText, streaming); err != nil {
 			return err
 		}
-		if err := out.SendOutputs(ctx, laterOutputs); err != nil {
+		if err := out.SendOutputs(reqCtx, laterOutputs); err != nil {
 			return err
 		}
 		if !inToolPhase {
@@ -259,7 +273,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		assistantToolCallIndex := len(llmMessages)
 		llmMessages = append(llmMessages, llm.LLMMessage{Role: llm.RoleAssistant, Segments: llm.TextSegments(assistantRawText), ToolCalls: result.ToolCalls})
 		if toolRounds >= a.maxToolRoundsPerTurn() {
-			out.SendPreview(ctx, fmt.Sprintf("已达到 max_rounds_per_turn=%d，后续工具调用未执行，正在请求模型总结当前进度。", a.maxToolRoundsPerTurn()))
+			out.SendPreview(reqCtx, fmt.Sprintf("已达到 max_rounds_per_turn=%d，后续工具调用未执行，正在请求模型总结当前进度。", a.maxToolRoundsPerTurn()))
 			llmMessages = append(llmMessages, skippedToolMessages(result.ToolCalls, a.maxToolRoundsPerTurn())...)
 			var summaryPending *pendingUserMessage
 			llmMessages, summaryPending = a.drainPendingUserInput(session.ID, llmMessages)
@@ -275,11 +289,11 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 			}
 			if len(summary.ToolCalls) > 0 {
 				// TODO: 后续支持强制 tool_choice=none；当前总结请求已不传 tools，若仍返回工具调用则忽略。
-				out.SendPreview(ctx, "总结请求仍返回了工具调用，已忽略。")
+				out.SendPreview(reqCtx, "总结请求仍返回了工具调用，已忽略。")
 			}
 			immediateOutputs, laterOutputs := delivery.SplitByDeliveryTiming(summary.Outputs)
 			deferredOutputs = append(deferredOutputs, laterOutputs...)
-			if err := out.SendOutputs(ctx, immediateOutputs); err != nil {
+			if err := out.SendOutputs(reqCtx, immediateOutputs); err != nil {
 				return err
 			}
 			summaryText := summary.Text
@@ -340,7 +354,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 					return err
 				}
 				finalReceipt = receipt
-			} else if receipt, err := out.SendAssistant(ctx, platformOutputText); err != nil {
+			} else if receipt, err := out.SendAssistant(reqCtx, platformOutputText); err != nil {
 				return err
 			} else {
 				finalReceipt = receipt
@@ -349,7 +363,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	}
 
 	if !bufferOutput {
-		if err := out.SendOutputs(ctx, deferredOutputs); err != nil {
+		if err := out.SendOutputs(reqCtx, deferredOutputs); err != nil {
 			return err
 		}
 	}
@@ -373,11 +387,11 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		if err := a.persistTurnMessage(ctx, assistantMessage, "append_assistant_message"); err != nil {
 			return err
 		}
-		persistedAssistant = true
+		persistedAssistant = a.historyEnabled(ctx)
 	}
 	if bufferOutput {
 		if strings.TrimSpace(platformOutputText) != "" {
-			receipt, err := out.SendAssistant(ctx, platformOutputText)
+			receipt, err := out.SendAssistant(reqCtx, platformOutputText)
 			if err != nil {
 				a.audit("platform_send_error", "session_id", session.ID, "operation", "send_assistant_message", "error", err.Error())
 				return err
@@ -386,7 +400,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 				a.mapSentAssistantMessage(ctx, session.ID, assistantMessage.ID, receipt)
 			}
 		}
-		if err := out.SendOutputs(ctx, deferredOutputs); err != nil {
+		if err := out.SendOutputs(reqCtx, deferredOutputs); err != nil {
 			return err
 		}
 	} else if persistedAssistant {
@@ -403,7 +417,9 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	if a.shouldCompact(ctx, session, nextSelection) {
 		_, _ = out.SendAssistant(ctx, "compact status: will compact before next request")
 	}
-	a.sessions.MaybeScheduleNaming(ctx, session.ID)
+	if a.historyEnabled(ctx) {
+		a.sessions.MaybeScheduleNaming(ctx, session.ID)
+	}
 	return nil
 }
 
@@ -413,6 +429,9 @@ func (a *Agent) modelSelectionForTurn(ctx context.Context, session *storage.Sess
 		mode = session.Mode
 	}
 	selection := a.modelForMode(mode)
+	if groupModel, ok := a.groupDefaultModelSelection(ctx); ok {
+		selection = groupModel
+	}
 	if override, ok := turnModelOverride(ctx); ok {
 		if override.Provider != "" {
 			selection.Provider = override.Provider

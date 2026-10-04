@@ -48,6 +48,8 @@ func (a *Agent) executeToolCalls(ctx context.Context, session *storage.Session, 
 		AssistantRawText: assistantRawText,
 		CachedTools:      a.cachedToolsForSession(session),
 		Actor:            a.actor(ctx),
+		AuthorizeTool:    a.authorizeToolCall,
+		BeforeExecute:    a.beforeExecuteToolCall,
 	})
 }
 
@@ -130,6 +132,12 @@ func (a *Agent) toolCallRisk(ctx context.Context, call llm.ToolCallRequest) stri
 }
 
 func (a *Agent) recordToolCall(ctx context.Context, sessionID string, call llm.ToolCallRequest, risk string, startedAt time.Time, result string, callErr error) {
+	resultPreview := ""
+	argumentsPreview := ""
+	if a.historyEnabled(ctx) {
+		resultPreview = previewLogText(result)
+		argumentsPreview = previewArguments(call.Arguments)
+	}
 	record := &storage.ToolCallRecord{
 		SessionID:     sessionID,
 		ToolCallID:    call.ID,
@@ -137,7 +145,7 @@ func (a *Agent) recordToolCall(ctx context.Context, sessionID string, call llm.T
 		ActorID:       a.actor(ctx).ID,
 		RiskLevel:     risk,
 		Success:       callErr == nil,
-		ResultPreview: previewLogText(result),
+		ResultPreview: resultPreview,
 		StartedAt:     startedAt,
 		FinishedAt:    storage.Now(),
 	}
@@ -153,8 +161,8 @@ func (a *Agent) recordToolCall(ctx context.Context, sessionID string, call llm.T
 		a.logger.Info("tool call",
 			"event", "tool_call",
 			"session_id", sessionID,
-			"arguments", previewArguments(call.Arguments),
-			"result", previewLogText(result),
+			"arguments", argumentsPreview,
+			"result", resultPreview,
 			"tool", call.Name,
 			"tool_call_id", call.ID,
 			"actor_id", record.ActorID,
@@ -166,7 +174,7 @@ func (a *Agent) recordToolCall(ctx context.Context, sessionID string, call llm.T
 	}
 	a.audit("tool_call",
 		"session_id", sessionID,
-		"arguments", previewArguments(call.Arguments),
+		"arguments", argumentsPreview,
 		"tool", call.Name,
 		"tool_call_id", call.ID,
 		"actor_id", record.ActorID,
@@ -264,7 +272,25 @@ func (a *Agent) toolsForSession(ctx context.Context, session *storage.Session) (
 	if name := turnToolProfile(ctx); name != "" {
 		schemas = mergeToolSchemas(schemas, a.turnToolSchemas(ctx, name))
 	}
+	if allowlist := a.groupToolAllowlist(ctx); allowlist != nil {
+		schemas = filterToolSchemasByAllowlist(schemas, allowlist)
+	}
+	schemas = a.filterGroupFeatureSchemas(ctx, schemas)
 	return schemas, nil
+}
+
+func filterToolSchemasByAllowlist(schemas []llm.ToolSchema, allowlist map[string]bool) []llm.ToolSchema {
+	if allowlist == nil {
+		return schemas
+	}
+	out := make([]llm.ToolSchema, 0, len(schemas))
+	for _, schema := range schemas {
+		name := strings.ToLower(strings.TrimSpace(schema.Function.Name))
+		if allowlist[name] {
+			out = append(out, schema)
+		}
+	}
+	return out
 }
 
 func mergeToolSchemas(base, extra []llm.ToolSchema) []llm.ToolSchema {

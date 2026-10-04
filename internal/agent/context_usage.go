@@ -125,6 +125,9 @@ func (a *Agent) persistUsage(ctx context.Context, sessionID string, usage *llm.U
 }
 
 func (a *Agent) shouldCompact(ctx context.Context, session *storage.Session, selection config.ModelSelection) bool {
+	if !a.historyEnabled(ctx) {
+		return false
+	}
 	return session != nil && a.contextRuntime.reachedCompactThreshold(ctx, a.usageForSession(session), selection)
 }
 

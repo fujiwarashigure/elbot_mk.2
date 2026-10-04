@@ -269,6 +269,37 @@ func TestRunPreservesMultimodalToolSegments(t *testing.T) {
 	}
 }
 
+func TestRunRechecksAuthorizationAfterQueueWait(t *testing.T) {
+	registry := tool.NewRegistry()
+	if err := registry.Register(runnerHighRiskTool{name: "guarded_tool"}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(registry, security.NewPolicy("high", "high", nil))
+	authCalls := 0
+	result := manager.Run(context.Background(), &runnerTestDeps{}, RunRequest{
+		Session: &storage.Session{ID: "s1", Mode: storage.SessionModeWork},
+		Actor:   security.Actor{Role: security.RoleSuperadmin},
+		Calls:   []llm.ToolCallRequest{{ID: "call-1", Name: "guarded_tool", Arguments: "{}"}},
+		AuthorizeTool: func(ctx context.Context, call llm.ToolCallRequest, resolved ResolvedTool) (bool, string) {
+			authCalls++
+			if authCalls > 1 {
+				return false, "policy revoked while queued"
+			}
+			return true, ""
+		},
+	})
+	if authCalls != 2 {
+		t.Fatalf("authorize calls = %d, want 2", authCalls)
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+	text := llm.SegmentsContentText(result.Messages[0].Segments)
+	if !strings.Contains(text, "denied") || !strings.Contains(text, "policy revoked while queued") {
+		t.Fatalf("unexpected message: %s", text)
+	}
+}
+
 func TestRunSkipsConfirmationWhenPreflightFails(t *testing.T) {
 	registry := tool.NewRegistry()
 	if err := registry.Register(runnerPreflightTool{}); err != nil {

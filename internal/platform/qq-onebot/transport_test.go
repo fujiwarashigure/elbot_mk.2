@@ -232,3 +232,44 @@ func startTransportReadLoop(ctx context.Context, transport *Transport) {
 		}
 	}()
 }
+
+func TestGetForwardMsgStopsAtReadLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		var req request
+		if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+			return
+		}
+		large, _ := json.Marshal(strings.Repeat("x", 200*1024))
+		data := json.RawMessage(large)
+		_ = wsjson.Write(r.Context(), conn, response{Status: "ok", Retcode: 0, Data: data, Echo: req.Echo})
+		select {
+		case <-r.Context().Done():
+		case <-time.After(200 * time.Millisecond):
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	transport := &Transport{
+		URL:            "ws" + strings.TrimPrefix(server.URL, "http"),
+		Timeout:        2 * time.Second,
+		ReadLimitBytes: 1024,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := transport.Connect(ctx); err != nil {
+		t.Fatalf("connect transport: %v", err)
+	}
+	startTransportReadLoop(ctx, transport)
+	t.Cleanup(func() { transport.Close(websocket.StatusNormalClosure, "test done") })
+
+	_, err := transport.GetForwardMsg(ctx, "1")
+	if err == nil {
+		t.Fatal("oversized forward response unexpectedly succeeded")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"elbot/internal/command"
+	"elbot/internal/config"
 	"elbot/internal/security"
 )
 
@@ -73,11 +74,13 @@ type learningCommand struct{ deps Deps }
 
 func (c learningCommand) Info() command.Info {
 	return command.Info{
-		Name:        "learning",
-		Aliases:     []string{"selflearning"},
-		Usage:       "/learning status | mine | review [status] | approve <id> [meaning] | reject <id> | undo <id> | history <id>",
-		Description: "管理 clean-room 表达/黑话候选；只有 approved 的内容会注入上下文。",
-		MinRole:     security.RoleSuperadmin,
+		Name:                 "learning",
+		Aliases:              []string{"selflearning"},
+		Usage:                "/learning status | mine | review [status] | approve <id> [meaning] | reject <id> | undo <id> | history <id>",
+		Description:          "管理 clean-room 表达/黑话候选；只有 approved 的内容会注入上下文。",
+		MinRole:              security.RoleSuperadmin,
+		AllowGroupAdmin:      true,
+		GroupAdminNeedsGrant: true,
 		Help: strings.TrimSpace(`Usage:
   /learning status
   /learning mine
@@ -93,11 +96,20 @@ func (c learningCommand) Handle(ctx context.Context, req command.Request) (*comm
 	if c.deps.SelfLearning == nil || !c.deps.SelfLearning.Ready() {
 		return &command.Result{Content: "self learning 未启用或未配置。"}, nil
 	}
+	if c.deps.GroupPolicy != nil && !c.deps.GroupPolicy.GroupLearningEnabled(ctx) {
+		return &command.Result{Content: "本群已关闭学习观察；请让超级管理员使用 /grouppolicy learning on 开启。"}, nil
+	}
 	scope := c.deps.Scope(ctx)
 	args := strings.Fields(req.Args)
 	action := "status"
 	if len(args) > 0 {
 		action = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	if actor, _ := security.ActorFromContext(ctx); actor.Role != security.RoleSuperadmin {
+		requiredAction := learningActionPermission(action)
+		if requiredAction == "" || c.deps.GroupPolicy == nil || !c.deps.GroupPolicy.AuthorizeLearningAction(ctx, requiredAction) {
+			return &command.Result{Content: "当前群管理员未获授权执行该学习操作；请让机器人超级管理员使用 /grouppolicy learning-moderation-actions 授予具体权限。"}, nil
+		}
 	}
 	switch action {
 	case "status":
@@ -178,6 +190,23 @@ func (c learningCommand) Handle(ctx context.Context, req command.Request) (*comm
 		return &command.Result{Content: strings.Join(lines, "\n")}, nil
 	default:
 		return &command.Result{Content: "用法：/learning status|mine|review|approve|reject|undo|history"}, nil
+	}
+}
+
+func learningActionPermission(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "status", "review", "history":
+		return config.LearningModerationView
+	case "approve", "reject", "undo":
+		return config.LearningModerationDecide
+	case "mine":
+		return config.LearningModerationMine
+	case "delete":
+		return config.LearningModerationDelete
+	case "export":
+		return config.LearningModerationExport
+	default:
+		return ""
 	}
 }
 

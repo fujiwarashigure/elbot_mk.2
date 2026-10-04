@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"elbot/internal/logging"
 	"elbot/internal/media"
 	"elbot/internal/memory/resident"
+	"elbot/internal/ops/concurrency"
 	"elbot/internal/ops/ratelimit"
 	"elbot/internal/platform"
 	"elbot/internal/request"
@@ -43,9 +45,29 @@ type Agent struct {
 	stateMu            sync.Mutex
 	contextOverflowMu  sync.RWMutex
 	contextOverflow    map[string]config.ContextOverflowConfig
+	groupPolicyMu      sync.RWMutex
+	groupPolicy        map[string]config.GroupPolicyConfig
+	budgetMu           sync.Mutex
+	budgetReservations map[string]int64
+	budgetDigests      map[string]string
+	budgetTokens       map[string]int64
+	budgetCosts        map[string]int64
+	budgetRetries      map[string]int64
+	budgetExecutions   map[string]string
+	budgetWriteFailed  bool
+	budgetLimits       config.BudgetLimitsConfig
+	pricing            config.DailyReportConfig
+	messageWorkMu      sync.Mutex
+	messageWork        map[string]messageWorkRef
+	turnMu             sync.Mutex
+	turnStates         map[string]bool
+	recallMu           sync.Mutex
+	recentRecalls      map[string]time.Time
 	store              storage.Store
 	media              *media.Manager
 	vision             VisionDescriber
+	visionSelection    config.ModelSelection
+	groupAnalysisModel config.ModelSelection
 	visionParallelism  int
 	visionMaxImages    int
 	visionBudget       time.Duration
@@ -108,6 +130,9 @@ type Agent struct {
 	rateLimitGroupBurst     int
 	rateLimitMu             sync.Mutex
 	rateLimitLastReason     string
+	providerLimitMu         sync.Mutex
+	providerLimiters        map[string]*concurrency.Limiter
+	providerLimitCfg        concurrency.Config
 	rateLimitLastRejectedAt time.Time
 	userConfirmationTimeout time.Duration
 	discoveredTools         map[string]map[string]llm.ToolSchema
@@ -244,9 +269,11 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		request.KindHook:     opts.Ops.MaxConcurrentHooks,
 		request.KindCompress: opts.Ops.MaxConcurrentTurns,
 	}, request.QueueConfig{
-		MaxQueue:    opts.Ops.QueueMaxSize,
-		WaitTimeout: durationFromSeconds(opts.Ops.QueueWaitTimeoutSeconds),
-		WaitKinds:   queueWaitKinds(opts.Ops.QueueWaitKinds, opts.Ops.QueueMaxSize > 0),
+		MaxQueue:           opts.Ops.QueueMaxSize,
+		MaxQueuePerFairKey: opts.Ops.QueueMaxPerUser,
+		MaxQueuePerScope:   opts.Ops.QueueMaxPerScope,
+		WaitTimeout:        durationFromSeconds(opts.Ops.QueueWaitTimeoutSeconds),
+		WaitKinds:          queueWaitKinds(opts.Ops.QueueWaitKinds, opts.Ops.QueueMaxSize > 0),
 	})
 	turns := turn.NewManager()
 	sessions := session.NewServiceWithConfig(store, sessionCfg, titleGen, namingNotifier)
@@ -261,45 +288,55 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		outputs = delivery.NewManager(nil, nil)
 	}
 	a := &Agent{
-		platform:                p,
-		platformSenders:         map[string]delivery.MessageSender{},
-		modelRuntime:            newModelRuntimeState(client, workModel.Model, workModel.Provider, provider, providers, modeModels, clients),
-		statePath:               statePath,
-		stateModTime:            stateModTime,
-		contextOverflow:         cloneContextOverflow(opts.ContextOverflow),
-		store:                   store,
-		media:                   opts.Media,
-		vision:                  opts.VisionDescriber,
-		visionParallelism:       opts.VisionParallelism,
-		visionMaxImages:         opts.VisionMaxImages,
-		visionBudget:            opts.VisionBudget,
-		mediaRetentionDays:      opts.MediaRetentionDays,
-		sessions:                sessions,
-		requests:                requests,
-		turns:                   turns,
-		commands:                command.NewRouter(prefixes),
-		soul:                    promptSoul,
-		residentMemory:          opts.ResidentMemoryStore,
-		angelMemory:             opts.AngelMemory,
-		selfLearning:            opts.SelfLearning,
-		characters:              opts.CharacterStore,
-		modelProfiles:           opts.ModelProfiles,
-		modelAliases:            opts.ModelAliases,
-		toolProfiles:            opts.ToolProfiles,
-		toolAliases:             opts.ToolAliases,
-		imageProfiles:           opts.ImageProfiles,
-		imageAliases:            opts.ImageAliases,
-		turnDirectives:          opts.TurnDirectives,
-		securityPolicy:          policy,
-		contextRuntime:          newContextRuntimeState(store, sessions, requests, turns),
-		hooks:                   hookManager,
-		hookRuntime:             opts.HookRuntime,
-		outputs:                 outputs,
-		namingModel:             namingSelection,
-		runtimeStatus:           map[string]runtimestatus.Snapshot{},
-		autoConfirmSession:      map[string]bool{},
-		autoConfirmTools:        map[string]map[string]bool{},
-		visionFallbackNotified:  map[string]bool{},
+		platform:               p,
+		platformSenders:        map[string]delivery.MessageSender{},
+		modelRuntime:           newModelRuntimeState(client, workModel.Model, workModel.Provider, provider, providers, modeModels, clients),
+		statePath:              statePath,
+		stateModTime:           stateModTime,
+		budgetLimits:           opts.BudgetLimits.Normalized(),
+		pricing:                opts.Pricing,
+		contextOverflow:        cloneContextOverflow(opts.ContextOverflow),
+		groupPolicy:            cloneGroupPolicy(opts.GroupPolicy),
+		store:                  store,
+		media:                  opts.Media,
+		vision:                 opts.VisionDescriber,
+		visionSelection:        opts.VisionSelection,
+		visionParallelism:      opts.VisionParallelism,
+		visionMaxImages:        opts.VisionMaxImages,
+		visionBudget:           opts.VisionBudget,
+		mediaRetentionDays:     opts.MediaRetentionDays,
+		sessions:               sessions,
+		requests:               requests,
+		turns:                  turns,
+		commands:               command.NewRouter(prefixes),
+		soul:                   promptSoul,
+		residentMemory:         opts.ResidentMemoryStore,
+		angelMemory:            opts.AngelMemory,
+		selfLearning:           opts.SelfLearning,
+		characters:             opts.CharacterStore,
+		modelProfiles:          opts.ModelProfiles,
+		modelAliases:           opts.ModelAliases,
+		toolProfiles:           opts.ToolProfiles,
+		toolAliases:            opts.ToolAliases,
+		imageProfiles:          opts.ImageProfiles,
+		imageAliases:           opts.ImageAliases,
+		turnDirectives:         opts.TurnDirectives,
+		securityPolicy:         policy,
+		contextRuntime:         newContextRuntimeState(store, sessions, requests, turns),
+		hooks:                  hookManager,
+		hookRuntime:            opts.HookRuntime,
+		outputs:                outputs,
+		namingModel:            namingSelection,
+		runtimeStatus:          map[string]runtimestatus.Snapshot{},
+		autoConfirmSession:     map[string]bool{},
+		autoConfirmTools:       map[string]map[string]bool{},
+		visionFallbackNotified: map[string]bool{},
+		providerLimiters:       map[string]*concurrency.Limiter{},
+		providerLimitCfg: concurrency.Config{
+			Max:         opts.Ops.ProviderMaxConcurrent,
+			QueueSize:   opts.Ops.ProviderQueueMaxSize,
+			WaitTimeout: durationFromSeconds(opts.Ops.ProviderWaitTimeoutSecs),
+		},
 		responseTimeout:         responseTimeout(llmRequestConfig),
 		toolTimeout:             durationFromSeconds(opts.Ops.ToolTimeoutSeconds),
 		hookTimeout:             durationFromSeconds(opts.Ops.HookTimeoutSeconds),
@@ -313,6 +350,9 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		sandboxRoot:     filepath.Clean(strings.TrimSpace(opts.SandboxRoot)),
 		actorID:         "cli:local",
 		scopeID:         "local",
+	}
+	if opts.SelfLearning != nil {
+		opts.SelfLearning.SetScopeEnabledPolicy(a.learningEnabledForScope)
 	}
 	a.contextRuntime.compressTimeout = durationFromSeconds(opts.Ops.CompressTimeoutSeconds)
 	a.rateLimitUserPerMinute = opts.Ops.UserMessagesPerMinute
@@ -358,6 +398,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		Compact:       a,
 		ContextStatus: a,
 		ContextPolicy: a,
+		GroupPolicy:   a,
 		Tools:         a,
 		Hooks:         hookService,
 		SessionState:  sessionCommands,
@@ -380,10 +421,11 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		sendNotice: func(ctx context.Context, text string) error {
 			return a.sendNotice(ctx, delivery.Notice{Outputs: []delivery.Output{delivery.Text(text)}})
 		},
-		audit:         a.audit,
-		handleAppend:  a.handleAppendConfirmationInput,
-		handleRisk:    a.handleRiskConfirmationInput,
-		continueInput: a.continueCommandInput,
+		audit:           a.audit,
+		handleAppend:    a.handleAppendConfirmationInput,
+		handleRisk:      a.handleRiskConfirmationInput,
+		continueInput:   a.continueCommandInput,
+		groupAdminGrant: a.groupAdminCommandGrant,
 	}
 	a.completion = completion.NewService(
 		completion.RiskConfirmationSource{Router: a.commands, Sessions: a.sessions, Turns: a.turns, Scope: a.scope, CommandNames: riskConfirmationCommandNames()},
@@ -429,4 +471,37 @@ func cloneModeModels(models map[string]config.ModelSelection) map[string]config.
 		out[mode] = model
 	}
 	return out
+}
+
+func (a *Agent) providerLimiter(providerName string) *concurrency.Limiter {
+	if a == nil || a.providerLimitCfg.Max <= 0 {
+		return nil
+	}
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		providerName = "default"
+	}
+	a.providerLimitMu.Lock()
+	defer a.providerLimitMu.Unlock()
+	if a.providerLimiters == nil {
+		a.providerLimiters = map[string]*concurrency.Limiter{}
+	}
+	limiter := a.providerLimiters[providerName]
+	if limiter == nil {
+		limiter = concurrency.New(a.providerLimitCfg)
+		a.providerLimiters[providerName] = limiter
+	}
+	return limiter
+}
+
+func (a *Agent) acquireProviderSlot(ctx context.Context, providerName string) (func(), error) {
+	limiter := a.providerLimiter(providerName)
+	if limiter == nil {
+		return func() {}, nil
+	}
+	release, err := limiter.Acquire(ctx)
+	if err != nil {
+		return func() {}, fmt.Errorf("provider %s concurrency limit: %w", providerName, err)
+	}
+	return release, nil
 }
