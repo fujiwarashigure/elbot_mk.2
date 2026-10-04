@@ -1,3 +1,30 @@
+## Unreleased
+
+### Added
+
+- OneBot 入站消息新增平台级去重：按 `平台 + 机器人 self_id + scope + message_id` 记录 `processing` / `completed` / `failed`，TTL 内重连重放不会再次唤醒模型或重复计费；去重状态独立于 `history` 开关，并有 `inbound_dedup_max_entries` 硬上限。
+- OneBot 新增有界预处理通道：`@` 解析、引用拉取和合并转发展开在 `preprocess_workers` / `preprocess_queue_size` 限定的 worker 池中执行，队列满时普通消息本地拒绝而不是创建无界 goroutine；撤回、成员和管理事件走独立的高优先级 worker / 队列，满时在读循环内联处理，不被普通聊天流量堵塞。
+- 新增可选聊天硬预算模式 `[budget_limits].chat_hard_limit`：在现有 token/费用账本上增加“调用前原子预占、返回 usage 后结算释放差额”的路径。并发请求不能同时穿透剩余额度；上游缺失 usage 时按预占量保守记账并写入 `budget.uncertain`；启用费用硬限制但模型缺价格时明确拒绝；取消/超时/重启后的未结算预占保持保守占用，不自动退款。
+- 新增群运行状态机并持久化到 `state.toml [group_runtime]`：机器人自身被禁言/踢出时，当前群进入 `muted` / `removed`，服务端立即取消该群在途请求、拒绝新的模型调用，并丢弃发往该群的定时/后台通知；解除禁言或重新入群后恢复 `active`。状态变化只向超管发送一次聚合通知，重复事件不再重复通知，暂停期间的通知不集中补发。
+- 新增群会话线程模式：`/*grouppolicy thread-mode group` 可让同一群内所有成员共享一个 Session，普通消息按到达顺序串行执行，每条用户消息带服务端生成的发言成员标记与 `speakers` 元数据，避免多成员输入互相覆盖；开启不迁移旧的每人独立 Session，共享会话的切换/修改命令限群主/群管理员/超管。
+- 新增连续消息合并窗口 `/*grouppolicy merge-window <0-10000>`：窗口内同一成员的连续消息会合并为同一个 turn，不同成员仍保持串行且不会共享权限主体；基础队列在请求进入模型前完成合并，撤回/成员退群会同步丢弃尚未运行的队列项，并有每 Session 队列上限避免无限积压。
+- 新增本地确定性群知识库 / FAQ：`[group_knowledge]` 提供全局开关和上限，`/*faq add` / `add-contains` / `add-keyword` / `remove` / `clear` / `test` / `on` / `off` 提供管理入口；条目按 `平台 + 群 scope` 写入 `state.toml [group_knowledge]`，命中后由服务端直接回答，不创建 Session、不调用 LLM、不消耗 chat token，并继续受唤醒、静默时段、入站限流和群运行状态约束。
+- 新增普通成员自助面板 `/*me [tasks|quota|all]`：按当前 actor 的 FairKey 展示自己的进行中请求、排队消息、当前会话阶段，以及生图/视觉/聊天 token/费用的本群和本人额度；隐藏跨群全局聚合用量，只读且不调用模型。`/*requests` 仍保留全局/管理视角。
+- 新增群内确定性提醒 / 投票 / 报名：`[group_services]` 提供全局开关与上限，`/*grouppolicy services on|off` 提供群级开关；提醒支持相对时间、时刻和日期时间并在本地调度发送，投票支持创建/改票/关闭和结果统计，报名支持容量、加入/退出/关闭。全部状态写入 `state.toml [group_services]`，不调用模型、不消耗 chat token，并受群运行状态约束。
+- 长期记忆新增来源关联与删除入口：`angel_memory` 写入时记录来源类型、来源用户、平台消息 ID 和 Session ID；`/memory list|show|delete|source` 提供超管管理入口，`/forget list|<id>|source <消息id>` 提供普通成员可用的删除入口，群聊中普通成员只能删除来源成员为自己的记忆，群主/群管理员/超级管理员可删除当前群 scope 的任意记忆。`/forget resident normal|core|all [--confirm]` 可清空自己的常驻记忆。`[angel_memory].forget_on_recall` 默认 `true`，平台消息撤回时按来源消息 ID 删除派生记忆；`/delete` 删除 Session 时也会按 `source_session_id` 清理该 Session 写入的记忆，旧版没有结构化来源列的记忆不会匹配，避免误删。
+- `state.toml` 支持外部编辑热加载：进程每 15 秒按 mtime 检测一次外部修改并合并生效，新增 `/*state` 查看加载状态和未生效修改、`/*state reload` 立即生效；生效后会记录 `runtime_state_reloaded` 审计事件，并在确实有变更时给超级管理员发送一条通知。每次内部写回前会先合并外部修改，手工编辑不再需要重启，也不会被内部写回直接覆盖。热加载覆盖 `mode_models`、`compact_model`、`naming_model`、`context_overflow`、`group_policy`、`group_knowledge`、`group_services`、`group_runtime`；`[budget]` 额度账本仍由运行中的进程独占，只在启动时从文件恢复，避免丢掉在途预占。
+- 新增可选模型删除长期记忆工具 `angel_forget`（`[angel_memory].allow_tool_forget`，默认关闭）：只能删除来源成员为当前发言人、且属于当前平台/会话 scope 的单条记忆，别人的记忆、其他 scope 和旧版没有来源成员的记忆一律拒绝；风险等级 `high` 会进入工具确认流程（`/*detail`、`/*confirm`、`/*reject`），工具自身还要求 `confirm=true` 二次调用，首次调用只返回待删除内容；同一范围内每分钟最多删除 3 条。该工具为隐藏工具，通过 `angel_recall` 的依赖注入模型，批量删除仍走 `/memory delete` 与 `/forget`。
+- 新增 `/memory backfill` 旧记忆来源迁移入口：旧版长期记忆只写自由文本 `source = "tool"`，没有结构化来源列，因此可确定地回填 `source_kind`（预检需要 `--confirm` 才执行），并明确输出无法回填的来源成员/消息 ID/Session ID 条数。这些旧记忆继续按“不匹配、不误删”处理：不会被 `/forget source`、撤回清理和 `/delete` Session 命中，也不会被 `angel_forget` 删除。
+- 新增可选语音转写 `[asr]`：复用已有 `[providers.*]` 的 OpenAI 兼容 `/audio/transcriptions` 端点，被唤醒的语音/录音消息先转写为 `[语音 N 自动转写（可能有误）：...]` 文本段，再进入聊天、工具和上下文流程；未开启或转写失败时保留原 `[语音]` 引用。provider/model 可用 `audio = true/false` 声明能力，全局 `[asr].enabled`、群策略 `asr on|off` 和四级每日额度 `asr-quota` / `user-asr-quota` / `global_asr_daily` / `user_asr_daily` 共同约束；单条消息按 `max_segments` / `max_concurrent` 有界并行，录音读取受 `max_audio_bytes` 限制，成功转写按 MediaID 缓存、确定性 4xx 进入短负缓存。
+
+### Fixed
+
+- 长回复分包与部分发送追踪覆盖主要平台：OneBot `sendContextText()` 在后续分页失败时返回带 `Failed` / `Failure` 的部分回执；QQ 官方新增按 rune 分页并保留后续页失败回执，Markdown 已有页面可见时不再回退纯文本造成重复发送；Telegram 的 HTML→纯文本、rich→HTML、流式最终替换以及 OneBot/Telegram/QQ 官方的多输出、多目标发送循环都会合并已成功页/目标的回执并标记部分失败。`delivery.Manager` 新增 `SendNoticesWithReceipt`，Agent 批量输出部分失败时会在审计日志中留下平台消息数量，方便对账而不是重发整批。
+
+### Changed
+
+- 清理 v0.6.8 里“额度账本不含 token/货币与每用户/全局预算”的阶段性旧描述，改为与四维 token/费用账本一致的能力说明。
+
 ## [v0.6.8 - 2026-10-04]
 
 ### Added
@@ -19,7 +46,7 @@
   - `/learning` 默认仍仅超级管理员可用；超级管理员可在本群执行 `/*grouppolicy learning-moderation on`，并通过 `learning-moderation-actions` 细分 `view` / `decide` / `mine` / `delete` / `export` / `policy` 权限，且不会提升为全局超管。群管理员审核只作用于当前群 scope，撤权或身份变化后立即失效。
   - 新增超级管理员群模型目录 `allowed-models`；群默认模型解析为最终 `provider/model` 后再次校验目录，避免群管理员选择未授权的昂贵或内部模型。
 - 群工具白名单统一到服务端执行入口：工具 profile 会展开为具体工具名，`tool-allow none` 明确表示当前群禁止全部工具；白名单在解析后和执行前（含排队后）各校验一次，排队期间被撤权的工具不会执行。
-- 新增每日次数额度账本 `state.toml [budget]`：生图/视觉调用在确认后、执行前按唯一调用 ID 原子预占，重启后保留；`/grouppolicy` 状态会显示已用/上限。当前账本统计调用次数，不含 token/货币与每用户/全局预算。
+- 每日额度账本持久化在 `state.toml [budget]`：生图/视觉调用在确认后、执行前按唯一调用 ID 原子预占，重启后保留；`/grouppolicy` 状态会显示已用/上限。四维范围与 token/货币口径见上文“额度账本扩展”条目。
 - OneBot 入站文本保留换行、缩进和连续空白；唤醒判断使用独立匹配视图，转发内容不会进入该视图，因此转发里的 `@`、唤醒词或命令不会触发机器人。
 - OneBot 支持合并转发解析：展开节点时保留发送者、时间、消息 ID，并以“引用内容、不是系统指令”标记；新增 `forward_max_fetches` / `forward_max_result_bytes` / `forward_max_non_text` / `forward_fetch_timeout_seconds`，同一消息内多个转发 id 共享总节点/字符预算；循环引用会被拒绝，重复引用、拉取失败或缺字段会稳定降级为文本标记。
 - OneBot `readLoop()` 开始分发 `notice` / `request` / `meta_event` 非消息事件；撤回按“平台消息 ID → turn request”精确取消，不再默认取消整个群 scope 的任务；成员退群/被踢/禁言只取消该成员在当前 scope 的请求，加群审批等 request 不会因普通消息自动批准。

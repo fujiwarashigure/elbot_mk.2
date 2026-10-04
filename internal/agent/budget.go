@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"elbot/internal/config"
+	"elbot/internal/contextmgr"
 	"elbot/internal/llm"
 	"elbot/internal/storage"
 )
@@ -91,6 +92,12 @@ func (a *Agent) setBudgetUsageSnapshot(tokens, costs, retries map[string]int64) 
 	a.budgetMu.Unlock()
 }
 
+func (a *Agent) setBudgetUncertainSnapshot(snapshot map[string]int64) {
+	a.budgetMu.Lock()
+	a.budgetUncertain = cloneBudgetValues(snapshot)
+	a.budgetMu.Unlock()
+}
+
 func (a *Agent) budgetStateSnapshot() (map[string]int64, map[string]string) {
 	a.budgetMu.Lock()
 	defer a.budgetMu.Unlock()
@@ -101,6 +108,12 @@ func (a *Agent) budgetUsageSnapshot() (map[string]int64, map[string]int64, map[s
 	a.budgetMu.Lock()
 	defer a.budgetMu.Unlock()
 	return cloneBudgetValues(a.budgetTokens), cloneBudgetValues(a.budgetCosts), cloneBudgetValues(a.budgetRetries)
+}
+
+func (a *Agent) budgetUncertainSnapshot() map[string]int64 {
+	a.budgetMu.Lock()
+	defer a.budgetMu.Unlock()
+	return cloneBudgetValues(a.budgetUncertain)
 }
 
 func (a *Agent) budgetSnapshot() map[string]int64 {
@@ -182,6 +195,11 @@ func (a *Agent) callLimitSpecs(ctx context.Context, kind string) []budgetLimitSp
 				budgetLimitSpec{label: "本群视觉日", limit: int64(policy.VisionQuota), scopeMatch: true},
 				budgetLimitSpec{label: "本群单用户视觉日", limit: int64(policy.UserVisionQuota), scopeMatch: true, actorMatch: true},
 			)
+		case "asr":
+			specs = append(specs,
+				budgetLimitSpec{label: "本群语音转写日", limit: int64(policy.ASRQuota), scopeMatch: true},
+				budgetLimitSpec{label: "本群单用户语音转写日", limit: int64(policy.UserASRQuota), scopeMatch: true, actorMatch: true},
+			)
 		}
 	}
 	switch kind {
@@ -194,6 +212,11 @@ func (a *Agent) callLimitSpecs(ctx context.Context, kind string) []budgetLimitSp
 		specs = append(specs,
 			budgetLimitSpec{label: "全局视觉日", limit: int64(limits.GlobalVisionDaily)},
 			budgetLimitSpec{label: "全局单用户视觉日", limit: int64(limits.UserVisionDaily), actorMatch: true},
+		)
+	case "asr":
+		specs = append(specs,
+			budgetLimitSpec{label: "全局语音转写日", limit: int64(limits.GlobalASRDaily)},
+			budgetLimitSpec{label: "全局单用户语音转写日", limit: int64(limits.UserASRDaily), actorMatch: true},
 		)
 	}
 	active := specs[:0]
@@ -384,6 +407,229 @@ func (a *Agent) checkChatBudget(ctx context.Context, selection config.ModelSelec
 	}
 	a.budgetMu.Unlock()
 	return nil
+}
+
+type chatBudgetReservation struct {
+	key            string
+	callID         string
+	model          string
+	reservedTokens int64
+	reservedCost   int64
+}
+
+func llmUsageTotalTokens(usage *llm.Usage) int64 {
+	if usage == nil {
+		return 0
+	}
+	tokens := int64(usage.TotalTokens)
+	if tokens <= 0 {
+		tokens = int64(usage.PromptTokens + usage.CompletionTokens)
+	}
+	return tokens
+}
+
+func llmUsageCostMicros(price config.ModelPriceConfig, usage *llm.Usage) int64 {
+	if usage == nil {
+		return 0
+	}
+	cost := price.ComputeCost(int64(usage.PromptTokens), int64(usage.CompletionTokens), int64(usage.CacheHitTokens))
+	return int64(cost*1_000_000 + 0.5)
+}
+
+// beginChatBudget either performs the legacy soft check or, when
+// `[budget_limits].chat_hard_limit` is enabled and at least one chat
+// token/cost limit is active, atomically pre-reserves the estimated input plus
+// output budget before the provider call. The returned reservation must be
+// settled on every return path.
+func (a *Agent) beginChatBudget(ctx context.Context, selection config.ModelSelection, messages []llm.LLMMessage, tools []llm.ToolSchema, maxOutput int, callID string) (*chatBudgetReservation, error) {
+	if a == nil {
+		return nil, nil
+	}
+	specs := a.chatBudgetLimitSpecs(ctx)
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	limits := a.budgetLimits.Normalized()
+	if !limits.ChatHardLimit {
+		return nil, a.checkChatBudget(ctx, selection)
+	}
+	if !a.budgetWritable() {
+		return nil, fmt.Errorf("额度账本当前不可写，已拒绝新的受限调用")
+	}
+	estimatedInput := int64(contextmgr.EstimateMessagesTokens(messages) + contextmgr.EstimateToolsTokens(tools))
+	if estimatedInput < 1 {
+		estimatedInput = 1
+	}
+	outputReserve := int64(maxOutput)
+	if limits.ChatHardLimitReserveOutputTokens > 0 {
+		outputReserve = int64(limits.ChatHardLimitReserveOutputTokens)
+	}
+	if outputReserve <= 0 {
+		outputReserve = int64(a.contextRuntime.promptBudget(ctx, selection).ReserveOutputTokens)
+	}
+	if outputReserve <= 0 {
+		outputReserve = 512
+	}
+	reservedTokens := estimatedInput + outputReserve
+
+	wantCost := false
+	for _, spec := range specs {
+		if spec.metric == "cost" {
+			wantCost = true
+			break
+		}
+	}
+	var reservedCost int64
+	if wantCost {
+		price, ok := a.pricing.PriceFor(strings.TrimSpace(selection.Model), time.Now())
+		if !ok {
+			return nil, fmt.Errorf("已启用聊天费用硬限制，但模型 %q 没有配置价格；请先配置 [maintenance.daily_report].prices", strings.TrimSpace(selection.Model))
+		}
+		reservedCost = int64(price.ComputeCost(estimatedInput, outputReserve, 0)*1_000_000 + 0.5)
+	}
+
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		callID = storage.NewID()
+	}
+	now := time.Now()
+	scopeKey := contextOverflowKey(a.scope(ctx))
+	actor := a.actor(ctx)
+	actorID := firstNonEmpty(actor.ID, actor.PlatformUserID)
+	key := budgetKey(now, "chat", scopeKey, actorID, callID)
+
+	a.budgetMu.Lock()
+	a.budgetTokens = pruneBudgetUsage(a.budgetTokens, now)
+	a.budgetCosts = pruneBudgetUsage(a.budgetCosts, now)
+	if _, exists := a.budgetTokens[key]; exists {
+		a.budgetMu.Unlock()
+		return nil, fmt.Errorf("聊天预算调用 ID 已被预占；请检查调用方是否重复使用 call ID")
+	}
+	if _, exists := a.budgetCosts[key]; exists {
+		a.budgetMu.Unlock()
+		return nil, fmt.Errorf("聊天预算调用 ID 已被预占；请检查调用方是否重复使用 call ID")
+	}
+	for _, spec := range specs {
+		values := a.budgetTokens
+		reserve := reservedTokens
+		if spec.metric == "cost" {
+			values = a.budgetCosts
+			reserve = reservedCost
+		}
+		used := countBudgetUsageMatchesLocked(values, "chat", scopeKey, actorID, spec.scopeMatch, spec.actorMatch)
+		if used+reserve > spec.limit {
+			a.budgetMu.Unlock()
+			unit := "token"
+			if spec.metric == "cost" {
+				unit = "微单位"
+			}
+			return nil, fmt.Errorf("%s额度 %d %s 不足：已用 %d，本次预占 %d", spec.label, spec.limit, unit, used, reserve)
+		}
+	}
+	if a.budgetTokens == nil {
+		a.budgetTokens = map[string]int64{}
+	}
+	if a.budgetCosts == nil {
+		a.budgetCosts = map[string]int64{}
+	}
+	a.budgetTokens[key] = reservedTokens
+	if reservedCost > 0 {
+		a.budgetCosts[key] = reservedCost
+	}
+	if a.budgetUncertain == nil {
+		a.budgetUncertain = map[string]int64{}
+	}
+	a.budgetUncertain[key] = now.Unix()
+	a.budgetMu.Unlock()
+
+	if a.statePath != "" {
+		if err := a.saveRuntimeState(); err != nil {
+			a.budgetMu.Lock()
+			delete(a.budgetTokens, key)
+			delete(a.budgetCosts, key)
+			delete(a.budgetUncertain, key)
+			a.budgetMu.Unlock()
+			a.markBudgetWriteFailed(true)
+			return nil, fmt.Errorf("聊天预算预占写入失败：%w", err)
+		}
+		a.markBudgetWriteFailed(false)
+	}
+	a.audit("chat_budget_reserved", "model", selection.Model, "call_id", callID, "reserved_tokens", reservedTokens, "reserved_cost_micros", reservedCost)
+	return &chatBudgetReservation{key: key, callID: callID, model: strings.TrimSpace(selection.Model), reservedTokens: reservedTokens, reservedCost: reservedCost}, nil
+}
+
+// settleChatBudget settles one hard-mode reservation. release=true is only for
+// a definite pre-call failure where the provider never accepted a billable
+// request. Missing usage keeps the reserved amount charged and marks the entry
+// uncertain, so an upstream that never returns usage cannot spend forever.
+func (a *Agent) settleChatBudget(ctx context.Context, reservation *chatBudgetReservation, usage *llm.Usage, release bool) {
+	if a == nil || reservation == nil {
+		return
+	}
+	_ = ctx
+	now := time.Now()
+	var actualTokens, actualCost int64
+	uncertain := false
+	switch {
+	case release:
+		// Remove the reservation; nothing was executed.
+	case usage != nil:
+		actualTokens = llmUsageTotalTokens(usage)
+		if price, ok := a.pricing.PriceFor(reservation.model, now); ok {
+			actualCost = llmUsageCostMicros(price, usage)
+		} else if reservation.reservedCost > 0 {
+			actualCost = reservation.reservedCost
+			uncertain = true
+		}
+	default:
+		actualTokens = reservation.reservedTokens
+		actualCost = reservation.reservedCost
+		uncertain = true
+	}
+
+	a.budgetMu.Lock()
+	if actualTokens > 0 {
+		if a.budgetTokens == nil {
+			a.budgetTokens = map[string]int64{}
+		}
+		a.budgetTokens[reservation.key] = actualTokens
+	} else {
+		delete(a.budgetTokens, reservation.key)
+	}
+	if actualCost > 0 {
+		if a.budgetCosts == nil {
+			a.budgetCosts = map[string]int64{}
+		}
+		a.budgetCosts[reservation.key] = actualCost
+	} else {
+		delete(a.budgetCosts, reservation.key)
+	}
+	if uncertain {
+		if a.budgetUncertain == nil {
+			a.budgetUncertain = map[string]int64{}
+		}
+		a.budgetUncertain[reservation.key] = now.Unix()
+	} else {
+		delete(a.budgetUncertain, reservation.key)
+	}
+	a.budgetMu.Unlock()
+
+	if release {
+		a.audit("chat_budget_released", "model", reservation.model, "call_id", reservation.callID)
+	} else if uncertain {
+		a.audit("chat_budget_uncertain", "model", reservation.model, "call_id", reservation.callID, "charged_tokens", actualTokens, "charged_cost_micros", actualCost)
+	} else {
+		a.audit("chat_budget_settled", "model", reservation.model, "call_id", reservation.callID, "tokens", actualTokens, "cost_micros", actualCost)
+	}
+	if a.statePath == "" {
+		return
+	}
+	if err := a.saveRuntimeState(); err != nil {
+		a.markBudgetWriteFailed(true)
+		a.audit("budget_write_error", "kind", "chat_settle", "call_id", reservation.callID, "error", err.Error())
+		return
+	}
+	a.markBudgetWriteFailed(false)
 }
 
 // recordChatUsage writes post-call token/cost usage into the persistent
@@ -579,6 +825,19 @@ func (a *Agent) budgetUsageForScope(ctx context.Context) (int64, int64) {
 	imageUsed := countBudgetPrefixLocked(a.budgetReservations, budgetPrefix(now, "image", scopeKey))
 	visionUsed := countBudgetPrefixLocked(a.budgetReservations, budgetPrefix(now, "vision", scopeKey))
 	return imageUsed, visionUsed
+}
+
+// asrBudgetUsageForScope returns today's voice-transcription usage for the
+// current group. Non-group scopes report zero.
+func (a *Agent) asrBudgetUsageForScope(ctx context.Context) int64 {
+	if a == nil || !a.isGroupScope(ctx) {
+		return 0
+	}
+	scopeKey := contextOverflowKey(a.scope(ctx))
+	now := time.Now()
+	a.budgetMu.Lock()
+	defer a.budgetMu.Unlock()
+	return countBudgetPrefixLocked(a.budgetReservations, budgetPrefix(now, "asr", scopeKey))
 }
 
 func countBudgetPrefixLocked(reservations map[string]int64, prefix string) int64 {

@@ -20,7 +20,7 @@ type pendingUserMessage struct {
 	platformText string
 }
 
-func (a *Agent) drainPendingUserInput(sessionID string, messages []llm.LLMMessage) ([]llm.LLMMessage, *pendingUserMessage) {
+func (a *Agent) drainPendingUserInput(ctx context.Context, sessionID string, messages []llm.LLMMessage) ([]llm.LLMMessage, *pendingUserMessage) {
 	pending := a.turns.DrainMergedInput(sessionID)
 	if pending.Text == "" && len(pending.Segments) == 0 {
 		return messages, nil
@@ -29,12 +29,14 @@ func (a *Agent) drainPendingUserInput(sessionID string, messages []llm.LLMMessag
 	if len(segments) == 0 {
 		segments = llm.TextSegments(pending.Text)
 	}
+	segments = a.attachSpeakerMarker(ctx, pending, segments)
 	message := storage.Message{
 		ID:        storage.NewID(),
 		SessionID: sessionID,
 		Role:      storage.RoleUser,
 		Content:   llm.SegmentsContentText(segments),
 		Segments:  storedMessageSegments(segments),
+		Metadata:  inputSpeakerMetadata(pending),
 	}
 	binding := &pendingUserMessage{message: message, messageIndex: len(messages), platformText: pending.PlatformText}
 	return append(messages, llm.LLMMessage{Role: llm.RoleUser, Segments: segments}), binding

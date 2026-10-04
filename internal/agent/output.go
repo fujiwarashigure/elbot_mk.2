@@ -25,7 +25,16 @@ func (a *Agent) sendOutputs(ctx context.Context, outputs []delivery.Output) erro
 	if manager.Logger == nil {
 		manager.Logger = a.logger
 	}
-	return manager.SendNotices(ctx, outputs)
+	receipt, err := manager.SendNoticesWithReceipt(ctx, outputs)
+	if err != nil {
+		if count := len(receipt.PlatformMessageIDs); count > 0 {
+			a.audit("platform_send_partial", "operation", "send_outputs", "platform_message_count", count, "error", err.Error())
+			if a.logger != nil {
+				a.logger.WarnContext(ctx, "output send failed with partial receipt", "error", err.Error(), "platform_message_count", count)
+			}
+		}
+	}
+	return err
 }
 
 type agentOutputSender struct {
@@ -133,9 +142,13 @@ func (a *Agent) sendChatWithReceipt(ctx context.Context, text string) (delivery.
 
 	if err != nil {
 		if a.logger != nil {
-			a.logger.WarnContext(ctx, "chat send failed", "error", err.Error())
+			partial := ""
+			if len(receipt.PlatformMessageIDs) > 0 {
+				partial = "yes"
+			}
+			a.logger.WarnContext(ctx, "chat send failed", "error", err.Error(), "partial_receipt", partial)
 		}
-		return delivery.Receipt{}, err
+		return receipt.MarkPartialFailure(err), err
 	}
 	a.notifyHook(ctx, hook.Event{Point: hook.PointPlatformMessageSent, Message: hook.MessagePayload{Role: string(llm.RoleAssistant), Segments: llm.TextSegments(preparedText)}})
 
@@ -186,6 +199,9 @@ func (a *Agent) RegisterPlatformSender(name string, sender delivery.MessageSende
 
 func (a *Agent) SendNotice(ctx context.Context, notice delivery.Notice) (delivery.Receipt, error) {
 	if !a.turnOutputAllowed(ctx) {
+		return delivery.Receipt{}, nil
+	}
+	if !groupRuntimeNoticeBypass(ctx) && a.noticeTargetBlocked(notice.Target) {
 		return delivery.Receipt{}, nil
 	}
 	manager := a.outputs

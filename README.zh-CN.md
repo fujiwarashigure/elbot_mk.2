@@ -131,8 +131,16 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 - 实际执行模型统一授权：聊天、压缩、视觉 fallback、群分析摘要都在调用 provider 前按群模型目录重新校验。
 - 请求队列增加每用户/每群上限、队满/超时/取消/等待时间指标；provider 级并发限制避免把瞬时压力透传给上游。
 - OneBot 合并转发在 websocket 读取阶段限制体积，转发内容始终作为不可信用户数据处理。
+- 群内确定性能力不消耗 token：本地知识库 / FAQ、提醒、投票、报名由服务端直接答复或调度，不创建 Session、不调用 LLM。
+- 群会话线程模式与连续消息合并窗口：同群成员可共享一个 Session 并按到达顺序串行，同一成员的连续消息合并为一轮。
+- 群运行状态机：机器人自身被禁言 / 踢出后立即取消该群在途请求、拒绝新的模型调用，并丢弃发往该群的提醒与后台通知。
+- 入站与产出更可控：OneBot 平台级消息去重 + 有界预处理通道；长回复分包失败时返回部分回执，而不是重发整批。
+- 可选聊天硬预算 `[budget_limits].chat_hard_limit`：调用前原子预占、返回 usage 后结算，并发请求不会同时穿透剩余额度。
+- 可选语音转写 `[asr]`：语音消息先转写为文本再进入聊天、工具与上下文流程，未开启时保留原引用。
+- 长期记忆可定位、可删除、可迁移：写入时记录来源，提供 `/memory` / `/forget` 删除入口与可选 `angel_forget` 工具，`/memory backfill` 处理旧数据。
+- `state.toml` 支持外部编辑热加载：`/*state` 查看加载状态、`/*state reload` 立即生效，内部写回前先合并外部修改。
 
-本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
+本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、群内确定性服务（本地知识库 / 提醒 / 投票 / 报名）、群会话线程与群运行状态、语音转写、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
 
 | 新增能力 | 最短使用入口 |
 | --- | --- |
@@ -143,6 +151,15 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 | 群分析 clean-room 统计与摘要 | `group_analysis`、`[group_analysis]`、可选 Cron 日报 |
 | 长期记忆 clean-room | `angel_remember` / `angel_recall`、`/memory` |
 | 自主学习 clean-room | `/learning`、`self_learning_review`、review-before-apply |
+| 群知识库 / FAQ | `[group_knowledge]`、`/*faq add\|add-contains\|add-keyword\|remove\|clear\|test\|on\|off` |
+| 群内提醒 / 投票 / 报名 | `[group_services]`、`/*remind`、`/*poll`、`/*vote`、`/*signup`、`/*join` |
+| 群会话线程与消息合并 | `/*grouppolicy thread-mode group`、`/*grouppolicy merge-window <毫秒>` |
+| 群运行状态机 | `state.toml [group_runtime]`、`/*grouppolicy` |
+| 普通成员自助面板 | `/*me [tasks\|quota\|all]` |
+| 语音转写（可选） | `[asr]`、`/*grouppolicy asr <on\|off>`、`/*grouppolicy asr-quota <次数>` |
+| 聊天硬预算（可选） | `[budget_limits].chat_hard_limit` |
+| 长期记忆删除与迁移 | `/forget list\|<id>\|source <消息id>`、`/memory delete\|source\|backfill`、`[angel_memory].allow_tool_forget` |
+| `state.toml` 热加载 | `/*state`、`/*state reload` |
 | 平台能力扩展 | OneBot 群历史/群目录/头像；Telegram 群信息/管理员；QQ Official 本地回退 |
 | 系统信息与定时报告 | `/metrics.resources`、`[maintenance.daily_report]` |
 | 单轮模型 / 生图 / 工具声明 | `@model:<profile>`、`@image:<profile>`、`@use:<profile>` |
@@ -167,6 +184,17 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
   - 引擎自带上限与计数：默认同时最多 4 个上游任务、排队 16、同一任务最多 16 个等待者；命中/未命中、合并次数、上游任务数、错误类别和耗时按低基数标签统计，通过 `/metrics.vision` 暴露（`image_to_prompt` 与 `fallback` 分别显示占用），只含计数与上限，不含图片内容或媒体 ID。
   - 上游错误分类由适配器统一映射为 `APIError.Category`，agent 不再匹配错误文本；`[providers.*].vision = false`（含 model 级声明）会让需要图片输入的工具/兜底在启动时报错，而不是第一次调用才失败。
 
+- 群知识库（`[group_knowledge]`）：条目按 `平台 + 群 scope` 写入 `state.toml [group_knowledge]`，支持精确 / 包含 / 关键词三种匹配；命中后由服务端直接发送答案，不创建 Session、不调用 LLM、不消耗 chat token，并继续受唤醒词、静默时段、入站限流和群运行状态约束。匹配前做确定性归一化（全角转半角、大小写与空白折叠、去掉常用句末标点），条目不会注入模型提示词。管理入口 `/*faq add|add-contains|add-keyword|remove|clear|test|on|off`，只有当前群群主/管理员或超管可用，不能跨群操作。
+- 群内提醒 / 投票 / 报名（`[group_services]`）：提醒支持 `10m`、`1h30m`、`2d`、`15:04`、`YYYY-MM-DD HH:MM` 等时间格式，由本地调度器到点通过正常 Output Layer 发送；投票为单选项、可改票、结果只显示计数；报名支持容量与加入/退出/关闭。状态写入 `state.toml [group_services]`，普通成员可创建和参与，创建者、当前群群主/管理员或超管可关闭/删除；群不可用时延后重试或标记跳过。
+- 群会话线程模式与连续消息合并：`/*grouppolicy thread-mode group` 让同群成员共享一个 Session，普通消息按到达顺序串行执行，每条用户消息带服务端生成的发言成员标记，多成员输入不会互相覆盖；`/*grouppolicy merge-window <0-10000>` 把窗口内同一成员的连续消息合并为同一轮，不同成员仍保持串行且不共享权限主体。开启线程模式不迁移旧的每人独立 Session，撤回和成员退群会同步丢弃尚未运行的队列项。
+- 群运行状态机：机器人自身被禁言 / 踢出后当前群进入 `muted` / `removed`，服务端立即取消该群在途请求、拒绝新的模型调用，并丢弃发往该群的定时任务、提醒和后台通知，避免“模型继续计费但结果发不出去”；解除禁言或重新入群后恢复 `active`。状态变化只向超管发送一条聚合通知，重复事件不重复通知。
+- 入站去重与有界预处理：OneBot 入站按 `平台 + self_id + scope + message_id` 记录处理状态，TTL 内重连重放不会再次唤醒模型或重复计费，去重状态独立于 `history` 开关；`@` 解析、引用拉取和合并转发展开在有界 worker 池中执行，队列满时普通消息本地拒绝而不是创建无界 goroutine，撤回和成员事件走独立的高优先级通道。
+- 语音转写（`[asr]`，默认关闭）：被唤醒的语音消息先用已有 `[providers.*]` 的 OpenAI 兼容 `/audio/transcriptions` 端点转写为文本段，再进入聊天、工具和上下文流程；未开启或转写失败时保留原 `[语音]` 引用。provider/model 可用 `audio = true/false` 声明能力，全局 `[asr].enabled`、群策略 `/*grouppolicy asr <on|off>` 和每日额度（`asr-quota`、`user-asr-quota`、`global_asr_daily`、`user_asr_daily`）共同约束；成功后按媒体 ID 缓存，确定性 4xx 进入短负缓存。
+- 聊天硬预算（`[budget_limits].chat_hard_limit`，默认关闭）：在现有 token/费用账本上增加“调用前原子预占、返回 usage 后结算释放差额”的路径，并发请求不能同时穿透剩余额度；上游缺失 usage 时按预占量保守记账并写入 `budget.uncertain`，启用费用硬限制但模型缺价格时明确拒绝，取消/超时/重启后的未结算预占保持占用而不自动退款。
+- 长期记忆来源与删除：写入时记录来源类型、来源成员、平台消息 ID 和 Session ID。`/memory list|show|delete|source|backfill` 面向超管，`/forget list|<id>|source <消息id>` 面向普通成员，群聊中普通成员只能删除来源成员为自己的记忆，群主/群管理员/超管可删除当前群 scope 的任意记忆；`/forget resident normal|core|all [--confirm]` 可清空自己的常驻记忆。默认源消息撤回会删除派生记忆（可用 `[angel_memory].forget_on_recall` 关闭），`/*delete` 永久删除 Session 时按来源 Session ID 清理；旧版没有结构化来源列的记忆不匹配、不误删，可用 `/memory backfill [--confirm]` 确定性地回填来源类型。
+- 可选 `angel_forget` 工具（`[angel_memory].allow_tool_forget`，默认关闭）：让模型主动删除长期记忆，但只能删除来源成员为当前发言人、且属于当前平台/会话 scope 的单条记忆，别人的记忆、其他 scope 和旧版没有来源成员的记忆一律拒绝；风险等级 `high` 会进入工具确认流程（`/*detail`、`/*confirm`、`/*reject`），工具自身还要求 `confirm=true` 二次调用，首次调用只返回待删除内容，同一范围每分钟最多 3 条。该工具为隐藏工具，通过 `angel_recall` 的依赖注入到达模型，批量删除仍走 `/memory delete` 与 `/forget`。
+- `state.toml` 外部编辑热加载：进程每 15 秒按 mtime 检测一次外部修改并合并生效，`/*state` 查看路径、已加载时间和未生效修改，`/*state reload` 立即生效；生效后记录 `runtime_state_reloaded` 审计事件，并在确实有变更时给超管发送一条通知。每次内部写回前会先合并外部修改，手工编辑不再需要重启，也不会被内部写回覆盖。热加载覆盖 `mode_models`、`compact_model`、`naming_model`、`context_overflow`、`group_policy`、`group_knowledge`、`group_services`、`group_runtime`；`[budget]` 额度账本仍由运行中的进程独占，只在启动时从文件恢复，避免丢掉在途预占。
+- 长回复发送更可靠：主要平台的分包发送会合并已成功页/目标的回执并标记部分失败，部分失败时在审计日志留下平台消息数量，方便对账而不是整批重发。
 
 ### 独立健康接口
 

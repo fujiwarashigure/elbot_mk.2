@@ -27,6 +27,7 @@ rg -n "locator:tool" devdocs/code-map.md
 - `internal/app/foundation.go`、`models.go`、`runtime.go`：配置/存储基础设施、模型客户端，以及 Cron/Tool/Hook/Agent 核心装配。
 - `internal/app/image_rewriter.go`、`image_to_prompt.go`：把 `image_generate` 的低成本改写模型和 `image_to_prompt` 的视觉模型接到已有 `ModelClients`，再以接口形式注入 builtin 工具；`image_to_prompt` 显式启用但 provider/model 有误时在启动阶段报错。
 - `internal/app/vision.go`、`internal/agent/vision.go`、`internal/vision/`：自动视觉兜底。`[vision]` 段显式开启后，`agent.callLLM` 在 `APIError.Category == vision_unsupported` 时调用 `VisionDescriber` 把图片段替换成文字描述（有界并行 + 整批时间预算），失败则降级回文本引用；`internal/vision` 是 `image_to_prompt` 工具与兜底共用的唯一描述引擎（预处理 + 流式调用 + 版本化指纹缓存 + 成功/负缓存 + 同 key 合并 + 运行器/等待者上限 + `Stats()` 接入 `/metrics` + panic 隔离），不反向依赖 `internal/media`。`internal/llm/openai` 的 `parseError` 负责把上游错误映射为 `APIError.Category`，`shouldFallbackVision` 只读该字段。
+- `internal/app/asr.go`、`internal/agent/asr.go`、`internal/asr/`：可选语音转写。`[asr]` 显式开启后，`HandleMessage` 在已唤醒的入站消息上调用 `AudioTranscriber` 把语音段替换成 `[语音 N 自动转写（可能有误）：...]` 文本段；`internal/asr` 负责 OpenAI 兼容 multipart 上传、有界并发/队列、录音大小与响应上限、成功/负缓存和重试；预算按 `asr` kind 预占，受全局、群和群内单用户四级每日额度约束。
 - `internal/llm/errors.go`：结构化 `APIError`（`StatusCode`/`Code`/`Type`/`Param`/`Message`/`Cause`）与确定性失败分类；`openai` 适配器的 `parseError` 在此保留上游错误码，供视觉兜底判定和负缓存使用。
 - `internal/app/platforms.go`、`integrations.go`：平台运行、Elnis 和平台能力接线；同目录 `service_marker*.go` 使用 `flock` 文件锁做服务单实例互斥，避免陈旧 PID 在容器重建后误判。
 
@@ -89,6 +90,7 @@ rg -n "ELBOT_OPS_TOKEN|WATCHDOG_OPS_TOKEN|restore-verify|fallback_mode|doctor|up
 - `internal/agent/message.go`：消息入口、slash/普通输入分发和用户错误通知。
 - `internal/agent/command_runtime.go`：命令权限、Turn 冲突、通知和 continuation 的统一编排。
 - `internal/agent/input.go`：普通输入预处理、命令 continuation、pending 和风险确认入口。
+- `internal/agent/inbox.go`、`inbound_speaker.go`：群共享线程的有序 Session 队列与同一成员连续消息合并窗口；每条输入保留独立 Actor/Speaker 与平台消息钮，不同成员串行而不合并权限主体；共享会话的用户消息写入服务端生成的发言成员标记与 `speakers` 元数据。
 - `internal/agent/segments.go`：平台入站 Segment 与 LLM Segment 转换。
 - `internal/agent/inbound_media.go`：实际消费前的平台 resolver 与 Media Center 桥接、大小校验和不可用降级。
 - `internal/tool/builtin/chat_history.go`：当前聊天历史查询与媒体位置/下载状态展示，查询不下载；`get_media.go`：显式选定媒体位置获取，仅返回文本 ID，单次最多 5 次未入库媒体获取尝试。
@@ -99,12 +101,17 @@ rg -n "ELBOT_OPS_TOKEN|WATCHDOG_OPS_TOKEN|restore-verify|fallback_mode|doctor|up
 - `internal/agent/options.go`、`logging.go`、`identity.go`：运行配置、日志和 Actor/Scope 解析。
 - `internal/agent/chat.go`：普通对话主流程；群级默认模型只在本轮没有显式 `@model:` 覆盖时生效。
 - `internal/agent/group_policy.go`：群级策略解析、唤醒/静默判断、模型目录、learning 审核动作授权；策略保存在 `state.toml` 的 `group_policy`。
+- `internal/agent/group_knowledge.go`、`internal/groupkb/`：按群 scope 的本地确定性 FAQ 匹配与状态；`groupkb` 只做归一化和 exact/contains/keywords 匹配，不调用模型；Agent 负责权限、上限、`state.toml [group_knowledge]` 持久化和命中后的直接回答。
+- `internal/agent/member_panel.go`、`internal/agent/commands/member_panel.go`：普通成员 `/me` 自助面板；按 FairKey 过滤自己的请求和排队消息，并汇总自己的生图/视觉/聊天额度，不暴露跨群全局聚合用量。
+- `internal/agent/group_services_state.go`、`group_services_reminders.go`、`group_services_polls.go`、`group_services_signups.go`、`internal/agent/commands/group_services.go`：群内提醒/投票/报名；状态写入 `state.toml [group_services]`，提醒由 Agent 本地 ticker 调度，投票/报名为纯确定性状态机，全部受群运行状态与全局/群级开关约束。
 - `internal/agent/model_policy.go`：实际执行模型目标的最后一道目录校验，覆盖 turn hook、cron override、压缩、视觉 fallback 和 group_analysis 摘要。
+- `internal/agent/state_watch.go`、`internal/agent/commands/state.go`：`state.toml` 外部编辑热加载；`refreshRuntimeState`/`applyRuntimeState`（`model.go`）负责 mtime 判定、分区合并和变更摘要，`StartRuntimeStateWatch` 每 15 秒轮询，`/state` 查看状态、`/state reload` 强制生效；`saveRuntimeState` 写回前先合并外部修改，`[budget]` 账本不参与热加载。
+- `internal/angelmemory/`、`internal/tool/builtin/angel_memory.go`、`internal/tool/builtin/angel_forget.go`：scope-local 长期记忆与工具；`angel_forget` 默认关闭（`[angel_memory].allow_tool_forget`），只删除来源为当前发言人的单条记忆，高风险 + `confirm=true` 二次确认 + 每分钟上限，作为 `angel_recall` 的依赖注入；`/memory backfill` 只回填旧数据可确定的 `source_kind`。
 - `internal/agent/tool_auth.go`：群工具白名单统一授权入口与执行前复核；展开工具 profile，区分“继承全局”和“禁止全部”。
-- `internal/agent/budget.go`：群 / 单用户 / 全局每日账本；生图/视觉调用预占、chat token/费用、provider 重试、工具执行幂等分别写入 `budget`；账本落盘失败时回滚并拒绝受限调用。
+- `internal/agent/budget.go`：群 / 单用户 / 全局每日账本；生图/视觉/语音转写调用预占、chat token/费用、provider 重试、工具执行幂等分别写入 `budget`；账本落盘失败时回滚并拒绝受限调用。可选 `chat_hard_limit` 在调用前按估算输入 + 输出预留原子预占，usage 返回后结算差额；usage 缺失或重启未结算时保持保守占用并写入 `budget.uncertain`。
 - `internal/historygate/`：统一历史写入门；适配器的 `chat_history` / `outbound_messages` 写入按可信 `平台 + scope` 策略过滤，`history=off` 不删除旧记录但停止新增。
 - `internal/agent/turn_gate.go`：turn 终止状态和晚到输出闸门；流式 flush、工具结果回传和最终发送前检查。
-- `internal/agent/events.go`：notice/request/meta_event 的确定性处理；撤回按消息 ID → turn request 精确取消，成员退群/禁用按 FairKey 定向取消，不调用 LLM。
+- `internal/agent/events.go`：notice/request/meta_event 的确定性处理；撤回按消息 ID → turn request 精确取消，成员退群/禁用按 FairKey 定向取消，不调用 LLM；机器人自身被禁言/踢出时由 `group_runtime.go` 转入 `muted` / `removed`，暂停该群模型调用与输出。群运行状态持久化在 `state.toml [group_runtime]`。
 - `internal/agent/chat_llm.go`：LLM 调用和消息转换。
 - `internal/agent/chat_tools.go`：工具执行与确认。
 - `internal/agent/turn_output.go`：turn 输出适配。
@@ -176,9 +183,11 @@ rg -n "Phase|Request|Cancel|pending|confirm|runtime status|sending" internal/req
 - `internal/tool/builtin/self_learning.go`：`self_learning_review` 工具。
 - `internal/tool/builtin/image_to_prompt.go`：`image_to_prompt` 内置工具，读取 Media Center 图片并通过 `ImagePromptService` 委托给共享的 `internal/vision.Service`（app 层用已有 provider 配置它）；工具自身不缓存、不做 singleflight，缓存键、并发合并与失败/空/截断处理都在 `internal/vision`。
 - `internal/groupanalysis/`：群分析 clean-room 统计与可选 `Summarizer`；只依赖 `chat_history` / `outbound_messages`。
-- `internal/angelmemory/`：clean-room SQLite 长期记忆、召回和上下文构造。
+- `internal/groupkb/`：确定性 FAQ 匹配引擎；归一化（全角/大小写/空白/标点）和 exact/contains/keywords 规则，纯本地、无模型依赖。
+- `internal/angelmemory/`：clean-room SQLite 长期记忆、召回和上下文构造；写入来源类型/用户/消息 ID/Session ID，提供 scope 限定的查询、前缀解析和按来源删除。
 - `internal/selflearning/`：clean-room 观察、候选挖掘、review-before-apply 和上下文构造。
 - `internal/agent/commands/memory_learning.go`：`/memory`、`/learning` 管理命令。
+- `internal/agent/commands/memory_forget.go`、`memory_common.go`：普通成员 `/forget` 入口、可见性过滤、按来源删除和常驻记忆清空。
 - `internal/tool/builtin/file_tools_ast.go`：`read_file` 的 Go/Shell AST 名称搜索与结果渲染。
 - `internal/agent/tools.go`：Agent 工具运行态和命令依赖适配。
 - `internal/agent/toolrun_*.go`：Agent 到 ToolRun 的桥接。
@@ -290,7 +299,7 @@ rg -n "Output|SendChat|SendNotice|Stream|Reasoning|emoticon|receipt" internal/de
 
 - `internal/platform/platform.go`：平台抽象，以及可选的群历史/群目录/头像/群素材能力接口；`PlatformEventHandler` 提供 notice/request/meta_event 的非消息事件入口。
 - `internal/platform/qq-onebot/capabilities.go`：OneBot 可选群历史、群信息、成员列表和头像 URL 能力。
-- `internal/platform/qq-onebot/message.go`：入站文本保留原始空白，并生成不含转发内容的唤醒匹配视图；按共享总预算展开 `forward`/`node` 合并转发。`adapter.go` 的 `readLoop` 分发 notice/request/meta_event，并限制 `get_forward_msg` 拉取次数、超时、返回体和拉取失败降级。
+- `internal/platform/qq-onebot/message.go`：入站文本保留原始空白，并生成不含转发内容的唤醒匹配视图；按共享总预算展开 `forward`/`node` 合并转发。`inbound.go` 提供 `platform+bot+scope+message_id` 入站去重和有界预处理 worker / 高优先级事件通道；`adapter.go` 的 `readLoop` 不再逐条无界起 goroutine，并限制 `get_forward_msg` 拉取次数、超时、返回体和拉取失败降级。
 - `internal/platform/telegram/capabilities.go`：Telegram 可选群信息和管理员列表能力；历史与全量成员回退本地历史。
 - `internal/platform/media.go`：Chat History 原始有序 segments 编解码与敏感来源清洗。
 - `internal/platform/refcontext/`：按输出索引、Chat History、平台兜底恢复引用；自己 Session 的最后一条 assistant 自动 Resume，较早 assistant 自动 Fork。
@@ -317,6 +326,7 @@ rg -n "PlatformAdapter|SendChat|MessageSegment|Actor|Scope|remote|websocket|long
 先看：
 
 - `internal/session/service.go`、`types.go`：Session 服务主体和领域请求/结果类型。
+- `internal/session/shared.go`：群共享线程的 Session 所有者、`Scope.Shared` key、元数据标记与访问判定。
 - `internal/session/mode.go`：模式激活和 work 历史限制。
 - `internal/session/lifecycle.go`、`query.go`、`fork.go`、`expiration.go`：生命周期、查询、Fork 和闲置过期策略。
 - `internal/session/naming.go`：异步 Session 命名。

@@ -58,6 +58,8 @@ type message struct {
 	Caption        string      `json:"caption"`
 	Photo          []photoSize `json:"photo"`
 	Document       *document   `json:"document"`
+	Voice          *voice      `json:"voice"`
+	Audio          *audio      `json:"audio"`
 	ReplyToMessage *message    `json:"reply_to_message"`
 }
 
@@ -74,6 +76,25 @@ type document struct {
 	FileUniqueID string `json:"file_unique_id"`
 	FileName     string `json:"file_name"`
 	MIMEType     string `json:"mime_type"`
+	FileSize     int64  `json:"file_size"`
+}
+
+type voice struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	MIMEType     string `json:"mime_type"`
+	Duration     int    `json:"duration"`
+	FileSize     int64  `json:"file_size"`
+}
+
+type audio struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name"`
+	MIMEType     string `json:"mime_type"`
+	Title        string `json:"title"`
+	Performer    string `json:"performer"`
+	Duration     int    `json:"duration"`
 	FileSize     int64  `json:"file_size"`
 }
 

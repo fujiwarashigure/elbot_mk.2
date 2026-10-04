@@ -288,6 +288,67 @@ func (m *Manager) CancelSession(sessionID string) int {
 	return len(active)
 }
 
+// ScopeIDs returns active request IDs for one trusted scope bucket. The Agent
+// uses this to mark turns terminal before CancelScope so a late provider/tool
+// result cannot become output after the bot left or was muted in that group.
+func (m *Manager) ScopeIDs(scopeKey string) []string {
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, 4)
+	for id, active := range m.active {
+		if active.request.ScopeKey == scopeKey {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// CancelScope cancels and removes every active or waiting request whose scope
+// bucket matches scopeKey. It is used for group-wide lifecycle pauses.
+func (m *Manager) CancelScope(scopeKey string) int {
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" {
+		return 0
+	}
+	m.mu.Lock()
+	active := []*activeRequest{}
+	kinds := map[Kind]bool{}
+	for id, req := range m.active {
+		if req.request.ScopeKey != scopeKey {
+			continue
+		}
+		delete(m.active, id)
+		active = append(active, req)
+		kinds[req.request.Kind] = true
+	}
+	cancelledWaiters := 0
+	for kind, list := range m.waiters {
+		kept := list[:0]
+		for _, w := range list {
+			if w.scopeKey == scopeKey {
+				w.cancelled = true
+				close(w.ready)
+				cancelledWaiters++
+				continue
+			}
+			kept = append(kept, w)
+		}
+		m.waiters[kind] = kept
+	}
+	for kind := range kinds {
+		m.grantWaitersLocked(kind)
+	}
+	m.mu.Unlock()
+	for _, req := range active {
+		req.cancel()
+	}
+	return len(active) + cancelledWaiters
+}
+
 // FairKeyIDs returns the active request IDs for one fairness bucket. It is
 // used by the Agent to mark those turns terminal before CancelFairKey so a
 // provider/tool that ignores context cancellation cannot emit a late message.

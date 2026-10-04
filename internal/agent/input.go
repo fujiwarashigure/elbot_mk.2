@@ -70,7 +70,7 @@ func (a *Agent) handleAppendConfirmationInput(ctx context.Context, session *stor
 		a.sendChat(ctx, "已取消追加，本轮处理已停止。")
 		return nil
 	default:
-		a.turns.AppendPendingInput(session.ID, inboundTurnInput(ctx, text))
+		a.turns.AppendPendingInput(session.ID, a.turnInputForMessage(ctx, text))
 		return nil
 	}
 }
@@ -88,9 +88,29 @@ func (a *Agent) handleInput(ctx context.Context, text string) error {
 		a.sendChat(ctx, rateLimitRetryText(retryAfter))
 		return nil
 	}
+	if a.tryGroupKnowledgeAnswer(ctx, text) {
+		return nil
+	}
 	session, err := a.sessionForInput(ctx, text)
 	if err != nil {
 		return err
+	}
+	if a.useInboundInbox(ctx) {
+		phase := a.turns.Snapshot(session.ID).Phase
+		switch phase {
+		case turn.PhaseAwaitRiskConfirm, turn.PhaseAwaitAppendConfirm, turn.PhaseCompact:
+			// Confirmation and compaction notices must be handled immediately;
+			// queueing them behind the turn they are answering would deadlock.
+			return a.handleSessionInput(ctx, session, text)
+		case turn.PhaseTool:
+			// A per-user tool turn can safely absorb same-actor pending input.
+			// Shared threads must queue instead, so another member's text never
+			// runs under the current turn's actor permissions.
+			if !a.scope(ctx).Shared {
+				return a.handleSessionInput(ctx, session, text)
+			}
+		}
+		return a.submitInbound(ctx, session.ID, text)
 	}
 	return a.handleSessionInput(ctx, session, text)
 }
@@ -168,7 +188,8 @@ func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session
 			a.markTurnCanceled(requestID)
 		}
 		a.requests.CancelSession(session.ID)
-		if !a.turns.InterruptLLMInput(session.ID, inboundTurnInput(ctx, text)) {
+		a.cancelInboxSession(session.ID)
+		if !a.turns.InterruptLLMInput(session.ID, a.turnInputForMessage(ctx, text)) {
 			return nil
 		}
 		timeout := a.confirmationWaitTimeout(ctx)
@@ -183,7 +204,7 @@ func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session
 		}
 		return nil
 	case turn.PhaseTool:
-		a.turns.AppendPendingInput(session.ID, inboundTurnInput(ctx, text))
+		a.turns.AppendPendingInput(session.ID, a.turnInputForMessage(ctx, text))
 		a.sendChat(ctx, fmt.Sprintf("已追加，将在当前流程下一次模型调用时带上。发送 %sstop 可打断当前流程。", a.commandPrefix()))
 		return nil
 	case turn.PhaseCompact:
@@ -229,7 +250,16 @@ func hasForkFromMessage(ctx context.Context) bool {
 func (a *Agent) sessionForInput(ctx context.Context, text string) (*storage.Session, error) {
 	if msg, ok := platform.MessageContextFrom(ctx); ok {
 		if msg.ResumeSessionID != "" {
-			return a.sessions.Resume(ctx, a.scope(ctx), msg.ResumeSessionID)
+			session, err := a.sessions.Resume(ctx, a.scope(ctx), msg.ResumeSessionID)
+			if err == nil {
+				return session, nil
+			}
+			// A reply to a Session created before shared thread mode was
+			// enabled cannot be resumed into the shared scope. Continue in the
+			// current shared Session instead of failing the message.
+			if !a.scope(ctx).Shared {
+				return nil, err
+			}
 		}
 		if msg.ForkFromMessageID != "" {
 			return a.sessions.Fork(ctx, a.scope(ctx), msg.ForkFromMessageID)

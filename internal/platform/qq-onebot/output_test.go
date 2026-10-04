@@ -56,6 +56,35 @@ func TestSendNoticeKeepsPrivateToolPreview(t *testing.T) {
 		t.Fatalf("action = %q", action)
 	}
 }
+
+func TestSendContextTextReturnsPartialReceiptOnLaterPageFailure(t *testing.T) {
+	var calls atomic.Int64
+	transport := newTestTransport(t, func(req request) response {
+		n := calls.Add(1)
+		if n == 3 {
+			return response{Status: "failed", Retcode: 100, Data: []byte(`{}`), Echo: req.Echo}
+		}
+		return response{Status: "ok", Data: []byte(fmt.Sprintf(`{"message_id":%d}`, n)), Echo: req.Echo}
+	})
+	adapter := New(Config{Enabled: true, URL: transport.URL}, nil, nil, nil)
+	adapter.transport = transport
+	ctx := context.WithValue(context.Background(), targetKey{}, target{MessageType: "group", GroupID: 9})
+
+	receipt, err := adapter.sendContextText(ctx, strings.Repeat("a", qqTextPageRunes*3))
+	if err == nil {
+		t.Fatal("expected page 3 failure")
+	}
+	if !receipt.Failed {
+		t.Fatalf("receipt should be marked failed: %#v", receipt)
+	}
+	if !strings.Contains(receipt.Failure, "page 3/3") {
+		t.Fatalf("failure = %q", receipt.Failure)
+	}
+	if len(receipt.PlatformMessageIDs) != 2 {
+		t.Fatalf("partial receipt = %#v", receipt.PlatformMessageIDs)
+	}
+}
+
 func TestOutputSegmentsFileUsesBase64ForPlainPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.txt")
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestNewFromPlatformConfigReadsAccessTokenFromDotEnv(t *testing.T) {
@@ -71,5 +72,46 @@ func TestNewFromPlatformConfigAllowsMissingAccessToken(t *testing.T) {
 	}
 	if adapter.cfg.AccessToken != "" {
 		t.Fatalf("access token = %q, want empty", adapter.cfg.AccessToken)
+	}
+}
+func TestNewFromPlatformConfigAppliesInboundDefaults(t *testing.T) {
+	adapter, err := NewFromPlatformConfig(map[string]any{
+		"enabled":                   true,
+		"inbound_dedup_ttl_seconds": 120,
+	}, nil, nil, nil, nil, nil, t.TempDir(), "", 0, 0)
+	if err != nil {
+		t.Fatalf("NewFromPlatformConfig: %v", err)
+	}
+	if adapter.cfg.InboundDedupEnabled == nil || !*adapter.cfg.InboundDedupEnabled {
+		t.Fatal("inbound dedup should default to enabled")
+	}
+	if adapter.cfg.PreprocessWorkers <= 0 || adapter.cfg.PreprocessQueueSize <= 0 {
+		t.Fatalf("preprocess defaults = %d/%d", adapter.cfg.PreprocessWorkers, adapter.cfg.PreprocessQueueSize)
+	}
+	if adapter.inbound == nil || adapter.inbound.dedup == nil {
+		t.Fatal("inbound runtime should be initialized")
+	}
+	if got := adapter.inbound.dedup.ttl; got != 2*time.Minute {
+		t.Fatalf("dedup ttl = %s", got)
+	}
+}
+
+func TestNewFromPlatformConfigCanDisableInboundDedup(t *testing.T) {
+	adapter, err := NewFromPlatformConfig(map[string]any{
+		"enabled":               true,
+		"inbound_dedup_enabled": false,
+	}, nil, nil, nil, nil, nil, t.TempDir(), "", 0, 0)
+	if err != nil {
+		t.Fatalf("NewFromPlatformConfig: %v", err)
+	}
+	if adapter.inbound == nil {
+		t.Fatal("inbound runtime should exist")
+	}
+	if adapter.inbound.dedup != nil {
+		t.Fatal("dedup should be disabled")
+	}
+	duplicate, _ := adapter.beginInboundJob("k")
+	if duplicate {
+		t.Fatal("disabled dedup must not suppress")
 	}
 }

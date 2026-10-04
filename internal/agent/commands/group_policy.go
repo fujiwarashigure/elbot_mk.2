@@ -36,14 +36,17 @@ func (c groupPolicyCommand) Info() command.Info {
   /grouppolicy tool-allow <工具名,工具名|none|clear>
   /grouppolicy image-quota <次数>
   /grouppolicy vision-quota <次数>
+  /grouppolicy asr-quota <次数>
   /grouppolicy user-image-quota <次数>
   /grouppolicy user-vision-quota <次数>
+  /grouppolicy user-asr-quota <次数>
   /grouppolicy chat-tokens-quota <token 数>
   /grouppolicy chat-cost-quota <金额>
   /grouppolicy quiet <HH:MM-HH:MM|clear>
   /grouppolicy analysis <on|off>
   /grouppolicy learning <on|off>
   /grouppolicy history <on|off>
+  /grouppolicy asr <on|off>
   /grouppolicy learning-moderation <on|off>   # 仅超级管理员
   /grouppolicy learning-moderation-actions <view,decide,mine>  # 仅超级管理员
   /grouppolicy reset [field]

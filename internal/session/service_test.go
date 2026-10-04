@@ -262,3 +262,38 @@ func TestServiceNonCLICannotResumeOtherScope(t *testing.T) {
 		t.Fatal("expected scope error")
 	}
 }
+
+func TestSharedThreadScopeUsesOneCurrentSession(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	scopeA := Scope{ActorID: "u1", Platform: "qqonebot", PlatformScopeID: "group:9", Shared: true}
+	scopeB := Scope{ActorID: "u2", Platform: "qqonebot", PlatformScopeID: "group:9", Shared: true}
+	first, err := svc.GetOrCreateCurrent(ctx, scopeA, "hello")
+	if err != nil {
+		t.Fatalf("GetOrCreateCurrent A: %v", err)
+	}
+	second, err := svc.GetOrCreateCurrent(ctx, scopeB, "hello")
+	if err != nil {
+		t.Fatalf("GetOrCreateCurrent B: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("shared current = %s and %s, want same session", first.ID, second.ID)
+	}
+	if first.OwnerID != sharedThreadOwnerID(scopeA) {
+		t.Fatalf("owner = %q, want %q", first.OwnerID, sharedThreadOwnerID(scopeA))
+	}
+	if _, err := svc.Resume(ctx, scopeB, first.ID); err != nil {
+		t.Fatalf("shared resume: %v", err)
+	}
+	list, err := svc.List(ctx, scopeA, "", 10)
+	if err != nil {
+		t.Fatalf("shared list: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != first.ID {
+		t.Fatalf("shared list = %#v, want one shared session", list)
+	}
+	perUser := Scope{ActorID: "u1", Platform: "qqonebot", PlatformScopeID: "group:9"}
+	if _, err := svc.Resume(ctx, perUser, first.ID); err == nil {
+		t.Fatal("non-shared scope must not access a shared thread session")
+	}
+}

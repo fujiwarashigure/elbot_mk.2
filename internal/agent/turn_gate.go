@@ -47,6 +47,9 @@ func (a *Agent) turnOutputAllowed(ctx context.Context) bool {
 			return false
 		}
 	}
+	if a.groupRuntimeBlocked(ctx) {
+		return false
+	}
 	requestID := ""
 	if ctx != nil {
 		requestID = turnRequestIDFromContext(ctx)

@@ -31,12 +31,13 @@ func (s *Service) Fork(ctx context.Context, scope Scope, fromMessageID string) (
 	fork := &storage.Session{
 		ParentSessionID:   source.ID,
 		ForkFromMessageID: message.ID,
-		OwnerID:           scope.ActorID,
+		OwnerID:           sessionOwnerID(scope),
 		Platform:          scope.Platform,
 		PlatformScopeID:   scope.PlatformScopeID,
 		Mode:              source.Mode,
 		Status:            storage.SessionStatusActive,
 		Title:             forkTitle(source.Title),
+		Metadata:          sharedThreadMetadataForScope(scope, ""),
 	}
 	if err := s.store.Sessions().Create(ctx, fork); err != nil {
 		return nil, err

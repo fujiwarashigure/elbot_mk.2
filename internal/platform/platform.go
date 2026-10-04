@@ -179,6 +179,7 @@ type MessageContext struct {
 	DisplayName           string
 	GroupRole             security.GroupRole
 	ScopeID               string
+	SessionID             string
 	ConversationKind      ConversationKind
 	PlatformMessageID     string
 	ReplyToMessageID      string

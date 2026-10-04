@@ -12,12 +12,18 @@ func (s *Service) List(ctx context.Context, scope Scope, query string, limit int
 }
 
 func (s *Service) ListPage(ctx context.Context, scope Scope, query string, limit, offset int, archivedOnly bool) ([]storage.SessionSummary, error) {
+	actorID := scope.ActorID
+	includeCron := !scope.IsCLI
+	if scope.Shared {
+		actorID = sharedThreadOwnerID(scope)
+		includeCron = false
+	}
 	return s.store.Sessions().List(ctx, storage.ListSessionsRequest{
-		ActorID:                 scope.ActorID,
+		ActorID:                 actorID,
 		Platform:                scope.Platform,
 		PlatformScopeID:         scope.PlatformScopeID,
 		IncludeAllPlatforms:     scope.IsCLI,
-		IncludeSamePlatformCron: !scope.IsCLI,
+		IncludeSamePlatformCron: includeCron,
 		ArchivedOnly:            archivedOnly,
 		Query:                   query,
 		Limit:                   limit,
@@ -33,12 +39,18 @@ func (s *Service) ListResumablePage(ctx context.Context, scope Scope, limit, off
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return nil, err
 	}
+	actorID := scope.ActorID
+	includeCron := !scope.IsCLI
+	if scope.Shared {
+		actorID = sharedThreadOwnerID(scope)
+		includeCron = false
+	}
 	return s.store.Sessions().List(ctx, storage.ListSessionsRequest{
-		ActorID:                 scope.ActorID,
+		ActorID:                 actorID,
 		Platform:                scope.Platform,
 		PlatformScopeID:         scope.PlatformScopeID,
 		IncludeAllPlatforms:     scope.IsCLI,
-		IncludeSamePlatformCron: !scope.IsCLI,
+		IncludeSamePlatformCron: includeCron,
 		ExcludeSessionID:        currentID,
 		OrderByUpdatedAt:        true,
 		Limit:                   limit,

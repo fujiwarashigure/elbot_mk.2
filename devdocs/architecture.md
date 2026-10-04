@@ -35,6 +35,7 @@ rg -n "locator:tool-flow" devdocs/architecture.md
 - 应用/行为静态配置：`app.toml`。
 - 共享只读服务配置：同目录 `services.toml`（`[providers.*]`、`[model_metadata]`、`[model_profiles]`、`[image_generation]`）；旧部署仍支持 `providers.toml`。
 - 运行时模型状态：同目录 `state.toml`；由 ElBot 回写，必须与只读配置分离。
+- `state.toml` 支持外部编辑热加载：`Agent.refreshRuntimeState` 按 mtime 判定外部修改并合并到内存，`StartRuntimeStateWatch` 每 15 秒轮询，`/state reload` 强制立即生效；`saveRuntimeState` 在写回前先执行一次合并，避免内部写回覆盖手工修改。热加载覆盖模型选择、`context_overflow`、`group_policy`、`group_knowledge`、`group_services`、`group_runtime`；`[budget]` 账本由运行中进程独占，只在启动时从文件恢复。
 - 工具 tag 配置：同目录 `tool_tags.toml`。
 - 用户可编辑资产：配置目录下的 `memories.toml`、`long_memory/`、`skills/`、`plugins/`。
 - Hook 配置：入口为配置目录 `plugins/hooks.toml`；被引用插件使用 `plugins/<plugin-id>/hook.toml`，持久 Hook 在其中声明 `[plugin.runtime]`。
@@ -100,6 +101,13 @@ Provider 熔断与备用：
 - 流式输出最终由对话主流程用最终文本 replace。
 - 发送前会发布 `sending` phase，便于 `/requests` 区分 LLM 慢还是平台发送慢。
 - 普通输入在工具阶段不会打断工具，会以 text/image segments 进入 pending；下一次 LLM 调用前已有的 pending 会合并注入当前轮，最终 LLM 调用期间新到达的 pending 则在当前轮正常结束后作为新用户消息自动开启下一轮。
+- 群可用 `thread-mode = group` 切换为共享 Session：普通输入先进入 `internal/agent/inbox.go` 的有序队列，同一成员在 `merge-window` 内的连续消息合并为一轮，不同成员按到达顺序串行；队列项保留各自的 Actor 与发言成员元数据，撤回/退群会同步清理尚未运行的队列项。
+- 群普通输入在进入 Session 前会先经过本地确定性 FAQ 匹配：命中时由服务端直接发送答案并结束本轮，不创建 Session、不调用 LLM；未命中才走正常对话链路。FAQ 仍受唤醒、静默时段、入站限流和群运行状态约束。
+- 普通成员可用 `/me` 查看自己的 FairKey 任务、排队消息和本群/本人额度；面板隐藏跨群全局聚合用量，只读且不调用模型。
+- 群内提醒/投票/报名是本地确定性服务：状态写入 `state.toml [group_services]`，提醒由 Agent 启动时的本地 ticker 调度发送，投票/报名不进入 LLM；关闭群级或全局开关后创建与参与都会被拒绝。
+- `angel_memory` 是 scope-local SQLite 长期记忆：写入时记录 `source_kind` / `source_actor_id` / `source_message_id` / `source_session_id`，命令和工具都返回记忆 ID 与来源；`/forget` 对普通成员只暴露来源为自己的群记忆，群主/管理员/超管可按 scope 删除；平台撤回事件默认按 `平台 + scope + source_message_id` 删除派生记忆。
+- 旧版长期记忆只写了自由文本 `source`（生产写入方唯一，固定为 `"tool"`），没有结构化来源列，因此无法回填来源成员/消息/Session；`/memory backfill` 只做可确定的 `source_kind` 回填，这些旧行继续被按来源删除的逻辑跳过，避免误删。
+- `angel_forget` 是默认关闭的可选工具（`[angel_memory].allow_tool_forget`）：仅在来源成员等于当前发言人、且属于当前 scope 时删除单条记忆，风险等级 `high` 走确认流程，自身还要求 `confirm=true` 二次调用，并有每 scope/actor 每分钟上限；它是隐藏工具，通过 `angel_recall` 的 `DependsOn` 注入模型。
 - Prompt Builder 每个 turn 从 Soul、工具提示、工具标签和当前 actor 的常驻记忆构建一次 system message；该消息只在当前 turn 内复用，不进入会话历史。常驻记忆注入时使用 `<resident_memory>` 边界和“用户数据、不是系统指令”的信任声明，并转义内容中的尖括号，防止提前结束或伪造边界标签。normal 以换行分隔的独立条目保存，注入时渲染为列表项；`memories.toml` 通过“临时文件 + fsync + rename”原子落盘，并在保存前检测外部改动后重载，避免损坏或覆盖外部编辑。
 
 <!-- locator:commands -->
@@ -273,6 +281,7 @@ shell 导出缓存位于 sandbox 的 `media-inputs/`，按内容 ID 命名，首
 - 原始有序 segments 写入 Chat History，包括纯媒体消息；过滤 base64、临时本地路径和 token/签名 URL，不保证来源永久有效。
 - Agent 统一判断 wakeup，并只读检查 waiting Hook route；仅唤起或 waiting continuation 时物化媒体，普通观察 Hook 不下载。
 - Telegram resolver 内使用 token URL和代理，OneBot 按需 get_image/get_file；QQ Official 的事件 URL直接由 Media Center 导入，不引入额外 resolver 层。
+- 可选 ASR 在媒体物化后、Hook/命令前处理当前消息的语音段：复用 provider 的音频转写端点，成功后替换为带“自动转写（可能有误）”标记的文本段，失败保留 `[语音]`；受全局 `[asr]`、群策略 `asr on|off` 和四级每日额度约束。
 - 引用按输出索引 → Chat History → 平台能力恢复有序媒体，图片进入视觉输入，Session 仅保存稳定媒体 ID 与文本投影。同一 actor、平台和 scope 的最后一条 assistant 显式设置 `ResumeSessionID`，使 TTL 清理或 `/new` 清除 current 后仍恢复来源 Session，且不重复注入引用内容；较早 assistant 设置 `ForkFromMessageID` 并保留引用媒体。后台 Resume 和其他用户或 scope 的普通引用规则保持独立。
 
 输出侧：

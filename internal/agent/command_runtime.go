@@ -54,6 +54,12 @@ func (e *commandExecutor) Handle(ctx context.Context, text string) (bool, error)
 	}
 
 	actor, _ := security.ActorFromContext(ctx)
+	if hasInfo && e.scope(ctx).Shared && info.SessionEffect&(command.SessionEffectSwitchCurrent|command.SessionEffectMutate) != 0 {
+		if actor.Role != security.RoleSuperadmin && actor.GroupRole != security.GroupRoleOwner && actor.GroupRole != security.GroupRoleAdmin {
+			e.sendChat(ctx, "当前群使用共享会话，会话切换/修改命令仅限群主、群管理员或机器人超级管理员。")
+			return true, nil
+		}
+	}
 	allowed := hasInfo && command.CanAccess(info, actor)
 	if hasInfo && info.GroupAdminNeedsGrant {
 		// Group admin access is explicitly delegated per group. Do not let

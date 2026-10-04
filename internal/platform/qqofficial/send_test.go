@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,51 @@ func TestSendChatUsesGroupMessageAPI(t *testing.T) {
 	}
 	if body.Content != "hello" || body.MsgID != "incoming-1" || body.MsgSeq != 1 {
 		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestQQOfficialTextPages(t *testing.T) {
+	pages := qqOfficialTextPages(strings.Repeat("界", qqOfficialTextPageRunes+1))
+	if len(pages) != 2 {
+		t.Fatalf("len(pages) = %d", len(pages))
+	}
+	for i, page := range pages {
+		if got := len([]rune(page)); got > qqOfficialTextPageRunes {
+			t.Fatalf("page %d too long: %d", i, got)
+		}
+	}
+	if !strings.Contains(pages[0], "1/2") || !strings.Contains(pages[1], "2/2") {
+		t.Fatalf("pages = %#v", pages)
+	}
+}
+
+func TestSendChatPaginatesLongTextAndKeepsPartialReceipt(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		if n == 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"too long"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"sent-1"}`))
+	}))
+	defer server.Close()
+
+	adapter := newQQOfficialSendTestAdapter(server)
+	ctx := context.WithValue(context.Background(), targetKey{}, sendTarget{Kind: targetGroup, OpenID: "group-1"})
+	receipt, err := adapter.SendChat(ctx, []delivery.Output{delivery.Text(strings.Repeat("界", qqOfficialTextPageRunes+1))})
+	if err == nil {
+		t.Fatal("expected second page failure")
+	}
+	if !receipt.Failed || len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "sent-1" {
+		t.Fatalf("partial receipt = %#v", receipt)
+	}
+	if !strings.Contains(receipt.Failure, "page 2/2") {
+		t.Fatalf("failure = %q", receipt.Failure)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("calls = %d", calls.Load())
 	}
 }
 

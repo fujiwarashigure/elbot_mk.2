@@ -106,10 +106,9 @@ func (a *Adapter) SendNotice(ctx context.Context, notice delivery.Notice) (deliv
 		target.Proactive = true
 		ctx := context.WithValue(ctx, targetKey{}, target)
 		sent, err := a.sendContextOutput(ctx, outputs)
-		receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, sent.PlatformMessageIDs...)
-		receipt.SentMessages = append(receipt.SentMessages, sent.SentMessages...)
+		receipt = receipt.Merge(sent)
 		if err != nil {
-			return receipt, err
+			return receipt.MarkPartialFailure(err), err
 		}
 	}
 	return receipt, nil

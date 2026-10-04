@@ -1063,3 +1063,52 @@ func setUserConfigDirEnv(t *testing.T, dir string) {
 	}
 	t.Setenv("XDG_CONFIG_HOME", dir)
 }
+
+func TestGroupPolicyThreadModeAndMergeWindowNormalize(t *testing.T) {
+	policy := GroupPolicyConfig{ThreadMode: "GROUP", MergeWindowMS: -1}.Normalize()
+	if policy.ThreadMode != ThreadModeGroup {
+		t.Fatalf("thread mode = %q, want %q", policy.ThreadMode, ThreadModeGroup)
+	}
+	if policy.MergeWindowMS != 0 {
+		t.Fatalf("negative merge window = %d, want 0", policy.MergeWindowMS)
+	}
+	policy = GroupPolicyConfig{ThreadMode: "per_user", MergeWindowMS: maxGroupMergeWindowMS + 1}.Normalize()
+	if policy.ThreadMode != "" {
+		t.Fatalf("per_user thread mode = %q, want empty", policy.ThreadMode)
+	}
+	if policy.MergeWindowMS != maxGroupMergeWindowMS {
+		t.Fatalf("clamped merge window = %d, want %d", policy.MergeWindowMS, maxGroupMergeWindowMS)
+	}
+	if policy.ThreadModeValue() != "per_user" {
+		t.Fatalf("ThreadModeValue = %q", policy.ThreadModeValue())
+	}
+	if (GroupPolicyConfig{ThreadMode: ThreadModeGroup}).IsZero() {
+		t.Fatal("group thread mode must not be treated as zero policy")
+	}
+	if (GroupPolicyConfig{MergeWindowMS: 1}).IsZero() {
+		t.Fatal("merge window must not be treated as zero policy")
+	}
+}
+
+func TestGroupKnowledgeConfigNormalizedDefaults(t *testing.T) {
+	cfg := GroupKnowledgeConfig{}.Normalized()
+	if cfg.MaxEntriesPerScope != defaultGroupKnowledgeMaxEntries {
+		t.Fatalf("max entries = %d", cfg.MaxEntriesPerScope)
+	}
+	if cfg.MaxQuestionRunes != defaultGroupKnowledgeMaxQuestion || cfg.MaxAnswerRunes != defaultGroupKnowledgeMaxAnswer {
+		t.Fatalf("question/answer limits = %d/%d", cfg.MaxQuestionRunes, cfg.MaxAnswerRunes)
+	}
+	if cfg.MaxAliases != defaultGroupKnowledgeMaxAliases || cfg.MaxKeywords != defaultGroupKnowledgeMaxKeywords {
+		t.Fatalf("alias/keyword limits = %d/%d", cfg.MaxAliases, cfg.MaxKeywords)
+	}
+	if cfg.MaxMatchRunes != defaultGroupKnowledgeMaxMatch {
+		t.Fatalf("match limit = %d", cfg.MaxMatchRunes)
+	}
+	if !cfg.IsEnabled() {
+		t.Fatal("zero config must default to enabled")
+	}
+	disabled := false
+	if (GroupKnowledgeConfig{Enabled: &disabled}).IsEnabled() {
+		t.Fatal("explicit disabled must win")
+	}
+}

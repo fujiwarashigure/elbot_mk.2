@@ -449,6 +449,15 @@ func buildAgent(
 	if cfg.Vision.IsEnabled() {
 		visionSelection = config.ModelSelection{Provider: cfg.Vision.Provider, Model: cfg.Vision.Model}
 	}
+	audioTranscriber, err := buildAudioTranscriber(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	asrSelection := config.ModelSelection{}
+	if cfg.ASR.IsEnabled() {
+		asrCfg := cfg.ASR.Normalized()
+		asrSelection = config.ModelSelection{Provider: asrCfg.Provider, Model: asrCfg.Model}
+	}
 	groupAnalysisSelection := config.ModelSelection{}
 	if selection := cfg.DefaultModelSelection(); selection.Provider != "" && selection.Model != "" && models.ByProvider[selection.Provider] != nil {
 		groupAnalysisSelection = selection
@@ -461,10 +470,17 @@ func buildAgent(
 		StatePath:              cfg.StateConfigPath,
 		ContextOverflow:        cfg.ContextOverflow,
 		GroupPolicy:            cfg.GroupPolicy,
+		GroupKnowledge:         cfg.GroupKnowledge,
+		GroupServices:          cfg.GroupServices,
 		Store:                  foundation.Store,
 		Media:                  toolRuntime.FileManager.Media,
 		VisionDescriber:        visionDescriber,
 		VisionSelection:        visionSelection,
+		AudioTranscriber:       audioTranscriber,
+		ASRSelection:           asrSelection,
+		ASRParallelism:         cfg.ASR.Normalized().MaxConcurrent,
+		ASRMaxSegments:         cfg.ASR.Normalized().MaxSegments,
+		ASRMaxAudioBytes:       cfg.ASR.Normalized().MaxAudioBytes,
 		GroupAnalysisSelection: groupAnalysisSelection,
 		CommandPrefixes:        cfg.Commands.Prefixes,
 		SessionConfig:          session.Config{NamingConfig: session.NamingConfig{TriggerStep: cfg.Session.Naming.TriggerStep}, DefaultMode: cfg.Session.DefaultMode},
@@ -473,6 +489,7 @@ func buildAgent(
 		SoulPath:               cfg.Soul.Path,
 		ResidentMemoryStore:    toolRuntime.ResidentMemoryStore,
 		AngelMemory:            toolRuntime.AngelMemory,
+		AngelMemoryConfig:      cfg.AngelMemory,
 		SelfLearning:           toolRuntime.SelfLearning,
 		CharacterStore:         toolRuntime.CharacterStore,
 		LLMRequestConfig:       cfg.LLMRequest,
@@ -509,6 +526,8 @@ func buildAgent(
 	if err != nil {
 		return nil, err
 	}
+	agt.StartGroupServices(ctx)
+	agt.StartRuntimeStateWatch(ctx)
 	return agt, nil
 }
 

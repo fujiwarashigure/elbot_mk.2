@@ -104,7 +104,22 @@ func (s *Service) Ready() bool {
 	return s != nil && s.store != nil
 }
 
+// Source records where a long-memory entry came from. Fields are optional but
+// are persisted as a traceable link, not a free-form label. Label is kept for
+// callers that only have a human-readable legacy source.
+type Source struct {
+	Kind      string
+	ActorID   string
+	MessageID string
+	SessionID string
+	Label     string
+}
+
 func (s *Service) Remember(ctx context.Context, platform, scopeID, content, tags, source string) (*Memory, error) {
+	return s.RememberWithSource(ctx, platform, scopeID, content, tags, Source{Label: source})
+}
+
+func (s *Service) RememberWithSource(ctx context.Context, platform, scopeID, content, tags string, source Source) (*Memory, error) {
 	if !s.Ready() {
 		return nil, fmt.Errorf("angel memory service is not configured")
 	}
@@ -130,17 +145,88 @@ func (s *Service) Remember(ctx context.Context, platform, scopeID, content, tags
 		return nil, errWriteRateLimited
 	}
 	memory, err := s.store.Remember(ctx, &Memory{
-		Platform: platform,
-		ScopeID:  scopeID,
-		Content:  content,
-		Tags:     tags,
-		Source:   source,
+		Platform:        platform,
+		ScopeID:         scopeID,
+		Content:         content,
+		Tags:            tags,
+		Source:          source.Label,
+		SourceKind:      source.Kind,
+		SourceActorID:   source.ActorID,
+		SourceMessageID: source.MessageID,
+		SourceSessionID: source.SessionID,
 	})
 	if err != nil {
 		s.successes.Refund(key)
 		return nil, err
 	}
 	return memory, nil
+}
+
+// Get returns one memory that belongs to the given platform/scope.
+func (s *Service) Get(ctx context.Context, platform, scopeID, id string) (*Memory, error) {
+	if !s.Ready() {
+		return nil, fmt.Errorf("angel memory service is not configured")
+	}
+	return s.store.Get(ctx, platform, scopeID, id)
+}
+
+// List returns scoped memories, optionally filtered by structured provenance.
+func (s *Service) List(ctx context.Context, platform, scopeID string, filter SourceFilter, limit int) ([]Memory, error) {
+	if !s.Ready() {
+		return nil, fmt.Errorf("angel memory service is not configured")
+	}
+	return s.store.List(ctx, platform, scopeID, filter, limit)
+}
+
+// ResolveID resolves a unique id prefix within a scope and optional source
+// filter. It never leaves the scope.
+func (s *Service) ResolveID(ctx context.Context, platform, scopeID, prefix string, filter SourceFilter) (string, error) {
+	if !s.Ready() {
+		return "", fmt.Errorf("angel memory service is not configured")
+	}
+	return s.store.ResolveID(ctx, platform, scopeID, prefix, filter)
+}
+
+// Delete deletes one memory only inside the given platform/scope.
+func (s *Service) Delete(ctx context.Context, platform, scopeID, id string) error {
+	if !s.Ready() {
+		return fmt.Errorf("angel memory service is not configured")
+	}
+	deleted, err := s.store.DeleteScoped(ctx, platform, scopeID, id)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteBySource deletes all scoped memories matching a structured source
+// filter. At least one filter field must be set.
+func (s *Service) DeleteBySource(ctx context.Context, platform, scopeID string, filter SourceFilter) (int, error) {
+	if !s.Ready() {
+		return 0, fmt.Errorf("angel memory service is not configured")
+	}
+	return s.store.DeleteBySource(ctx, platform, scopeID, filter)
+}
+
+// LegacySourceBackfillStats reports database-wide provenance coverage so an
+// operator can see what a legacy migration can and cannot recover.
+func (s *Service) LegacySourceBackfillStats(ctx context.Context) (LegacySourceBackfill, error) {
+	if !s.Ready() {
+		return LegacySourceBackfill{}, fmt.Errorf("angel memory service is not configured")
+	}
+	return s.store.LegacySourceBackfillStats(ctx)
+}
+
+// BackfillLegacySourceKind recovers source_kind for legacy rows and reports how
+// many rows were updated.
+func (s *Service) BackfillLegacySourceKind(ctx context.Context) (int, error) {
+	if !s.Ready() {
+		return 0, fmt.Errorf("angel memory service is not configured")
+	}
+	return s.store.BackfillLegacySourceKind(ctx)
 }
 
 func (s *Service) Recall(ctx context.Context, platform, scopeID, query string, limit int) ([]Memory, error) {

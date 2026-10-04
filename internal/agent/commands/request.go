@@ -74,6 +74,9 @@ func (c stopCommand) Handle(ctx context.Context, req command.Request) (*command.
 		stopped, _ := deps.Requests.Get(id)
 		if stopped.Kind == request.KindTurn {
 			count := deps.Requests.CancelSession(stopped.SessionID)
+			if deps.CancelSessionInbox != nil {
+				count += deps.CancelSessionInbox(stopped.SessionID)
+			}
 			deps.Turns.StopSession(stopped.SessionID)
 			return &command.Result{Content: fmt.Sprintf("stopped %d request%s", count, plural(count))}, nil
 		}
@@ -88,6 +91,9 @@ func (c stopCommand) Handle(ctx context.Context, req command.Request) (*command.
 		return nil, err
 	}
 	count := deps.Requests.CancelSession(current.ID)
+	if deps.CancelSessionInbox != nil {
+		count += deps.CancelSessionInbox(current.ID)
+	}
 	deps.Turns.StopSession(current.ID)
 	return &command.Result{Content: fmt.Sprintf("stopped %d request%s", count, plural(count))}, nil
 }

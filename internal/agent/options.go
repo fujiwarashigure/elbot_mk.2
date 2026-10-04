@@ -32,6 +32,8 @@ type Options struct {
 	StatePath       string
 	ContextOverflow map[string]config.ContextOverflowConfig
 	GroupPolicy     map[string]config.GroupPolicyConfig
+	GroupKnowledge  config.GroupKnowledgeConfig
+	GroupServices   config.GroupServicesConfig
 	Store           storage.Store
 	Media           *media.Manager
 	VisionDescriber VisionDescriber
@@ -44,9 +46,18 @@ type Options struct {
 	// batch may be, and how long one batch may take when the caller context has
 	// no deadline. Zero uses the DefaultVisionFallback* values; a negative
 	// VisionBudget disables the extra time cap.
-	VisionParallelism     int
-	VisionMaxImages       int
-	VisionBudget          time.Duration
+	VisionParallelism int
+	VisionMaxImages   int
+	VisionBudget      time.Duration
+	// AudioTranscriber is the optional voice-message transcription backend.
+	// ASRSelection is its provider/model pair, authorized against the group
+	// model catalog before any paid call. ASRParallelism and ASRMaxSegments
+	// bound one inbound message; ASRMaxAudioBytes bounds one recording read.
+	AudioTranscriber      AudioTranscriber
+	ASRSelection          config.ModelSelection
+	ASRParallelism        int
+	ASRMaxSegments        int
+	ASRMaxAudioBytes      int64
 	CommandPrefixes       []string
 	SessionConfig         session.Config
 	NamingSelection       config.ModelSelection
@@ -54,6 +65,7 @@ type Options struct {
 	SoulPath              string
 	ResidentMemoryStore   *resident.Store
 	AngelMemory           *angelmemory.Service
+	AngelMemoryConfig     config.AngelMemoryConfig
 	SelfLearning          *selflearning.Service
 	CharacterStore        *character.Store
 	LLMRequestConfig      config.LLMRequestConfig

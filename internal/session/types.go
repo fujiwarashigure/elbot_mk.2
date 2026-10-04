@@ -12,6 +12,10 @@ type Scope struct {
 	Platform        string
 	PlatformScopeID string
 	IsCLI           bool
+	// Shared marks a group thread scope whose members share one current
+	// Session. ActorID still identifies the current actor for authorization
+	// and per-user limits; only session ownership and lookup become shared.
+	Shared bool
 }
 
 type CreateRequest struct {

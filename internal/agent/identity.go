@@ -4,12 +4,36 @@ import (
 	"context"
 	"strings"
 
+	"elbot/internal/config"
 	"elbot/internal/platform"
 	"elbot/internal/security"
 	"elbot/internal/session"
 )
 
 func (a *Agent) scope(ctx context.Context) session.Scope {
+	scope := a.baseScope(ctx)
+	if a.sharedGroupThread(scope) {
+		scope.Shared = true
+	}
+	return scope
+}
+
+// sharedGroupThread reports whether the current group scope uses one shared
+// Session. It reads the already-loaded group policy directly, so callers do
+// not recurse through a.scope.
+func (a *Agent) sharedGroupThread(scope session.Scope) bool {
+	if a == nil {
+		return false
+	}
+	scopeID := strings.TrimSpace(scope.PlatformScopeID)
+	if !strings.HasPrefix(scopeID, "group:") && !strings.HasPrefix(scopeID, "supergroup:") {
+		return false
+	}
+	policy := a.rawGroupPolicy(scope)
+	return strings.EqualFold(strings.TrimSpace(policy.ThreadMode), config.ThreadModeGroup)
+}
+
+func (a *Agent) baseScope(ctx context.Context) session.Scope {
 	actor := a.actor(ctx)
 	platformName := a.platform.Name()
 	scopeID := a.scopeID

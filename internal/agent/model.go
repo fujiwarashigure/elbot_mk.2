@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -512,39 +513,79 @@ func initialStateModTime(path string) time.Time {
 	return info.ModTime()
 }
 
-func (a *Agent) refreshRuntimeState() {
-	if a.statePath == "" {
-		return
-	}
-	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
-	info, err := os.Stat(a.statePath)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) && a.logger != nil {
-			a.logger.Warn("check state config", "path", a.statePath, "error", err.Error())
-		}
-		return
-	}
-	modTime := info.ModTime()
-	if !a.stateModTime.IsZero() && !modTime.After(a.stateModTime) {
+// loadRuntimeStateAtStartup applies state that is not already merged into the
+// read-only app config. Group policy, model selections and context overflow are
+// loaded by config.applyState before Agent construction; group runtime, budget
+// and group knowledge are runtime-only and are restored here.
+func (a *Agent) loadRuntimeStateAtStartup() {
+	if a == nil || a.statePath == "" {
 		return
 	}
 	state, err := config.LoadState(a.statePath)
 	if err != nil {
-		if a.logger != nil {
+		if !errors.Is(err, os.ErrNotExist) && a.logger != nil {
 			a.logger.Warn("load state config", "path", a.statePath, "error", err.Error())
 		}
 		return
 	}
-	if err := a.applyRuntimeState(state); err != nil {
-		if a.logger != nil {
-			a.logger.Warn("apply state config", "path", a.statePath, "error", err.Error())
-		}
-		return
-	}
-	a.stateModTime = modTime
+	a.setGroupRuntimeSnapshot(state.GroupRuntime)
+	a.setBudgetSnapshot(state.Budget.Reservations)
+	a.setBudgetDigestSnapshot(state.Budget.Digests)
+	a.setBudgetUsageSnapshot(state.Budget.Tokens, state.Budget.Costs, state.Budget.Retries)
+	a.setBudgetUncertainSnapshot(state.Budget.Uncertain)
+	a.setBudgetExecutionSnapshot(state.Budget.Executions)
+	a.setGroupKnowledgeSnapshot(normalizeGroupKnowledgeSnapshot(state.GroupKnowledge, a.groupKnowledgeCfg))
+	a.setGroupServicesSnapshot(normalizeGroupServicesSnapshot(state.GroupServices, a.groupServicesCfg))
+	a.stateModTime = initialStateModTime(a.statePath)
 }
 
+// refreshRuntimeState re-reads state.toml and merges the runtime-owned sections
+// into memory so an edit made outside the process takes effect without a
+// restart. Unless force is set, the file is only read when its mtime is newer
+// than the state this process last loaded or wrote, which keeps the common path
+// down to a single stat.
+//
+// The budget ledger is deliberately not applied here: it belongs to the running
+// process, and replacing in-memory reservations with an on-disk copy could drop
+// an in-flight reservation. Ledger state is restored from the file at startup
+// only; see applyRuntimeState.
+func (a *Agent) refreshRuntimeState(force bool) (runtimeStateReload, error) {
+	reload := runtimeStateReload{}
+	if a == nil || a.statePath == "" {
+		return reload, nil
+	}
+	reload.Path = a.statePath
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	info, err := os.Stat(a.statePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return reload, nil
+		}
+		return reload, fmt.Errorf("check state config %q: %w", a.statePath, err)
+	}
+	modTime := info.ModTime()
+	if !force && !a.stateModTime.IsZero() && !modTime.After(a.stateModTime) {
+		return reload, nil
+	}
+	state, err := config.LoadState(a.statePath)
+	if err != nil {
+		return reload, fmt.Errorf("load state config %q: %w", a.statePath, err)
+	}
+	before := a.runtimeStateDigest()
+	if err := a.applyRuntimeState(state); err != nil {
+		return reload, fmt.Errorf("apply state config %q: %w", a.statePath, err)
+	}
+	reload.Applied = true
+	reload.ModTime = modTime
+	reload.Changed = changedRuntimeStateSections(before, a.runtimeStateDigest())
+	a.stateModTime = modTime
+	return reload, nil
+}
+
+// applyRuntimeState merges the sections a running process owns into memory. It
+// intentionally leaves the budget ledger untouched so a merge can never replace
+// live reservations with an older on-disk copy.
 func (a *Agent) applyRuntimeState(state *config.StateConfig) error {
 	for _, selection := range state.ModeModels {
 		if selection.Provider == "" || selection.Model == "" {
@@ -583,22 +624,77 @@ func (a *Agent) applyRuntimeState(state *config.StateConfig) error {
 	}
 	a.setContextOverflowSnapshot(state.ContextOverflow)
 	a.setGroupPolicySnapshot(state.GroupPolicy)
-	a.setBudgetSnapshot(state.Budget.Reservations)
-	a.setBudgetDigestSnapshot(state.Budget.Digests)
-	a.setBudgetUsageSnapshot(state.Budget.Tokens, state.Budget.Costs, state.Budget.Retries)
-	a.setBudgetExecutionSnapshot(state.Budget.Executions)
+	a.setGroupKnowledgeSnapshot(normalizeGroupKnowledgeSnapshot(state.GroupKnowledge, a.groupKnowledgeCfg))
+	a.setGroupServicesSnapshot(normalizeGroupServicesSnapshot(state.GroupServices, a.groupServicesCfg))
+	a.setGroupRuntimeSnapshot(state.GroupRuntime)
 	return nil
+}
+
+// runtimeStateSections lists the runtime-owned sections a hot reload reports on,
+// in a stable order. The budget ledger is excluded on purpose: memory owns it
+// while the process runs, so comparing it would report changes nobody made.
+var runtimeStateSections = []string{
+	"mode_models",
+	"compact_model",
+	"naming_model",
+	"context_overflow",
+	"group_policy",
+	"group_knowledge",
+	"group_services",
+	"group_runtime",
+}
+
+func (a *Agent) runtimeStateDigest() map[string]string {
+	return map[string]string{
+		"mode_models":      runtimeStateDigestOf(a.modeModelsSnapshot()),
+		"compact_model":    runtimeStateDigestOf(a.contextRuntime.configuredCompactModel()),
+		"naming_model":     runtimeStateDigestOf(a.configuredNamingModel()),
+		"context_overflow": runtimeStateDigestOf(a.contextOverflowSnapshot()),
+		"group_policy":     runtimeStateDigestOf(a.groupPolicySnapshot()),
+		"group_knowledge":  runtimeStateDigestOf(a.groupKnowledgeSnapshot()),
+		"group_services":   runtimeStateDigestOf(a.groupServicesSnapshot()),
+		"group_runtime":    runtimeStateDigestOf(a.groupRuntimeSnapshot()),
+	}
+}
+
+func runtimeStateDigestOf(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("%v", value)
+	}
+	return string(data)
+}
+
+func changedRuntimeStateSections(before, after map[string]string) []string {
+	changed := []string{}
+	for _, section := range runtimeStateSections {
+		if before[section] != after[section] {
+			changed = append(changed, section)
+		}
+	}
+	return changed
 }
 
 func (a *Agent) saveRuntimeState() error {
 	if a.statePath == "" {
 		return nil
 	}
+	// Merge an external edit before writing back, otherwise this process would
+	// overwrite a change an operator just made to state.toml. Lost updates are
+	// not recoverable afterwards, so the merge must happen before the snapshot.
+	if reload, err := a.refreshRuntimeState(false); err != nil {
+		if a.logger != nil {
+			a.logger.Warn("reload externally edited state config", "path", a.statePath, "error", err.Error())
+		}
+	} else if reload.Applied && len(reload.Changed) > 0 {
+		a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "write_back")
+	}
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 	now := time.Now()
 	reservations, digests := a.budgetStateSnapshot()
 	tokens, costs, retries := a.budgetUsageSnapshot()
+	uncertain := a.budgetUncertainSnapshot()
 	executions := a.budgetExecutionSnapshot()
 	if err := config.SaveState(a.statePath, config.StateConfig{
 		Session:         config.StateSessionConfig{DefaultMode: a.sessions.DefaultMode()},
@@ -607,7 +703,10 @@ func (a *Agent) saveRuntimeState() error {
 		NamingModel:     a.configuredNamingModel(),
 		ContextOverflow: a.contextOverflowSnapshot(),
 		GroupPolicy:     a.groupPolicySnapshot(),
-		Budget:          config.StateBudgetConfig{Reservations: pruneBudgetReservations(reservations, now), Digests: pruneBudgetDigests(digests, now), Tokens: pruneBudgetUsage(tokens, now), Costs: pruneBudgetUsage(costs, now), Retries: pruneBudgetUsage(retries, now), Executions: pruneBudgetDigests(executions, now)},
+		GroupKnowledge:  a.groupKnowledgeSnapshot(),
+		GroupServices:   a.groupServicesSnapshot(),
+		GroupRuntime:    a.groupRuntimeSnapshot(),
+		Budget:          config.StateBudgetConfig{Reservations: pruneBudgetReservations(reservations, now), Digests: pruneBudgetDigests(digests, now), Tokens: pruneBudgetUsage(tokens, now), Costs: pruneBudgetUsage(costs, now), Retries: pruneBudgetUsage(retries, now), Executions: pruneBudgetDigests(executions, now), Uncertain: pruneBudgetUsage(uncertain, now)},
 	}); err != nil {
 		return err
 	}

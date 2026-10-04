@@ -275,10 +275,9 @@ func (a *Adapter) sendTarget(ctx context.Context, outTarget delivery.Target, out
 			copyTarget.GroupID = ""
 			copyTarget.ScopeID = ""
 			sent, err := a.sendTarget(ctx, copyTarget, outputs)
-			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, sent.PlatformMessageIDs...)
-			receipt.SentMessages = append(receipt.SentMessages, sent.SentMessages...)
+			receipt = receipt.Merge(sent)
 			if err != nil {
-				return receipt, err
+				return receipt.MarkPartialFailure(err), err
 			}
 		}
 		return receipt, nil
@@ -294,12 +293,11 @@ func (a *Adapter) sendOutputs(ctx context.Context, t target, outputs []delivery.
 	var receipt delivery.Receipt
 	for i, out := range outputs {
 		sent, err := a.sendToTarget(ctx, t, out)
-		if err != nil {
-			return receipt, err
-		}
 		sent = telegramMediaReceipt(sent, t, out, i)
-		receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, sent.PlatformMessageIDs...)
-		receipt.SentMessages = append(receipt.SentMessages, sent.SentMessages...)
+		receipt = receipt.Merge(sent)
+		if err != nil {
+			return receipt.MarkPartialFailure(err), err
+		}
 	}
 	return receipt, nil
 }
@@ -344,6 +342,11 @@ func (a *Adapter) sendText(ctx context.Context, t target, text string, replyTo i
 		if err == nil {
 			return receipt, nil
 		}
+		if len(receipt.PlatformMessageIDs) > 0 {
+			// Some rich pages are already visible; an HTML fallback would
+			// duplicate them.
+			return receipt.MarkPartialFailure(err), err
+		}
 		a.logWarn("telegram rich message failed, fallback to html", "error", err)
 		return a.sendHTMLText(ctx, t, text, replyTo, keyboard)
 	case "plain":
@@ -368,7 +371,7 @@ func (a *Adapter) sendRichText(ctx context.Context, t target, text string, reply
 		}
 		msg, err := a.client.sendRichMessage(ctx, req)
 		if err != nil {
-			return delivery.Receipt{}, err
+			return receipt.MarkPartialFailure(err), err
 		}
 		if msg.MessageID != 0 {
 			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, formatMessageID(msg.MessageID))
@@ -381,6 +384,11 @@ func (a *Adapter) sendHTMLText(ctx context.Context, t target, text string, reply
 	receipt, err := a.sendFormattedText(ctx, t, telegramHTMLFromMarkdown(text), "HTML", replyTo, keyboard)
 	if err == nil {
 		return receipt, nil
+	}
+	if len(receipt.PlatformMessageIDs) > 0 {
+		// Part of the report is already visible; a plain-text fallback would
+		// duplicate those pages, so return the partial receipt instead.
+		return receipt.MarkPartialFailure(err), err
 	}
 	a.logWarn("telegram html message failed, fallback to plain", "error", err)
 	return a.sendPlainText(ctx, t, text, replyTo, keyboard)
@@ -403,7 +411,7 @@ func (a *Adapter) sendFormattedText(ctx context.Context, t target, text, parseMo
 		}
 		msg, err := a.client.sendMessage(ctx, req)
 		if err != nil {
-			return delivery.Receipt{}, err
+			return receipt.MarkPartialFailure(err), err
 		}
 		if msg.MessageID != 0 {
 			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, formatMessageID(msg.MessageID))

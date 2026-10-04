@@ -37,81 +37,105 @@ import (
 
 // Agent is the minimal agent core that handles messages and commands.
 type Agent struct {
-	platform           platform.PlatformAdapter
-	platformSenders    map[string]delivery.MessageSender
-	modelRuntime       modelRuntimeState
-	statePath          string
-	stateModTime       time.Time
-	stateMu            sync.Mutex
-	contextOverflowMu  sync.RWMutex
-	contextOverflow    map[string]config.ContextOverflowConfig
-	groupPolicyMu      sync.RWMutex
-	groupPolicy        map[string]config.GroupPolicyConfig
-	budgetMu           sync.Mutex
-	budgetReservations map[string]int64
-	budgetDigests      map[string]string
-	budgetTokens       map[string]int64
-	budgetCosts        map[string]int64
-	budgetRetries      map[string]int64
-	budgetExecutions   map[string]string
-	budgetWriteFailed  bool
-	budgetLimits       config.BudgetLimitsConfig
-	pricing            config.DailyReportConfig
-	messageWorkMu      sync.Mutex
-	messageWork        map[string]messageWorkRef
-	turnMu             sync.Mutex
-	turnStates         map[string]bool
-	recallMu           sync.Mutex
-	recentRecalls      map[string]time.Time
-	store              storage.Store
-	media              *media.Manager
-	vision             VisionDescriber
-	visionSelection    config.ModelSelection
-	groupAnalysisModel config.ModelSelection
-	visionParallelism  int
-	visionMaxImages    int
-	visionBudget       time.Duration
-	sessions           *session.Service
-	requests           *request.Manager
-	turns              *turn.Manager
-	commands           *command.Router
-	commandExecutor    *commandExecutor
-	completion         *completion.Service
-	titleGen           *titleGenerator
-	soul               SoulProvider
-	residentMemory     *resident.Store
-	angelMemory        *angelmemory.Service
-	selfLearning       *selflearning.Service
-	characters         *character.Store
-	modelProfiles      map[string]config.ModelSelection
-	modelAliases       map[string]string
-	toolProfiles       map[string][]string
-	toolAliases        map[string]string
-	imageProfiles      map[string]bool
-	imageAliases       map[string]string
-	turnDirectives     config.TurnDirectivesConfig
-	promptBuilder      PromptBuilder
-	toolRuntime        toolRuntimeState
-	securityPolicy     *security.Policy
-	contextRuntime     contextRuntimeState
-	hooks              hookRunner
-	hookRuntime        HookRouter
-	outputs            delivery.Manager
-	namingModelMu      sync.RWMutex
-	namingModel        config.ModelSelection
-	statusMu           sync.Mutex
-	runtimeStatus      map[string]runtimestatus.Snapshot
-	sessionCommands    *agentcommands.SessionCommandState
-	idleExpiration     session.IdleExpirationConfig
-	mediaRetentionDays int
-	sandboxRoot        string
-	logger             *slog.Logger
-	auditLogger        *slog.Logger
-	logReader          logging.Reader
-	autoConfirmMu      sync.Mutex
-	autoConfirmSession map[string]bool
-	autoConfirmTools   map[string]map[string]bool
-	visionFallbackMu   sync.Mutex
+	platform                  platform.PlatformAdapter
+	platformSenders           map[string]delivery.MessageSender
+	modelRuntime              modelRuntimeState
+	statePath                 string
+	stateModTime              time.Time
+	stateMu                   sync.Mutex
+	stateWatchMu              sync.Mutex
+	stateWatchStarted         bool
+	contextOverflowMu         sync.RWMutex
+	contextOverflow           map[string]config.ContextOverflowConfig
+	groupPolicyMu             sync.RWMutex
+	groupPolicy               map[string]config.GroupPolicyConfig
+	groupKnowledgeMu          sync.RWMutex
+	groupKnowledge            map[string][]config.GroupKnowledgeEntry
+	groupKnowledgeCfg         config.GroupKnowledgeConfig
+	groupKnowledgeWriteMu     sync.Mutex
+	groupServicesMu           sync.RWMutex
+	groupReminders            map[string][]config.GroupReminderConfig
+	groupPolls                map[string][]config.GroupPollConfig
+	groupSignups              map[string][]config.GroupSignupConfig
+	groupServicesCfg          config.GroupServicesConfig
+	groupServicesWriteMu      sync.Mutex
+	groupServicesStarted      bool
+	groupRuntimeMu            sync.RWMutex
+	groupRuntime              map[string]config.GroupRuntimeConfig
+	budgetMu                  sync.Mutex
+	budgetReservations        map[string]int64
+	budgetDigests             map[string]string
+	budgetTokens              map[string]int64
+	budgetCosts               map[string]int64
+	budgetRetries             map[string]int64
+	budgetExecutions          map[string]string
+	budgetUncertain           map[string]int64
+	budgetWriteFailed         bool
+	budgetLimits              config.BudgetLimitsConfig
+	pricing                   config.DailyReportConfig
+	messageWorkMu             sync.Mutex
+	messageWork               map[string]messageWorkRef
+	turnMu                    sync.Mutex
+	turnStates                map[string]bool
+	recallMu                  sync.Mutex
+	recentRecalls             map[string]time.Time
+	store                     storage.Store
+	media                     *media.Manager
+	vision                    VisionDescriber
+	visionSelection           config.ModelSelection
+	groupAnalysisModel        config.ModelSelection
+	visionParallelism         int
+	visionMaxImages           int
+	visionBudget              time.Duration
+	asr                       AudioTranscriber
+	asrSelection              config.ModelSelection
+	asrParallelism            int
+	asrMaxSegments            int
+	asrMaxAudioBytes          int64
+	sessions                  *session.Service
+	requests                  *request.Manager
+	turns                     *turn.Manager
+	inboxMu                   sync.Mutex
+	inbox                     *sessionInbox
+	commands                  *command.Router
+	commandExecutor           *commandExecutor
+	completion                *completion.Service
+	titleGen                  *titleGenerator
+	soul                      SoulProvider
+	residentMemory            *resident.Store
+	angelMemory               *angelmemory.Service
+	angelMemoryForgetOnRecall bool
+	selfLearning              *selflearning.Service
+	characters                *character.Store
+	modelProfiles             map[string]config.ModelSelection
+	modelAliases              map[string]string
+	toolProfiles              map[string][]string
+	toolAliases               map[string]string
+	imageProfiles             map[string]bool
+	imageAliases              map[string]string
+	turnDirectives            config.TurnDirectivesConfig
+	promptBuilder             PromptBuilder
+	toolRuntime               toolRuntimeState
+	securityPolicy            *security.Policy
+	contextRuntime            contextRuntimeState
+	hooks                     hookRunner
+	hookRuntime               HookRouter
+	outputs                   delivery.Manager
+	namingModelMu             sync.RWMutex
+	namingModel               config.ModelSelection
+	statusMu                  sync.Mutex
+	runtimeStatus             map[string]runtimestatus.Snapshot
+	sessionCommands           *agentcommands.SessionCommandState
+	idleExpiration            session.IdleExpirationConfig
+	mediaRetentionDays        int
+	sandboxRoot               string
+	logger                    *slog.Logger
+	auditLogger               *slog.Logger
+	logReader                 logging.Reader
+	autoConfirmMu             sync.Mutex
+	autoConfirmSession        map[string]bool
+	autoConfirmTools          map[string]map[string]bool
+	visionFallbackMu          sync.Mutex
 
 	visionFallbackNotified  map[string]bool
 	responseTimeout         time.Duration
@@ -169,6 +193,7 @@ func NewWithPrefixes(p platform.PlatformAdapter, client llm.LLM, modeModels map[
 		SessionIdleExpiration: defaults.Session.IdleExpiration,
 		SandboxRoot:           defaults.Sandbox.Root,
 		ToolsConfig:           defaults.Tools,
+		AngelMemoryConfig:     defaults.AngelMemory,
 	})
 	if err != nil {
 		panic(err)
@@ -288,50 +313,63 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		outputs = delivery.NewManager(nil, nil)
 	}
 	a := &Agent{
-		platform:               p,
-		platformSenders:        map[string]delivery.MessageSender{},
-		modelRuntime:           newModelRuntimeState(client, workModel.Model, workModel.Provider, provider, providers, modeModels, clients),
-		statePath:              statePath,
-		stateModTime:           stateModTime,
-		budgetLimits:           opts.BudgetLimits.Normalized(),
-		pricing:                opts.Pricing,
-		contextOverflow:        cloneContextOverflow(opts.ContextOverflow),
-		groupPolicy:            cloneGroupPolicy(opts.GroupPolicy),
-		store:                  store,
-		media:                  opts.Media,
-		vision:                 opts.VisionDescriber,
-		visionSelection:        opts.VisionSelection,
-		visionParallelism:      opts.VisionParallelism,
-		visionMaxImages:        opts.VisionMaxImages,
-		visionBudget:           opts.VisionBudget,
-		mediaRetentionDays:     opts.MediaRetentionDays,
-		sessions:               sessions,
-		requests:               requests,
-		turns:                  turns,
-		commands:               command.NewRouter(prefixes),
-		soul:                   promptSoul,
-		residentMemory:         opts.ResidentMemoryStore,
-		angelMemory:            opts.AngelMemory,
-		selfLearning:           opts.SelfLearning,
-		characters:             opts.CharacterStore,
-		modelProfiles:          opts.ModelProfiles,
-		modelAliases:           opts.ModelAliases,
-		toolProfiles:           opts.ToolProfiles,
-		toolAliases:            opts.ToolAliases,
-		imageProfiles:          opts.ImageProfiles,
-		imageAliases:           opts.ImageAliases,
-		turnDirectives:         opts.TurnDirectives,
-		securityPolicy:         policy,
-		contextRuntime:         newContextRuntimeState(store, sessions, requests, turns),
-		hooks:                  hookManager,
-		hookRuntime:            opts.HookRuntime,
-		outputs:                outputs,
-		namingModel:            namingSelection,
-		runtimeStatus:          map[string]runtimestatus.Snapshot{},
-		autoConfirmSession:     map[string]bool{},
-		autoConfirmTools:       map[string]map[string]bool{},
-		visionFallbackNotified: map[string]bool{},
-		providerLimiters:       map[string]*concurrency.Limiter{},
+		platform:                  p,
+		platformSenders:           map[string]delivery.MessageSender{},
+		modelRuntime:              newModelRuntimeState(client, workModel.Model, workModel.Provider, provider, providers, modeModels, clients),
+		statePath:                 statePath,
+		stateModTime:              stateModTime,
+		budgetLimits:              opts.BudgetLimits.Normalized(),
+		pricing:                   opts.Pricing,
+		contextOverflow:           cloneContextOverflow(opts.ContextOverflow),
+		groupPolicy:               cloneGroupPolicy(opts.GroupPolicy),
+		groupKnowledge:            map[string][]config.GroupKnowledgeEntry{},
+		groupKnowledgeCfg:         opts.GroupKnowledge.Normalized(),
+		groupReminders:            map[string][]config.GroupReminderConfig{},
+		groupPolls:                map[string][]config.GroupPollConfig{},
+		groupSignups:              map[string][]config.GroupSignupConfig{},
+		groupServicesCfg:          opts.GroupServices.Normalized(),
+		store:                     store,
+		media:                     opts.Media,
+		vision:                    opts.VisionDescriber,
+		visionSelection:           opts.VisionSelection,
+		visionParallelism:         opts.VisionParallelism,
+		visionMaxImages:           opts.VisionMaxImages,
+		visionBudget:              opts.VisionBudget,
+		asr:                       opts.AudioTranscriber,
+		asrSelection:              opts.ASRSelection,
+		asrParallelism:            opts.ASRParallelism,
+		asrMaxSegments:            opts.ASRMaxSegments,
+		asrMaxAudioBytes:          opts.ASRMaxAudioBytes,
+		mediaRetentionDays:        opts.MediaRetentionDays,
+		sessions:                  sessions,
+		requests:                  requests,
+		turns:                     turns,
+		inbox:                     newSessionInbox(),
+		commands:                  command.NewRouter(prefixes),
+		soul:                      promptSoul,
+		residentMemory:            opts.ResidentMemoryStore,
+		angelMemory:               opts.AngelMemory,
+		angelMemoryForgetOnRecall: opts.AngelMemoryConfig.ForgetOnRecallEnabled(),
+		selfLearning:              opts.SelfLearning,
+		characters:                opts.CharacterStore,
+		modelProfiles:             opts.ModelProfiles,
+		modelAliases:              opts.ModelAliases,
+		toolProfiles:              opts.ToolProfiles,
+		toolAliases:               opts.ToolAliases,
+		imageProfiles:             opts.ImageProfiles,
+		imageAliases:              opts.ImageAliases,
+		turnDirectives:            opts.TurnDirectives,
+		securityPolicy:            policy,
+		contextRuntime:            newContextRuntimeState(store, sessions, requests, turns),
+		hooks:                     hookManager,
+		hookRuntime:               opts.HookRuntime,
+		outputs:                   outputs,
+		namingModel:               namingSelection,
+		runtimeStatus:             map[string]runtimestatus.Snapshot{},
+		autoConfirmSession:        map[string]bool{},
+		autoConfirmTools:          map[string]map[string]bool{},
+		visionFallbackNotified:    map[string]bool{},
+		providerLimiters:          map[string]*concurrency.Limiter{},
 		providerLimitCfg: concurrency.Config{
 			Max:         opts.Ops.ProviderMaxConcurrent,
 			QueueSize:   opts.Ops.ProviderQueueMaxSize,
@@ -388,26 +426,32 @@ func NewWithOptions(opts Options) (*Agent, error) {
 	}
 	a.SetContextOptions(opts.ContextConfig, opts.ModelMetadata, providers, opts.CompactModel)
 	if err := agentcommands.RegisterDefaultModules(a.commands, agentcommands.Deps{
-		Router:        a.commands,
-		Sessions:      a.sessions,
-		Requests:      a.requests,
-		Turns:         a.turns,
-		Store:         a.store,
-		Scope:         a.scope,
-		Models:        a,
-		Compact:       a,
-		ContextStatus: a,
-		ContextPolicy: a,
-		GroupPolicy:   a,
-		Tools:         a,
-		Hooks:         hookService,
-		SessionState:  sessionCommands,
-		Characters:    a.characters,
-		AngelMemory:   a.angelMemory,
-		SelfLearning:  a.selfLearning,
-		Audit:         a.audit,
-		Logs:          a,
-		RuntimeStatus: a.runtimeStatusForSession,
+		Router:             a.commands,
+		Sessions:           a.sessions,
+		Requests:           a.requests,
+		Turns:              a.turns,
+		Store:              a.store,
+		Scope:              a.scope,
+		Models:             a,
+		Compact:            a,
+		ContextStatus:      a,
+		ContextPolicy:      a,
+		GroupPolicy:        a,
+		GroupKnowledge:     a,
+		MemberPanel:        a,
+		GroupServices:      a,
+		Tools:              a,
+		Hooks:              hookService,
+		SessionState:       sessionCommands,
+		Characters:         a.characters,
+		AngelMemory:        a.angelMemory,
+		ResidentMemory:     a.residentMemory,
+		SelfLearning:       a.selfLearning,
+		Audit:              a.audit,
+		Logs:               a,
+		RuntimeState:       a,
+		RuntimeStatus:      a.runtimeStatusForSession,
+		CancelSessionInbox: a.cancelInboxSession,
 	}); err != nil {
 		return nil, err
 	}
@@ -454,6 +498,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		completion.RouterSource{Router: a.commands, Actor: a.actor},
 	)
 
+	a.loadRuntimeStateAtStartup()
 	return a, nil
 }
 

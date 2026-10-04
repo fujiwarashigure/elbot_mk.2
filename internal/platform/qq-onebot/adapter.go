@@ -46,11 +46,24 @@ type Config struct {
 	ForwardMaxResultBytes      int      `toml:"forward_max_result_bytes"`
 	ForwardMaxNonText          int      `toml:"forward_max_non_text"`
 	ForwardFetchTimeoutSeconds int      `toml:"forward_fetch_timeout_seconds"`
-	AttachmentDir              string   `toml:"-"`
-	MaxReceiveFileBytes        int64    `toml:"-"`
-	DownloadTimeoutSecs        int      `toml:"-"`
-	Superadmins                []string `toml:"-"`
-	CommandPrefixes            []string `toml:"-"`
+	// InboundDedupEnabled defaults to true when unset. It suppresses OneBot
+	// reconnect replays using platform+bot+scope+message-id, independent of
+	// chat history.
+	InboundDedupEnabled    *bool `toml:"inbound_dedup_enabled"`
+	InboundDedupTTLSeconds int   `toml:"inbound_dedup_ttl_seconds"`
+	InboundDedupMaxEntries int   `toml:"inbound_dedup_max_entries"`
+	// Preprocess workers bound @ / quote / merged-forward network lookups.
+	// The normal queue is non-blocking: when it is full the duplicate-prone
+	// message is rejected locally instead of spawning unbounded goroutines.
+	PreprocessWorkers     int      `toml:"preprocess_workers"`
+	PreprocessQueueSize   int      `toml:"preprocess_queue_size"`
+	HighPriorityWorkers   int      `toml:"high_priority_workers"`
+	HighPriorityQueueSize int      `toml:"high_priority_queue_size"`
+	AttachmentDir         string   `toml:"-"`
+	MaxReceiveFileBytes   int64    `toml:"-"`
+	DownloadTimeoutSecs   int      `toml:"-"`
+	Superadmins           []string `toml:"-"`
+	CommandPrefixes       []string `toml:"-"`
 }
 
 func qqTextPages(text string) []string {
@@ -88,6 +101,7 @@ type Adapter struct {
 	transport   *Transport
 	logger      *slog.Logger
 	notify      func(context.Context, string)
+	inbound     *inboundRuntime
 }
 
 type target struct {
@@ -167,6 +181,28 @@ func applyDefaults(cfg *Config) {
 	if cfg.ForwardFetchTimeoutSeconds <= 0 {
 		cfg.ForwardFetchTimeoutSeconds = int(defaultForwardFetchTimeout / time.Second)
 	}
+	if cfg.InboundDedupEnabled == nil {
+		enabled := true
+		cfg.InboundDedupEnabled = &enabled
+	}
+	if cfg.InboundDedupTTLSeconds <= 0 {
+		cfg.InboundDedupTTLSeconds = int(defaultInboundDedupTTL / time.Second)
+	}
+	if cfg.InboundDedupMaxEntries <= 0 {
+		cfg.InboundDedupMaxEntries = defaultInboundDedupMax
+	}
+	if cfg.PreprocessWorkers <= 0 {
+		cfg.PreprocessWorkers = defaultPreprocessWorkers
+	}
+	if cfg.PreprocessQueueSize <= 0 {
+		cfg.PreprocessQueueSize = defaultPreprocessQueue
+	}
+	if cfg.HighPriorityWorkers <= 0 {
+		cfg.HighPriorityWorkers = defaultHighPriorityWorkers
+	}
+	if cfg.HighPriorityQueueSize <= 0 {
+		cfg.HighPriorityQueueSize = defaultHighPriorityQueue
+	}
 }
 
 func (a *Adapter) forwardLimits() ForwardLimits {
@@ -208,7 +244,8 @@ func New(cfg Config, store storage.Store, chatHistory storage.ChatHistoryReposit
 			ReadLimitBytes: int64(cfg.ForwardMaxResultBytes),
 			logger:         logger,
 		},
-		logger: logger,
+		logger:  logger,
+		inbound: newInboundRuntime(cfg),
 	}
 }
 
@@ -343,11 +380,10 @@ func (a *Adapter) SendNotice(ctx context.Context, notice delivery.Notice) (deliv
 			copyTarget.ScopeID = ""
 			notice.Target = copyTarget
 			sent, err := a.SendNotice(ctx, notice)
+			receipt = receipt.Merge(sent)
 			if err != nil {
-				return receipt, err
+				return receipt.MarkPartialFailure(err), err
 			}
-			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, sent.PlatformMessageIDs...)
-			receipt.SentMessages = append(receipt.SentMessages, sent.SentMessages...)
 		}
 		return receipt, nil
 	}
@@ -390,10 +426,12 @@ func (a *Adapter) sendContextText(ctx context.Context, text string) (delivery.Re
 		return delivery.Receipt{}, fmt.Errorf("qq send target missing")
 	}
 	var receipt delivery.Receipt
-	for _, page := range qqTextPages(text) {
+	pages := qqTextPages(text)
+	for index, page := range pages {
 		id, err := a.sendQQText(ctx, t, page)
 		if err != nil {
-			return delivery.Receipt{}, err
+			receipt = receipt.MarkPartialFailure(fmt.Errorf("page %d/%d: %w", index+1, len(pages), err))
+			return receipt, err
 		}
 		if strings.TrimSpace(id) != "" {
 			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, id)
@@ -591,6 +629,8 @@ func localPathFileURI(path, label string) (string, error) {
 }
 
 func (a *Adapter) readLoop(ctx context.Context, handler platform.PlatformHandler) error {
+	dispatcher := newEventDispatcher(a, ctx, handler, a.cfg.PreprocessWorkers, a.cfg.PreprocessQueueSize, a.cfg.HighPriorityWorkers, a.cfg.HighPriorityQueueSize)
+	defer dispatcher.stop()
 	for {
 		event, err := a.transport.Read(ctx)
 		if err != nil {
@@ -600,14 +640,43 @@ func (a *Adapter) readLoop(ctx context.Context, handler platform.PlatformHandler
 			continue
 		}
 		if a.isMessageEvent(event) {
-			go a.handleEvent(ctx, handler, event)
+			a.dispatchMessageEvent(dispatcher, event)
 			continue
 		}
 		switch event.PostType {
 		case "notice", "request", "meta_event":
-			go a.handlePlatformEvent(ctx, handler, event)
+			job := outboundEventJob{event: event}
+			if !dispatcher.enqueueHigh(job) {
+				// Recall, member and admin events must not be dropped or
+				// delayed behind ordinary chat traffic. Running inline is the
+				// bounded fallback: the read loop waits for this one event
+				// instead of spawning an unbounded goroutine.
+				a.handlePlatformEvent(ctx, handler, event)
+			}
 		}
 	}
+}
+
+func (a *Adapter) dispatchMessageEvent(dispatcher *eventDispatcher, event Event) {
+	if dispatcher == nil {
+		return
+	}
+	key := a.inboundKey(event)
+	if key != "" {
+		duplicate, state := a.beginInboundJob(key)
+		if duplicate {
+			a.logInfo("duplicate qq message ignored", "message_id", event.MessageID, "state", state)
+			return
+		}
+	}
+	if dispatcher.enqueueNormal(outboundEventJob{event: event, messageKey: key}) {
+		return
+	}
+	a.finishInboundJob(key, inboundDedupStateFailed, "preprocess_queue_full")
+	if a.inbound != nil {
+		a.inbound.recordReject(time.Now())
+	}
+	a.logWarn("qq inbound preprocess queue full, message dropped", "message_id", event.MessageID)
 }
 
 func (a *Adapter) handlePlatformEvent(ctx context.Context, handler platform.PlatformHandler, event Event) {
@@ -641,6 +710,7 @@ func (a *Adapter) handlePlatformEvent(ctx context.Context, handler platform.Plat
 			"qq_onebot.user_id":      strconv.FormatInt(event.UserID, 10),
 			"qq_onebot.operator_id":  strconv.FormatInt(event.OperatorID, 10),
 			"qq_onebot.target_id":    strconv.FormatInt(event.TargetID, 10),
+			"qq_onebot.self_id":      strconv.FormatInt(event.SelfID, 10),
 		},
 	}
 	if data, err := json.Marshal(event); err == nil {
@@ -651,82 +721,16 @@ func (a *Adapter) handlePlatformEvent(ctx context.Context, handler platform.Plat
 	}
 }
 
-func (a *Adapter) handleEvent(ctx context.Context, handler platform.PlatformHandler, event Event) {
-	normalized := normalizeMessageWithLimits(event.Message, event.RawMessage, event.SelfID, a.forwardLimits())
-	normalized = a.resolveAtSegments(ctx, event, normalized)
-	normalized = a.resolveForwardSegments(ctx, event, normalized)
-	if event.MessageType != "private" && event.MessageType != "group" {
-		a.recordChatMessage(ctx, event, normalized, platform.ReplyContext{})
-		return
-	}
-	text := normalized.Text
-	currentSegments := normalized.Segments
-	messageCtx := platform.MessageContext{
-		Platform:              a.Name(),
-		PlatformUserID:        strconv.FormatInt(event.UserID, 10),
-		Nickname:              strings.TrimSpace(event.Sender.Nickname),
-		GroupCard:             strings.TrimSpace(event.Sender.Card),
-		DisplayName:           displayName(event.Sender, event.UserID),
-		GroupRole:             oneBotGroupRole(event),
-		ScopeID:               scopeID(event),
-		ConversationKind:      oneBotConversationKind(event),
-		PlatformMessageID:     strconv.FormatInt(event.MessageID, 10),
-		ReplyToMessageID:      normalized.ReplyID,
-		ReplyToSenderID:       a.replyToSenderID(ctx, event, normalized.ReplyID),
-		MediaResolver:         a,
-		Sender:                a,
-		BufferAssistantOutput: true,
-		Segments:              finalMessageSegments(text, currentSegments, nil),
-		RawText:               normalized.Text,
-		MatchText:             normalized.MatchText,
-		MatchTextSet:          true,
-		PlatformMessage:       append(json.RawMessage(nil), event.Message...),
-		Bot:                   platform.Identity{UserID: strconv.FormatInt(event.SelfID, 10)},
-		Mentions:              append([]platform.Mention(nil), normalized.Mentions...),
-		TriggerKeywords:       append([]string(nil), a.cfg.TriggerKeywords...),
-		Meta: map[string]any{
-			"qq_onebot.message_id":   strconv.FormatInt(event.MessageID, 10),
-			"qq_onebot.message_type": event.MessageType,
-			"qq_onebot.group_id":     strconv.FormatInt(event.GroupID, 10),
-			"qq_onebot.user_id":      strconv.FormatInt(event.UserID, 10),
-		},
-	}
-	msgCtx := platform.WithMessageContext(ctx, messageCtx)
-	msgCtx = context.WithValue(msgCtx, targetKey{}, target{MessageType: event.MessageType, UserID: event.UserID, GroupID: event.GroupID})
-
-	var referenceSegments []platform.MessageSegment
-	if normalized.ReplyID != "" {
-		ref := refcontext.Apply(msgCtx, refcontext.Options{
-			Store:           a.store,
-			ChatHistory:     a.chatHistory,
-			Platform:        a.Name(),
-			ScopeID:         messageCtx.ScopeID,
-			ActorID:         security.ActorID(a.Name(), strconv.FormatInt(event.UserID, 10)),
-			IsSuperadmin:    isConfiguredSuperadmin(a.cfg.Superadmins, strconv.FormatInt(event.UserID, 10)),
-			ReplyID:         normalized.ReplyID,
-			Text:            text,
-			CommandPrefixes: a.cfg.CommandPrefixes,
-			Fetch:           a.referenceFetcher(event),
-		})
-		messageCtx.ForkFromMessageID = ref.ForkFromMessageID
-		messageCtx.ResumeSessionID = ref.ResumeSessionID
-		messageCtx.ContextText = ref.Text
-		messageCtx.Reply = ref.Reply
-		referenceSegments = ref.ReferenceSegments
-		if strings.TrimSpace(ref.Text) != "" || len(referenceSegments) > 0 {
-			messageCtx.ContextSegments = finalMessageSegments(ref.Text, currentSegments, referenceSegments)
-		}
-	}
-	a.recordChatMessage(ctx, event, normalized, messageCtx.Reply)
-	messageCtx.Segments = finalMessageSegments(text, currentSegments, nil)
-	msgCtx = platform.WithMessageContext(ctx, messageCtx)
-	msgCtx = context.WithValue(msgCtx, targetKey{}, target{MessageType: event.MessageType, UserID: event.UserID, GroupID: event.GroupID})
-	if strings.TrimSpace(text) == "" && len(currentSegments) == 0 {
-		return
+func (a *Adapter) handleEvent(ctx context.Context, handler platform.PlatformHandler, event Event) error {
+	_, msgCtx, text, ok := a.prepareInbound(ctx, ctx, event)
+	if !ok {
+		return nil
 	}
 	if err := handler.HandleMessage(msgCtx, text); err != nil {
 		a.logWarn("handle qq message failed", "error", err, "message_id", event.MessageID)
+		return err
 	}
+	return nil
 }
 
 func (a *Adapter) resolveForwardSegments(ctx context.Context, event Event, msg NormalizedMessage) NormalizedMessage {

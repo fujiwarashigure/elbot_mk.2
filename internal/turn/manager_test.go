@@ -300,6 +300,29 @@ func TestRiskConfirmationExpirationRefreshesOnDetail(t *testing.T) {
 		t.Fatalf("phase after expiry = %s", got)
 	}
 }
+func TestMergeInputsPreservesSpeakerAttribution(t *testing.T) {
+	merged := MergeInputs([]Input{
+		{Text: "one", Segments: llm.TextSegments("one"), Speaker: Speaker{ActorID: "a", UserID: "1001", Name: "张三"}},
+		{Text: "two", Segments: llm.TextSegments("two"), Speaker: Speaker{ActorID: "a", UserID: "1001", Name: "张三"}},
+	})
+	if len(merged.Parts) != 2 {
+		t.Fatalf("parts = %d, want 2", len(merged.Parts))
+	}
+	if merged.Speaker.ActorID != "a" || merged.Speaker.Name != "张三" {
+		t.Fatalf("same-speaker merge lost speaker: %#v", merged.Speaker)
+	}
+	mixed := MergeInputs([]Input{
+		{Text: "one", Segments: llm.TextSegments("one"), Speaker: Speaker{ActorID: "a", UserID: "1001", Name: "张三"}},
+		{Text: "two", Segments: llm.TextSegments("two"), Speaker: Speaker{ActorID: "b", UserID: "1002", Name: "李四"}},
+	})
+	if len(mixed.Parts) != 2 {
+		t.Fatalf("mixed parts = %d, want 2", len(mixed.Parts))
+	}
+	if mixed.Parts[0].Speaker.Name != "张三" || mixed.Parts[1].Speaker.Name != "李四" {
+		t.Fatalf("mixed speakers = %#v", mixed.Parts)
+	}
+}
+
 func waitForPhase(t *testing.T, m *Manager, sessionID string, phase Phase) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

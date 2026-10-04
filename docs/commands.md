@@ -98,6 +98,7 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 
 - `/*resume 1` 可以直接恢复最近更新的非当前 Session，无需先执行裸 `/*resume`；编号按更新时间排列，不受置顶影响，翻页时编号连续。
 - 当前会话处理中时，不支持执行 `/*new`、`/*resume`、`/*fork`、`/*chat`、`/*work` 等 Session 切换命令；如有必要，请先使用 `/*stop` 结束当前处理。
+- 各群可用 `/*grouppolicy thread-mode group` 开启共享会话；此时 Session 命令面向全群共享当前会话，上面列出的切换/修改命令仅群主、群管理员或超管可用；开启后不迁移旧 per-user 会话。
 - `/*sessions` 展示的编号可被 `/*archive`、`/*pin`、`/*delete` 等 Session 操作命令复用。
 - CLI 作为本地高权限入口，可以跨平台查看 Session；非 CLI 平台默认只查看当前平台和作用域下的 Session。
 - 删除是永久操作，需要显式 `--confirm`。
@@ -123,6 +124,7 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 | 命令 | 作用 |
 | --- | --- |
 | `/*requests` | 查看当前进程中的 active request，包括 turn、LLM、tool、hook 等请求；turn 会显示运行阶段和阶段耗时。 |
+| `/*me [tasks\|quota\|all]` | 普通成员查看自己的进行中任务、排队消息和今日生图/视觉/语音转写/聊天额度；只读，不调用模型。 |
 | `/*stop [request_id]` | 停止指定请求；也可使用 `/*requests` 显示的编号；不传参数时停止当前 Session 的请求。停止一次性 exec Hook 时会结束该 Hook 的完整进程树；持久 Worker 只取消当前调用。 |
 | `/*stopall` | 停止当前进程中的所有 active request。 |
 
@@ -135,6 +137,8 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 /*stop req_xxx
 /*stopall
 ```
+
+`/*me` 只显示当前 actor 在当前平台/作用域内自己的任务和额度，按 FairKey 过滤；不会暴露其他成员的活动。`/*requests` 仍保留全局/管理视角。
 
 ## 上下文压缩
 
@@ -172,19 +176,24 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/*grouppolicy` | 查看当前群的唤醒、响应、工具与额度策略。 |
+| `/*grouppolicy` | 查看当前群的唤醒、响应、会话线程、连续消息合并、语音转写、工具与额度策略。 |
 | `/*grouppolicy wake <词1,词2>` | 增加本群唤醒词；只影响当前群。 |
 | `/*grouppolicy response <mention\|all\|keyword\|reply\|off>` | 设置普通群消息的响应模式。 |
+| `/*grouppolicy thread-mode <per-user\|group>` | 设置本群会话线程模式：`per-user` 每人独立，`group` 全群共享并按 turn 串行。共享会话的切换/修改命令仅群主/群管理员/超管可用。 |
+| `/*grouppolicy merge-window <0-10000>` | 设置连续消息合并窗口（毫秒）；窗口内同一成员的连续消息合并为一轮。 |
 | `/*grouppolicy default-mode <work\|chat\|inherit>` | 设置新 Session 的默认模式。 |
 | `/*grouppolicy default-model <别名\|provider/model\|clear>` | 设置本群默认模型；别名或 `provider/model` 解析后会再次校验本群模型目录。 |
 | `/*grouppolicy allowed-models <别名或provider/model\|*>` | 超级管理员设置本群可选模型目录；空目录只允许已配置的模型别名/profile。 |
 | `/*grouppolicy tool-allow <工具名,工具名\|none\|clear>` | 设置工具白名单；`none` 表示禁止全部工具，`clear` 表示继承全局。 |
-| `/*grouppolicy image-quota <次数>` / `/*grouppolicy vision-quota <次数>` | 设置本群每日生图/视觉调用额度；执行前会原子预占，重启不丢账。 |
-| `/*grouppolicy user-image-quota <次数>` / `/*grouppolicy user-vision-quota <次数>` | 设置本群内单用户每日生图/视觉调用额度。 |
+| `/*grouppolicy image-quota <次数>` / `/*grouppolicy vision-quota <次数>` / `/*grouppolicy asr-quota <次数>` | 设置本群每日生图/视觉/语音转写调用额度；执行前会原子预占，重启不丢账。 |
+| `/*grouppolicy user-image-quota <次数>` / `/*grouppolicy user-vision-quota <次数>` / `/*grouppolicy user-asr-quota <次数>` | 设置本群内单用户每日生图/视觉/语音转写调用额度。 |
 | `/*grouppolicy chat-tokens-quota <token 数>` | 设置本群每日聊天 token 额度；provider 返回 usage 后记账。 |
 | `/*grouppolicy chat-cost-quota <金额>` | 设置本群每日聊天费用额度，金额使用 `[maintenance.daily_report].currency` 对应的价格表计算。 |
 | `/*grouppolicy quiet <HH:MM-HH:MM\|clear>` | 设置静默时段；命令与超级管理员不受影响。 |
 | `/*grouppolicy analysis/learning/history <on\|off>` | 启停本群群分析、学习观察和历史记录。`history=off` 只停止新写入，不删除旧记录；`learning=off` 停止采集、挖掘、审核入库和上下文注入。 |
+| `/*grouppolicy asr <on\|off>` | 启停本群语音消息转写；全局 `[asr].enabled=false` 时全部关闭。 |
+| `/*grouppolicy knowledge <on\|off>` | 启停当前群的本地确定性知识库回答；关闭后普通消息不再命中知识库，但管理命令仍可用（全局 `[group_knowledge].enabled=false` 时全部关闭）。 |
+| `/*grouppolicy services <on\|off>` | 启停当前群的提醒 / 投票 / 报名；全局 `[group_services].enabled=false` 时全部关闭。 |
 | `/*grouppolicy learning-moderation <on\|off>` | 超级管理员显式授权本群群主/管理员审核本群 learning 候选。 |
 | `/*grouppolicy learning-moderation-actions <view,decide,mine>` | 超级管理员细分授权；默认 `view,decide`，每次命令都会重新校验。 |
 | `/*grouppolicy reset [field]` | 重置当前群策略。 |
@@ -194,6 +203,73 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 - 群管理员只能修改自己当前群的普通策略；命令不接受“目标群”参数，不能跨群修改。
 - provider、API Key、全局 Shell 权限不通过群策略暴露，仍由服务端全局配置和 `security` 判断。
 - `learning-moderation` 只能由机器人超级管理员设置；群管理员默认没有 `/learning` 管理权限，被显式授权后也只能审核本群候选，不能获得系统级超管权限。
+
+## 群知识库（FAQ）
+
+群知识库按 `平台 + 群 scope` 保存，命中后由服务端直接发送答案，不创建 Session、不调用 LLM，也不消耗 chat token。它适合固定口径的群规、绑定方式、客服问答等确定性内容。
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*faq` / `/*faq list [关键词]` | 列出或搜索当前群知识库。 |
+| `/*faq add <问题> => <答案>` | 添加精确匹配条目；左侧可用 `\|` 分隔别名。 |
+| `/*faq add-contains <文本> => <答案>` | 添加包含匹配条目。 |
+| `/*faq add-keyword <词1,词2> => <答案>` | 添加关键词条目；所有关键词都出现才命中。 |
+| `/*faq remove <id>` | 删除指定条目。 |
+| `/*faq clear --confirm` | 清空当前群知识库。 |
+| `/*faq test <文本>` | 只测试匹配结果，不发送答案。 |
+| `/*faq on` / `/*faq off` | 开关当前群的知识库回答。 |
+
+说明：
+
+- 匹配前会做确定性归一化：全角转半角、大小写折叠、空白折叠、去掉常用句末标点；`exact` 需要整句一致，`contains` 只要求包含，`keywords` 要求所有关键词都出现。
+- 命中后仍受正常唤醒、静默时段、限流和群运行状态约束；不是“无条件自动回复”。
+- 知识条目和答案不会注入模型提示词；关闭开关后普通消息会继续走正常 LLM 流程。
+- 管理命令仅当前群群主、群管理员或机器人超级管理员可用；不能跨群操作。
+
+## 群内提醒 / 投票 / 报名
+
+这些服务按 `平台 + 群 scope` 保存在 `state.toml [group_services]`，由本地调度和确定性逻辑执行，不调用模型。普通成员可创建/参与；创建者、当前群群主/管理员或超级管理员可关闭/删除。
+
+### 提醒
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*remind <时间> <内容>` | 创建群提醒。 |
+| `/*remind list` | 查看当前群待发送提醒。 |
+| `/*remind remove <id>` | 删除提醒。 |
+
+时间格式：`10m`、`1h30m`、`2d`、`2d3h`、`15:04`、`15:04:05`、`YYYY-MM-DD HH:MM`、`MM-DD HH:MM`。提醒到点后由调度器发送到创建时的群；群被禁言/删除等不可用状态会延后重试，已移除/不可用状态会标记跳过。
+
+### 投票
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*poll <问题> \| <选项1> \| <选项2>` | 创建投票。 |
+| `/*poll list` | 查看当前群进行中的投票。 |
+| `/*poll show <id>` | 查看投票结果和自己的选择。 |
+| `/*vote <id> <选项序号>` | 投票；可改票。 |
+| `/*poll close <id>` | 关闭投票并展示结果。 |
+
+### 报名
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*signup <标题> [人数]` | 创建报名；人数省略或 0 表示不限。 |
+| `/*signup list` | 查看进行中的报名。 |
+| `/*signup show <id>` | 查看报名成员。 |
+| `/*join <id>` / `/*signup join <id>` | 加入报名。 |
+| `/*signup leave <id>` | 退出报名。 |
+| `/*signup close <id>` | 关闭报名。 |
+
+示例：
+
+```text
+/*remind 10m 开会
+/*poll 周末团建去哪 | 爬山 | 桌游 | 聚餐
+/*vote p1 2
+/*signup 团建 20
+/*join s1
+```
 
 ## 工具与 Skill
 
@@ -221,6 +297,22 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 `@tool:` / `@skill:` 预载只在 work 模式生效。在 chat 模式下发送预载指令时，ElBot 会剥离指令并提示先发送 `/*work` 切换；不会静默忽略。
 
 `discover_tool` 的 `name` / `names` 除了工具名和 Skill 名，也可以传 tag（例如 `chat`、`web`），会展开成该 tag 下的全部工具；`discover_tool` 列表中的 `tags` 字段可以用来发现可用的 tag。
+
+## 运行时状态文件
+
+| 命令 | 作用 |
+| --- | --- |
+| `/*state` | 查看 `state.toml` 路径、已加载时间和是否有未生效的外部修改。 |
+| `/*state reload` | 立即重新读取 `state.toml` 并应用。 |
+
+示例：
+
+```text
+/*state
+/*state reload
+```
+
+`state.toml` 由 ElBot 运行时回写，也支持手工编辑后热加载：进程每 15 秒检测一次外部修改并自动生效，`/*state reload` 用于立刻生效。热加载覆盖模型选择、长消息策略、群策略、群知识库、群服务和群运行状态；`[budget]` 额度账本由进程独占，只在启动时从文件恢复，详见 [配置说明](configuration.md#外部修改-statetoml-的热加载)。
 
 ## 角色素材库
 
@@ -271,7 +363,17 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 | 命令 | 作用 |
 | --- | --- |
 | `/memory status` | 查看当前平台/会话的长期记忆条数。 |
-| `/memory recall [关键词]` | 按关键词检索当前范围的长期记忆。 |
+| `/memory list [n]` | 列出当前范围的长期记忆及其 ID、来源、强度和内容。 |
+| `/memory recall [关键词]` | 按关键词检索当前范围的长期记忆，并显示记忆 ID 与来源。 |
+| `/memory show <id>` | 查看一条记忆的完整来源和内容。 |
+| `/memory delete <id>` | 删除一条当前 scope 的长期记忆。 |
+| `/memory source <消息id>` | 删除由指定平台消息派生的当前 scope 长期记忆。 |
+| `/memory backfill` | 预检旧记忆来源回填：统计全库来源覆盖和可确定性回填的条数，不修改数据。 |
+| `/memory backfill --confirm` | 为旧记忆回填可确定的 `source_kind`。 |
+| `/forget list [n]` | 列出当前用户可删除的长期记忆。 |
+| `/forget <id>` | 删除当前用户可删除的一条长期记忆；id 支持唯一前缀。 |
+| `/forget source <消息id>` | 删除由指定消息派生的、当前用户可删除的长期记忆。 |
+| `/forget resident normal\|core\|all [--confirm]` | 清空自己的普通 / 核心 / 全部常驻记忆。 |
 | `/learning status` | 查看待审和已批准的表达/黑话候选数量。 |
 | `/learning mine` | 从最近消息中挖掘待审候选。 |
 | `/learning review [pending\|approved\|rejected]` | 列出候选。 |
@@ -280,7 +382,11 @@ LLM 在 work 模式下可以通过 `discover_tool` 按需发现工具详情。�
 
 说明：
 
-- `/memory` 对应 `angel_memory` SQLite；
+- `/memory` 对应 `angel_memory` SQLite，仅超级管理员可用；`/memory delete` 和 `/memory source` 只作用于当前平台/会话 scope。
+- `/forget` 面向普通成员：私聊 scope 可删除该 scope 内的长期记忆；群聊中普通成员只能删除来源成员为自己的条目，群主、群管理员和超级管理员可以删除当前群 scope 的任意条目。
+- 长期记忆在写入时记录来源用户、平台消息 ID 和 Session ID；源消息撤回后默认会删除由该消息派生的长期记忆，可通过 `[angel_memory].forget_on_recall` 关闭。`/*delete` 永久删除 Session 时也会删除来源 Session ID 匹配的长期记忆；旧版本未记录结构化来源的记忆不会被匹配，避免误删。
+- `/memory backfill` 是给旧数据的一次性迁移入口：旧版只把写入方写成自由文本 `source = "tool"`，所以可以确定地回填 `source_kind`；旧数据里没有来源成员、消息 ID 和 Session ID，`/memory backfill` 不会猜测它们，这些旧记忆仍然不会被 `/forget source`、撤回清理和 `/delete` Session 命中。
+- `/forget resident core` 和 `/forget resident all` 需要 `--confirm`；`/forget resident normal` 不需要确认。
 - `/learning` 对应 `self_learning` SQLite；默认仅超级管理员可用。超级管理员可在本群执行 `/*grouppolicy learning-moderation on` 并通过 `learning-moderation-actions` 细分授权（`view` / `decide` / `mine` / …）。群管理员审核结果只作用于当前群 scope，不会进入其他群或全局知识域；撤权或群管理员身份变化后，下一次命令立即失效，不依赖旧缓存。
 - 只有 `approved` 的表达/黑话会通过 `llm.turn.prepared` 注入当前请求。
 

@@ -140,3 +140,36 @@ func TestManagerWrapsNoticeOutputErrorWithHookName(t *testing.T) {
 		t.Fatalf("SendNotice error = %q, want hook name", err.Error())
 	}
 }
+
+type partialReceiptSender struct{}
+
+func (partialReceiptSender) SendChat(context.Context, []Output) (Receipt, error) {
+	return Receipt{PlatformMessageIDs: []string{"m1"}}, errors.New("boom")
+}
+
+func (partialReceiptSender) SendNotice(context.Context, Notice) (Receipt, error) {
+	return Receipt{PlatformMessageIDs: []string{"m1"}}, errors.New("boom")
+}
+
+func TestManagerMarksPartialReceiptForChatAndNotices(t *testing.T) {
+	manager := NewManager(partialReceiptSender{}, nil)
+
+	receipt, err := manager.SendChat(context.Background(), []Output{Text("hello")})
+	if err == nil {
+		t.Fatal("SendChat error = nil")
+	}
+	if !receipt.Failed || len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "m1" {
+		t.Fatalf("SendChat receipt = %#v", receipt)
+	}
+
+	receipt, err = manager.SendNoticesWithReceipt(context.Background(), []Output{Text("hello")})
+	if err == nil {
+		t.Fatal("SendNoticesWithReceipt error = nil")
+	}
+	if !receipt.Failed || len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "m1" {
+		t.Fatalf("SendNoticesWithReceipt receipt = %#v", receipt)
+	}
+	if !strings.Contains(receipt.Failure, "boom") {
+		t.Fatalf("SendNoticesWithReceipt failure = %q", receipt.Failure)
+	}
+}

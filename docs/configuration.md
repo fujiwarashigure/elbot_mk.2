@@ -9,7 +9,7 @@ ElBot 使用一个主配置入口加载应用配置和运行态状态；LLM Prov
 | 文件或目录 | 职责 |
 | --- | --- |
 | `app.toml` | 主配置入口，保存行为、平台、工具、安全、维护等应用配置，并记录各独立配置文件的相对路径。 |
-| `services.toml` | 共享只读服务配置：`[providers.*]`、`[model_metadata]`、`[model_profiles]`、`[image_generation]`。多个服务可以挂载同一个文件；密钥仍只放在 `.env`。 |
+| `services.toml` | 共享只读服务配置：`[providers.*]`、`[model_metadata]`、`[model_profiles]`、`[image_generation]`、`[image_to_prompt]`、`[vision]`、`[asr]`。多个服务可以挂载同一个文件；密钥仍只放在 `.env`。 |
 | `providers.toml` | 旧版 LLM Provider 配置；仍兼容，只有 `[config_files].providers` 指定时才读取。新部署建议统一使用 `services.toml`。 |
 | `elnis.toml` | Elnis 监听枢纽配置，保存 HTTP、token、delivery、allowed_tools 和 Elwisp 策略。 |
 | `state.toml` | 运行态状态，例如默认 Session 模式、chat/work/compact/naming 模型选择。 **该文件会被 ElBot 运行时回写，不能和 `services.toml` 共用。** |
@@ -177,6 +177,12 @@ quality = "medium"
 [image_to_prompt]
 provider = "openai"
 model = "gpt-4o-mini"
+
+# 可选：语音转写，复用上面的 [providers.*]
+# [asr]
+# enabled = false
+# provider = "openai"
+# model = "whisper-1"
 ```
 
 说明：
@@ -198,7 +204,7 @@ services:
       - ./data/config/elbot/services.toml:/etc/elbot/services.toml:ro
 ```
 
-- 修改 `services.toml` 后需要重启或 recreate ElBot 容器；当前不热加载该文件。
+- 修改 `services.toml` 后需要重启或 recreate ElBot 容器；当前不热加载该文件（`state.toml` 相反：它会被运行时回写，并支持外部编辑热加载，见[外部修改 `state.toml` 的热加载](#外部修改-statetoml-的热加载)）。
 - 旧部署不配置 `[config_files].services`、继续使用 `[config_files].providers = "providers.toml"` 时，行为与旧版本一致。
 
 
@@ -302,7 +308,8 @@ default_context_window = 256000
 - `api_key_env` 指向环境变量名，推荐用这种方式保存密钥。
 - `proxy` 可选，支持 `http://` 和 `socks5://` 代理地址；省略或留空时直连，不继承 ElBot 进程的 `HTTP_PROXY`、`HTTPS_PROXY` 等环境代理。该设置同时作用于模型列表和聊天请求。
 - `models` 是手动补充的模型名列表，当 Provider 的模型列表接口获取不到某些模型时使用。
-- `[providers.<name>.model_configs."<model>"]` 为特定模型配置 `context_window` 和 `extra_payload`，两者都是可选的。
+- `[providers.<name>.model_configs."<model>"]` 为特定模型配置 `context_window`、`extra_payload`、`vision` 和 `audio`，都是可选的。
+- `vision` / `audio` 是可选的三态能力声明：`true` 表示声明支持，`false` 表示明确不支持，不写则由上层按未知处理。`[vision]` 和 `[asr]` 启用时，目标模型被显式声明为 `false` 会在启动阶段报错；model 级声明优先于 provider 级。
 - `extra_payload` 会合并到 LLM 请求 JSON 中，模型级覆盖 Provider 级。
 - `[model_metadata]` 的 `default_context_window` 是全局回退值，默认 `256000`，没有在 `model_configs` 里配 `context_window` 时使用。
 - 新部署建议把本节所有内容放进 `services.toml`；如果保留旧 `providers.toml`，只有 `[config_files].providers` 指定时才读取。
@@ -515,6 +522,17 @@ model = "deepseek-chat"
 - `chat` 模式不注入工具，适合闲聊和低成本对话。
 - `elwisp1`、`elwisp2`、`elwisp3` 是 Elnis LLM 事件可选模型槽位；Elvena 请求可通过 `model_slot` 指定，未配置时回退到 `work`。
 - 运行时使用 `/*model` 切换模型后，状态会写回 `state.toml`。
+
+### 外部修改 `state.toml` 的热加载
+
+`state.toml` 会被 ElBot 运行时回写，同时也支持手工编辑后热加载，不需要重启：
+
+- 进程每 15 秒检查一次 `state.toml` 的修改时间；文件比进程最后加载/写回的版本更新时，会立即读取并生效，并记录 `runtime_state_reloaded` 审计事件，同时给超级管理员发送一条通知（每次外部修改只通知一次，只有实际生效的变更才会通知）；
+- 需要立刻生效时使用 `/*state reload`；`/*state` 可查看文件路径、已加载时间和是否存在未生效的外部修改；
+- 热加载覆盖 `mode_models`、`compact_model`、`naming_model`、`context_overflow`、`group_policy`、`group_knowledge`、`group_services`、`group_runtime`；
+- 每次内部写回之前都会先合并外部修改，因此“刚手工改完就触发内部写回”不会丢掉这次修改；
+- `[budget]` 额度账本由运行中的进程独占：热加载不会用文件内容覆盖内存中的账本（避免丢掉在途预占），账本只在进程启动时从文件恢复。手工编辑 `[budget]` 不会在运行中生效，且会在下一次写回时被内存值替换；
+- 文件内容非法（例如 provider 不存在）时，热加载失败并保留内存中的旧状态，日志里会记录具体原因。
 
 ## 存储与运行数据
 
@@ -759,15 +777,21 @@ circuit_breaker_half_open_max = 1
 ```toml
 [budget_limits]
 # 可选：全局 / 单用户每日额度；0 表示不限制。
-# 生图/视觉按成功预占的调用次数；chat 按 token 与费用统计。
+# 生图/视觉/语音转写按成功预占的调用次数；chat 按 token 与费用统计。
 global_image_daily = 0
 user_image_daily = 0
 global_vision_daily = 0
 user_vision_daily = 0
+global_asr_daily = 0
+user_asr_daily = 0
 global_chat_tokens_daily = 0
 user_chat_tokens_daily = 0
 global_chat_cost_daily = 0
 user_chat_cost_daily = 0
+# 可选：把 token/费用限制变成调用前原子预占、返回 usage 后结算的硬预算。
+chat_hard_limit = false
+# 预占使用的输出 token 预算；0 使用模型 prompt budget。
+chat_hard_limit_reserve_output_tokens = 0
 ```
 
 - 工具、Hook 和上下文压缩的超时通过 `context` 取消；超时后请求会结束并记录错误，释放并发占用。
@@ -899,14 +923,18 @@ report_days = 1
 
 群级策略由服务端按 `平台 + 群 scope` 判断，不依赖角色提示词，也不允许通过命令参数指定别的群。策略写入 `state.toml` 的 `group_policy` 表；可用 `/*grouppolicy` 查看和修改，详见 `docs/commands.md`。
 
-- 每群可独立设置唤醒词、响应模式、默认会话模式、默认模型与模型目录、工具白名单、生图/视觉额度、静默时段和功能开关。
+- 每群可独立设置唤醒词、响应模式、默认会话模式、默认模型与模型目录、工具白名单、生图/视觉额度、静默时段和功能开关、会话线程与连续消息合并窗口、本地知识库回答开关、提醒/投票/报名开关。
 - 响应模式 `mention` 为默认：命令、唤醒词、@ 机器人或回复机器人消息会触发；`all` 响应所有普通群消息；`keyword` 只认唤醒词；`reply` 只认回复；`off` 关闭普通响应。转发内容不会进入唤醒/命令匹配视图；直接消息里的 `@` 和唤醒词才会触发。
+- 群聊默认每人独立 Session（`thread-mode per-user`）。`/*grouppolicy thread-mode group` 后，本群所有成员共享一个 Session，普通消息按 turn 串行处理；每条用户消息会携带服务端生成的发言成员标记（如 `[发言成员：张三(id:1001)]`），避免不同成员的输入互相覆盖；这些标记只是上下文归属提示，不是权限边界，工具与额度仍按实际发送者 Actor 判断。开启共享线程不会迁移旧 per-user Session，下一条消息会开始一个新的共享 Session；共享会话的切换/修改命令仅限当前群群主、群管理员或机器人超级管理员，普通成员仍可发消息。
+- `/*grouppolicy merge-window <0-10000>` 设置连续消息合并窗口（毫秒，0 表示关闭）。窗口内同一成员的连续消息会在同一个 turn 内合并发送，减少重复调用；不同成员的消息仍会按到达顺序串行，不会合并成同一个权限主体；每个 Session 的待处理队列有硬上限，超过时本地拒绝并发送提示，避免刷屏耗尽内存。
 - 群管理员只能改当前群的普通策略；`allowed-models`、`learning-moderation`、`learning-moderation-actions` 只能由超级管理员配置。群管理员不能修改其他群、provider/密钥或全局 Shell 权限。
+- 机器人自身被禁言、被踢或主动离群时，服务端按当前群维护运行状态并写入 `state.toml` 的 `group_runtime`（`active` / `muted` / `removed` / `unavailable`，缺省视为 `active`）。`muted` / `removed` 期间：拒绝该群新的模型调用、取消该群在途请求、丢弃发往该群的定时任务/提醒/后台通知，避免“模型继续计费但结果发不出去”；每次状态变化只向超管发送一次聚合通知，重复事件不重复通知。解除禁言或重新入群后恢复为 `active`，暂停期间的通知不会集中补发。
 - 模型目录 `allowed-models` 为空时，群默认模型只能从已配置的模型别名/profile 中选择；显式填入 `provider/model` 或 `*` 才会放开对应范围。模型别名解析后仍会对最终 `provider/model` 再做一次目录校验。
 - 工具白名单由服务端在工具解析后和执行前分别校验：`clear` 表示继承全局工具策略，`none` 表示当前群禁止全部工具。`discover_tool` 也是普通工具，只有显式写入白名单才可用；工具 profile 会被展开为具体工具名，因此通过 `@use:`、技能或缓存间接调用也必须命中白名单。`discover_tool` 在受限群里还会收到当前白名单过滤器，列表和详情只返回本群允许的工具。群分析摘要模型也会在工具执行前按当前群模型目录重新授权。
 - 工具白名单和每日额度在请求排队后、真正执行前重新校验；排队期间被管理员关闭的工具不会继续执行。私聊、定时任务和后台任务没有群 scope 时使用全局安全策略，不套用某个群的策略。
 - 生图/视觉额度按“调用前原子预占、按唯一调用 ID 防重复计数”的每日次数账本执行，写入 `state.toml` 的 `budget.reservations`，重启后保留。同一调用 ID 会被绑定到参数摘要（`budget.digests`）；重放相同参数不重复计数，复用 ID 但参数不同会被拒绝。预占在账本无法可靠落盘时会回滚并拒绝受限调用；已经发出的 provider 调用不会因本地超时/取消自动退款，重启后结果未知时按保守占用处理。
-- 额度支持群、群内单用户、全局和全局单用户四个维度：群策略可设置 `image-quota` / `vision-quota` / `user-image-quota` / `user-vision-quota` / `chat-tokens-quota` / `chat-cost-quota`，应用配置 `[budget_limits]` 可设置全局与单用户维度。chat token/费用在执行前检查，provider 返回 usage 后按 `[maintenance.daily_report].prices` 计价写入 `budget.tokens` / `budget.costs`。
+- 额度支持群、群内单用户、全局和全局单用户四个维度：群策略可设置 `image-quota` / `vision-quota` / `asr-quota` / `user-image-quota` / `user-vision-quota` / `user-asr-quota` / `chat-tokens-quota` / `chat-cost-quota`，应用配置 `[budget_limits]` 可设置全局与单用户维度。chat token/费用默认在执行前检查、provider 返回 usage 后按 `[maintenance.daily_report].prices` 计价写入 `budget.tokens` / `budget.costs`；这种软模式在并发下可能多放行一个在途请求。
+- 打开 `[budget_limits].chat_hard_limit = true` 后，chat token/费用限制变为硬预算：每次 provider 调用前按“估算输入 + 输出预留”原子预占（输出预留可用 `chat_hard_limit_reserve_output_tokens` 覆盖，0 表示使用模型 prompt budget），并发请求不能同时放行超出剩余额度的部分；provider 返回 usage 后按真实用量结算并释放差额。上游不返回 usage 时按预占量保守记账，并在 `state.toml` 的 `budget.uncertain` 中标记为不确定，直到当天/次日账本清理。启用费用硬限制但没有为实际模型配置价格时会直接拒绝调用，而不是按 0 费用处理；取消、超时或重启后未结算的预占不会自动退款，会保持保守占用并在账本中可见。
 - 工具执行幂等账本位于 `budget.executions`：同一 scope + actor + 工具调用 ID 只允许一个参数摘要首次执行，重放相同 ID 会被抑制，ID 复用不同参数会被拒绝；provider 重试单独记录在 `budget.retries`，不会静默增加调用次数额度。
 - 群分析、学习、历史记录的开关可在群级关闭；旧群未配置时保持原有全局行为。
 - `history=off` 的语义是“停止新增可检索历史”，不是拒绝当前消息，也不是删除旧记录：入站原文、解析后文本、转发展开、图片描述、助手回复、工具结果摘要、会话摘要/命名、缓存元数据以及 chat_history/outbound 写入口都会停止落盘；当前轮仍在内存中处理。历史上已经存在的行不会被自动删除；历史查询工具在关闭期间继续拒绝。
@@ -914,12 +942,65 @@ report_days = 1
 - `learning-moderation-actions` 可细分为 `view`（查看候选/状态/历史）、`decide`（approve/reject/undo）、`mine`（触发挖掘）、`delete`、`export`、`policy`；默认只给 `view,decide`。权限每次命令执行时从当前群策略和当前群管理员身份重新计算，不缓存。
 - 实际执行的模型目标也会再次校验：群默认模型、turn hook、cron override、压缩模型与视觉 fallback 在真正调用 provider 前都会按本群 `allowed-models` / `default-model` 重新授权，避免通过 fallback 或动态配置绕过目录。
 
+## 群知识库
+
+`app.toml` 的 `[group_knowledge]` 控制本地确定性群知识库 / FAQ 的全局开关和写入上限：
+
+```toml
+[group_knowledge]
+enabled = true
+max_entries_per_scope = 200
+max_question_runes = 200
+max_answer_runes = 2000
+max_aliases = 8
+max_keywords = 16
+max_match_runes = 2000
+```
+
+- 每个 `平台 + 群 scope` 独立保存条目，写入 `state.toml` 的 `group_knowledge` 表；不会混入其他群或私聊。
+- `enabled = false` 时全局关闭：普通消息不再命中知识库，管理命令也会拒绝；这是运维侧的最高优先级开关。
+- 群级回答开关是 `/grouppolicy knowledge <on|off>`；关闭回答后条目仍保留，群管理员仍可管理。
+- 匹配模式：
+  - `exact`：归一化后整句一致；`aliases` 也按整句比较。
+  - `contains`：归一化后包含任一问题或别名。
+  - `keywords`：所有 `keywords` 都出现在归一化文本中。
+- 归一化只做全角转半角、大小写折叠、空白折叠和去掉常用句末标点，不做模型语义理解；`max_match_runes` 限制单条消息实际扫描长度。
+- 命中后由服务端直接发送答案，不创建 Session、不调用 LLM、不消耗 chat token；但仍受正常唤醒、静默时段、入站限流、群运行状态和输出 Hook 约束。
+- 条目不会自动注入模型提示词；答案与触发词是本地数据，不会因为 FAQ 命中而进入会话历史。需要模型知晓的内容应通过长期记忆、正常聊天或群知识库之外的上下文处理。
+
+## 群内提醒 / 投票 / 报名
+
+`app.toml` 的 `[group_services]` 控制群内确定性提醒、投票和报名的全局开关与上限：
+
+```toml
+[group_services]
+enabled = true
+max_reminders_per_scope = 50
+max_reminder_days = 365
+max_polls_per_scope = 20
+max_poll_options = 10
+max_signups_per_scope = 20
+max_signup_capacity = 500
+max_text_runes = 500
+```
+
+- 每个 `平台 + 群 scope` 独立保存；写入 `state.toml [group_services]`，重启后恢复。
+- `enabled = false` 时全局关闭；群级开关是 `/grouppolicy services <on|off>`，关闭后创建/参与都会被拒绝，已存在的提醒在关闭期间不发送，重新打开后按到期顺序补发。
+- 提醒由 Agent 内的本地调度器处理（启动后立即检查并按固定间隔轮询），到点通过正常 Output Layer 发送，不调用 LLM、不消耗 chat token。
+- 投票是单选项、可改票；结果只显示计数，不公开其他成员的 voter 明细。报名记录参与者名称和容量。
+- 提醒、投票、报名都受群运行状态约束：群被禁言时延后重试；被踢/不可用且无法恢复时标记跳过。
+- 创建者、当前群群主/管理员或机器人超级管理员可以删除提醒、关闭投票、关闭报名；普通成员可以创建和参与。
+
 ## 长期记忆
 
 ```toml
 [angel_memory]
 enabled = true
 retention_days = 365
+# 源消息被撤回时删除由它派生的长期记忆
+forget_on_recall = true
+# 允许模型通过 angel_forget 工具删除长期记忆；默认关闭
+# allow_tool_forget = false
 # 单条记忆最大字符数（rune）
 max_content_runes = 1000
 # 单个平台/会话最多保留多少条记忆
@@ -931,13 +1012,28 @@ max_context_runes = 1200
 ```
 
 - 使用本地 SQLite `angel_memory.db`；
-- 提供 `angel_remember` / `angel_recall` 工具；
+- 提供 `angel_remember` / `angel_recall` 工具；`angel_recall` 结果会显示记忆 ID 和来源；
+- 每条记忆记录来源类型、来源用户、平台消息 ID 和 Session ID；`/memory list|show`、`/forget list` 可查看，`/memory delete`、`/forget` 可按 scope 和权限删除；
+- `forget_on_recall = true` 时，平台消息撤回事件会按 `平台 + scope + 消息 ID` 删除由该消息派生的长期记忆；设为 `false` 只取消该消息对应的在途处理，不删除记忆；
 - 召回会先做关键词 / 中文 2-4 字 n-gram 匹配与相关度排序；没有命中时，自动注入会谨慎回退到少量高强度记忆；
 - 注入内容会统一转义边界字符、折叠控制字符、按条限长并按总预算截断，单条超长记忆不会挡住后面的短记忆；
 - `llm.turn.prepared` 会按当前平台/会话检索记忆并追加临时 system 上下文，不写入 Session 历史；
 - `max_writes_per_minute` 只计算成功写入：空内容、超长内容在限流前先被拒绝，失败写入会退还不占成功配额，但仍受单独的请求尝试上限保护；
 - `max_per_scope` 的“检查 + 写入”在同一个 SQLite 写事务内完成，并发写入不会突破容量上限；
 - `retention_days <= 0` 时不做时间清理；`max_content_runes`、`max_per_scope`、`max_writes_per_minute`、`max_context_runes` 未设置时使用内置默认值。
+
+### 模型删除长期记忆（可选）
+
+`allow_tool_forget = true` 时注册 `angel_forget` 工具，让模型可以在用户明确要求时删除一条长期记忆。默认关闭，因为“模型主动删除”比“用户主动删除”风险更高。
+
+开启后的完整约束（服务端强制，不依赖提示词）：
+
+- 只能删除**来源成员为当前发言人**、且属于**当前平台/会话 scope** 的记忆；别人的记忆、其他会话的记忆、以及旧版没有记录来源成员的记忆都会直接拒绝；
+- 单次调用只删除一条，`id` 必须来自 `angel_recall` 的输出（支持唯一前缀）；
+- 风险等级为 `high`，会进入工具确认流程，用户可以用 `/*detail` 查看待删除内容、`/*confirm` 确认、`/*reject` 拒绝；
+- 除平台确认外，工具自身还要求 `confirm=true`：第一次调用只返回待删除内容，不会删除；带 `confirm=true` 再次调用才执行；
+- 同一范围内每分钟最多删除 3 条，超过会被拒绝，避免模型循环删除；
+- `angel_forget` 是隐藏工具，通过 `angel_recall` 的依赖关系注入模型；管理员要批量删除请继续使用 `/memory delete` 与 `/forget`。
 
 ## 自主学习
 
@@ -1157,6 +1253,48 @@ negative_cache_ttl_seconds = 30
 - 缓存与负缓存只保存结构化字段和安全摘要，不保存原始响应体、请求 body、Base64 或凭据；API Key 从不出现在缓存键里。
 - 指标只使用低基数标签（cache 结果、错误类别、耗时），不使用 MediaID、session ID 或缓存键作为标签。
 
+## 语音转写 asr
+
+`[asr]` 是可选配置：收到会被唤醒的语音/录音消息时，ElBot 先把音频转成文字，再用转写文本继续聊天、工具和上下文流程。它复用 `[providers.*]`，调用 OpenAI 兼容的 `POST {base_url}/audio/transcriptions`。
+
+**默认关闭**，因为每条被唤醒的语音都会增加一次 provider 调用和费用。
+
+```toml
+[asr]
+enabled = true
+provider = "openai"
+model = "whisper-1"
+language = "zh"             # 可选；空表示自动识别
+prompt = ""                 # 可选；人名/术语提示
+max_audio_bytes = 20971520  # 单个录音最大 20 MiB
+timeout_seconds = 120
+max_concurrent = 2
+queue_size = 8
+max_segments = 4
+cache_ttl_seconds = 1800
+cache_max_entries = 128
+negative_cache_ttl_seconds = 30
+negative_cache_max_entries = 128
+max_retries = 2
+retry_initial_delay_seconds = 1
+```
+
+配置语义：
+
+- 不写 `[asr]` 或 `enabled = false`：语音保持原来的 `[语音]` 文本引用，不调用 ASR。
+- `enabled = true` 但 provider/model 缺失或 provider 不存在：启动时报配置错误。
+- 目标 provider/model 在 `[providers.*].audio = false` 或 `[providers.*.model_configs."<model>"].audio = false` 中显式声明为不支持时：启动时报错，model 级声明优先。
+- 群策略可用 `/grouppolicy asr off` 单独关闭当前群；`asr-quota` / `user-asr-quota` 控制本群及群内单成员每日转写次数，`[budget_limits] global_asr_daily` / `user_asr_daily` 控制全局与全局单用户次数。
+- 如果本群用 `default-model` 或 `allowed-models` 收紧了模型目录，ASR 的 provider/model 也必须在该目录内；否则仅记录 `model_denied` 审计并回退 `[语音]`，不会绕过目录校验。
+- 只有会被唤醒、进入处理的语音才转写；未唤醒的群语音不会产生 ASR 费用。
+- 成功转写以 `[语音 N 自动转写（可能有误）：...]` 文本段替换原语音段；转写失败保留原 `[语音]` 引用，不丢消息、不启动额外模型。
+- 单条消息最多转写 `max_segments` 条语音（默认 4），有界并行 `max_concurrent`；每条录音读取不超过 `max_audio_bytes`。
+- 转写结果按 MediaID + provider/model/language/prompt 缓存，默认 30 分钟；负缓存只记录确定性 4xx，429/5xx/超时/取消不进入负缓存。
+- 额度预占在 state.toml 持久化，按 `turn + mediaID + 序号` 幂等去重，重启或重放不会重复计费。
+- 当前版本只转写当前消息内的语音，不转写引用/上下文里的语音。
+- 转写文本以 `[` 开头，避免误听内容被当成 slash 命令执行；模型仍能正常读取正文。
+- 音频会按配置上传给对应 provider，信任边界与发送给该 provider 的聊天内容一致；不要在不信任的 provider 上开启。
+
 ## 定时报告
 
 ```toml
@@ -1271,7 +1409,7 @@ QQOFFICIAL_CLIENT_SECRET=your-client-secret
 
 `client_secret_env` 指向保存 Client Secret 的环境变量名；也可以用 `client_secret` 直接写入配置，但不建议提交真实 Secret。
 
-QQ 官方机器人会处理私聊、群内 @ 和平台实际下发的普通群消息。群聊沿用统一唤醒规则：slash 命令、`trigger_keywords`、@ 机器人或引用机器人的历史回复会触发响应；未触发的普通群消息仍会写入聊天历史。普通群消息是否下发取决于 QQ 开放平台为机器人启用的群消息能力。
+QQ 官方机器人会处理私聊、群内 @ 和平台实际下发的普通群消息。群聊沿用统一唤醒规则：slash 命令、`trigger_keywords`、@ 机器人或引用机器人的历史回复会触发响应；未触发的普通群消息仍会写入聊天历史。普通群消息是否下发取决于 QQ 开放平台为机器人启用的群消息能力。长回复按 1500 rune 上限分页，页尾带 `……（n/N）` 标记；后续页发送失败时保留已成功页回执并在审计中标记部分发送，不会重发已经可见的页面。
 
 QQ OneBot 最小配置示例：
 
@@ -1290,6 +1428,13 @@ forward_max_fetches = 8 # get_forward_msg 最多拉取次数
 forward_max_result_bytes = 1048576 # 单次 get_forward_msg 返回体大小上限
 forward_max_non_text = 20 # 转发中图片/文件/语音等非文本节点上限
 forward_fetch_timeout_seconds = 5 # 单次 get_forward_msg 超时
+inbound_dedup_enabled = true # 按 平台+机器人+scope+消息ID 去重，不依赖历史记录开关
+inbound_dedup_ttl_seconds = 1800 # processing/completed/failed 状态保留时长
+inbound_dedup_max_entries = 4096 # 去重表硬上限，超出按最旧记录淘汰
+preprocess_workers = 4 # 解析 @、引用、合并转发的有界 worker 数
+preprocess_queue_size = 256 # 普通消息预处理队列；满时本地丢弃，不产生无界 goroutine
+high_priority_workers = 1 # 撤回/成员/管理事件专用 worker，不排在普通消息后面
+high_priority_queue_size = 128 # 高优先级事件队列；满时 readLoop 内联执行而不是丢弃
 ```
 
 > **容器部署注意**：`ws_url` 是 **ElBot 容器内**要访问的地址。`ws://127.0.0.1:6700/` 在容器内指向 ElBot 自身。OneBot 在同一个 Compose 项目（或同一 Docker 网络）的服务中用服务名，例如 `ws://onebot:6700/`；OneBot 在宿主机时，需要配置容器可访问的宿主机地址（Linux 可加 `extra_hosts: ["host.docker.internal:host-gateway"]` 后写 `ws://host.docker.internal:6700/`）；OneBot 在另一台机器时写其 IP / 域名。
@@ -1299,6 +1444,8 @@ forward_fetch_timeout_seconds = 5 # 单次 get_forward_msg 超时
 `send_file_mode` 同时控制 QQ OneBot 本地图片、文件和 `record` 语音的发送方式。`base64` 适用于 ElBot 与 OneBot 不共享文件系统的部署；`file_uri` 仅适用于双方能访问同一本地路径的场景。
 
 OneBot 入站文本会保留原始换行、缩进和连续空白；唤醒判断使用单独规范化后的匹配视图，不会为了匹配关键词而重排模型输入，也不会让转发里的 `@`、唤醒词或命令进入匹配视图。合并转发消息会展开为带发送者、时间、消息 ID 的引用文本，并通过 `forward_max_nodes`、`forward_max_runes`、`forward_max_depth` 限制节点数、总字符数和嵌套深度；`forward_max_fetches`、`forward_max_result_bytes`、`forward_max_non_text`、`forward_fetch_timeout_seconds` 进一步限制拉取次数、单次返回体、非文本节点和拉取超时。同一条消息内所有转发 id 共享节点/字符预算；循环引用会被拒绝，重复引用会标记省略，拉取失败或节点缺字段会稳定降级为文本标记。转发内容始终作为不可信用户数据传入，不会构造成 system/developer 消息。
+
+OneBot 入站消息会先按 `平台 + 机器人 self_id + scope + message_id` 去重，状态分为 `processing` / `completed` / `failed`，在 TTL 内重连重放不会再次唤醒模型或计费；去重表有 `inbound_dedup_max_entries` 硬上限，且不依赖 `history` 开关。`@` 解析、引用拉取和合并转发展开都在 `preprocess_workers` / `preprocess_queue_size` 限定的预处理池里执行，队列满时该条普通消息在本地丢弃并记录告警，而不是无限创建 goroutine。撤回、成员退群/被踢/禁言和管理类事件走独立的高优先级通道 `high_priority_workers` / `high_priority_queue_size`，不会排在普通聊天消息后面；高优先级队列也满时会在读循环中内联处理，保证撤回和取消不会因为流量洪峰丢失。
 
 `api_timeout_seconds` 分别作为 OneBot 帧写入和 API 响应等待的基础超时。大帧写入会按编码后大小每完整 1 MiB 增加 1 秒，最多增加到基础超时本身；写入失败或超时后 ElBot 会断开并重连 OneBot，避免一个慢发送长期占住后续消息。发送仍会同步等待平台回执。
 

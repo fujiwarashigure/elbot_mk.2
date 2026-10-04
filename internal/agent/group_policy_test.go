@@ -416,3 +416,42 @@ func TestProviderConcurrencyLimit(t *testing.T) {
 		t.Fatalf("provider slot after release: %v", err)
 	}
 }
+
+func TestGroupPolicyThreadModeAndMergeWindow(t *testing.T) {
+	a := New(&fakePlatform{}, &fakeLLM{}, "test-model", config.ProviderConfig{}, newTestStore(t))
+	a.statePath = filepath.Join(t.TempDir(), "state.toml")
+	ctx := platform.WithMessageContext(context.Background(), platform.MessageContext{
+		Platform:         "qqonebot",
+		PlatformUserID:   "admin",
+		ScopeID:          "group:9",
+		ConversationKind: platform.ConversationGroup,
+		GroupRole:        security.GroupRoleAdmin,
+	})
+	if _, err := a.SetGroupPolicy(ctx, "thread-mode", "group"); err != nil {
+		t.Fatalf("SetGroupPolicy thread-mode: %v", err)
+	}
+	if _, err := a.SetGroupPolicy(ctx, "merge-window", "1500"); err != nil {
+		t.Fatalf("SetGroupPolicy merge-window: %v", err)
+	}
+	state, err := config.LoadState(a.statePath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	policy := state.GroupPolicy["qqonebot:group:9"]
+	if policy.ThreadMode != config.ThreadModeGroup || policy.MergeWindowMS != 1500 {
+		t.Fatalf("stored policy = %#v", policy)
+	}
+	if !a.scope(ctx).Shared {
+		t.Fatal("scope must be shared after enabling group thread-mode")
+	}
+	if _, err := a.ResetGroupPolicy(ctx, "thread-mode"); err != nil {
+		t.Fatalf("ResetGroupPolicy thread-mode: %v", err)
+	}
+	state, err = config.LoadState(a.statePath)
+	if err != nil {
+		t.Fatalf("LoadState after reset: %v", err)
+	}
+	if state.GroupPolicy["qqonebot:group:9"].ThreadMode != "" {
+		t.Fatalf("thread mode after reset = %q", state.GroupPolicy["qqonebot:group:9"].ThreadMode)
+	}
+}

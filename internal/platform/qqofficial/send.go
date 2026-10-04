@@ -17,6 +17,11 @@ const (
 
 	fileTypeImage = 1
 	fileTypeFile  = 4
+
+	// qqOfficialTextPageRunes keeps each page comfortably below the QQ
+	// official API text limit even when every rune is a 3-byte CJK
+	// character. Pages after the first get a numeric continuation marker.
+	qqOfficialTextPageRunes = 1500
 )
 
 func receiptWithMessageID(id string) delivery.Receipt {
@@ -27,6 +32,27 @@ func receiptWithMessageID(id string) delivery.Receipt {
 	return delivery.Receipt{PlatformMessageIDs: []string{id}}
 }
 
+func qqOfficialTextPages(text string) []string {
+	runes := []rune(text)
+	if len(runes) <= qqOfficialTextPageRunes {
+		return []string{text}
+	}
+	pageSize := qqOfficialTextPageRunes - 16
+	if pageSize <= 0 {
+		pageSize = qqOfficialTextPageRunes
+	}
+	total := (len(runes) + pageSize - 1) / pageSize
+	pages := make([]string, 0, total)
+	for start := 0; start < len(runes); start += pageSize {
+		end := start + pageSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		pages = append(pages, fmt.Sprintf("%s……（%d/%d）", string(runes[start:end]), len(pages)+1, total))
+	}
+	return pages
+}
+
 func (a *Adapter) sendContextOutput(ctx context.Context, outputs []delivery.Output) (delivery.Receipt, error) {
 	t, err := a.contextTarget(ctx)
 	if err != nil {
@@ -35,12 +61,11 @@ func (a *Adapter) sendContextOutput(ctx context.Context, outputs []delivery.Outp
 	var receipt delivery.Receipt
 	for i, out := range outputs {
 		sent, err := a.sendOutput(ctx, t, out)
-		if err != nil {
-			return receipt, err
-		}
 		sent = qqOfficialMediaReceipt(sent, t, out, i)
-		receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, sent.PlatformMessageIDs...)
-		receipt.SentMessages = append(receipt.SentMessages, sent.SentMessages...)
+		receipt = receipt.Merge(sent)
+		if err != nil {
+			return receipt.MarkPartialFailure(err), err
+		}
 	}
 	return receipt, nil
 }
@@ -108,28 +133,48 @@ func (a *Adapter) sendText(ctx context.Context, target sendTarget, text string) 
 	if target.Proactive && !a.cfg.allowProactive() {
 		return delivery.Receipt{}, fmt.Errorf("qqofficial proactive messages are disabled")
 	}
+	prefix := platform.PrimaryCommandPrefix(a.cfg.CommandPrefixes)
 	if a.cfg.markdownByDefault() {
-		msg := a.baseMessage(target)
-		msg.MsgType = msgTypeMarkdown
-		msg.Markdown = &messageMarkdown{Content: text}
-		prefix := platform.PrimaryCommandPrefix(a.cfg.CommandPrefixes)
-		if a.cfg.enableKeyboard() && shouldAttachRiskKeyboard(text, prefix) {
-			msg.Keyboard = riskKeyboard(a.cfg.AppID, prefix)
-		}
-		resp, err := a.client.sendMessage(ctx, target, msg)
+		receipt, err := a.sendTextPages(ctx, target, text, msgTypeMarkdown, prefix)
 		if err == nil {
-			return receiptWithMessageID(resp.ID), nil
+			return receipt, nil
+		}
+		if len(receipt.PlatformMessageIDs) > 0 {
+			// Some markdown pages are already visible; a text fallback would
+			// duplicate them, so report the partial delivery instead.
+			return receipt.MarkPartialFailure(err), err
 		}
 		a.logWarn(ctx, "qqofficial markdown send failed, fallback to text", "error", err)
 	}
-	msg := a.baseMessage(target)
-	msg.MsgType = msgTypeText
-	msg.Content = text
-	resp, err := a.client.sendMessage(ctx, target, msg)
-	if err != nil {
-		return delivery.Receipt{}, err
+	return a.sendTextPages(ctx, target, text, msgTypeText, prefix)
+}
+
+func (a *Adapter) sendTextPages(ctx context.Context, target sendTarget, text string, msgType int, prefix string) (delivery.Receipt, error) {
+	pages := qqOfficialTextPages(text)
+	keyboard := a.cfg.enableKeyboard() && shouldAttachRiskKeyboard(text, prefix)
+	var receipt delivery.Receipt
+	for i, page := range pages {
+		msg := a.baseMessage(target)
+		switch msgType {
+		case msgTypeMarkdown:
+			msg.MsgType = msgTypeMarkdown
+			msg.Markdown = &messageMarkdown{Content: page}
+		default:
+			msg.MsgType = msgTypeText
+			msg.Content = page
+		}
+		if i == 0 && keyboard {
+			msg.Keyboard = riskKeyboard(a.cfg.AppID, prefix)
+		}
+		resp, err := a.client.sendMessage(ctx, target, msg)
+		if err != nil {
+			return receipt.MarkPartialFailure(fmt.Errorf("page %d/%d: %w", i+1, len(pages), err)), err
+		}
+		if id := strings.TrimSpace(resp.ID); id != "" {
+			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, id)
+		}
 	}
-	return receiptWithMessageID(resp.ID), nil
+	return receipt, nil
 }
 
 func (a *Adapter) sendMedia(ctx context.Context, target sendTarget, out delivery.Output, fileType int) (delivery.Receipt, error) {

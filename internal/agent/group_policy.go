@@ -93,6 +93,8 @@ func (a *Agent) GroupPolicyStatus(ctx context.Context) string {
 	sb.WriteString(fmt.Sprintf("作用域：%s\n", key))
 	sb.WriteString(fmt.Sprintf("唤醒词：%s\n", displayStringList(policy.WakeKeywords)))
 	sb.WriteString(fmt.Sprintf("响应模式：%s（mention=默认，all=全部，keyword=仅唤醒词，reply=仅回复，off=关闭）\n", policy.ResponseModeValue()))
+	sb.WriteString(fmt.Sprintf("会话线程：%s（per_user=每人独立，group=全群共享并串行）\n", policy.ThreadModeValue()))
+	sb.WriteString(fmt.Sprintf("连续消息合并窗口：%s\n", mergeWindowText(policy.MergeWindowMS)))
 	defaultMode := policy.DefaultMode
 	if defaultMode == "" {
 		defaultMode = "继承全局"
@@ -117,15 +119,18 @@ func (a *Agent) GroupPolicyStatus(ctx context.Context) string {
 	}
 	sb.WriteString(fmt.Sprintf("工具白名单：%s\n", toolText))
 	imageUsed, visionUsed := a.budgetUsageForScope(ctx)
+	asrUsed := a.asrBudgetUsageForScope(ctx)
 	sb.WriteString(fmt.Sprintf("生图日额度：%s\n", budgetText(policy.ImageQuota, imageUsed)))
 	sb.WriteString(fmt.Sprintf("视觉日额度：%s\n", budgetText(policy.VisionQuota, visionUsed)))
+	sb.WriteString(fmt.Sprintf("语音转写日额度：%s\n", budgetText(policy.ASRQuota, asrUsed)))
 	sb.WriteString(fmt.Sprintf("单用户生图日额度：%s\n", budgetText(policy.UserImageQuota, 0)))
 	sb.WriteString(fmt.Sprintf("单用户视觉日额度：%s\n", budgetText(policy.UserVisionQuota, 0)))
+	sb.WriteString(fmt.Sprintf("单用户语音转写日额度：%s\n", budgetText(policy.UserASRQuota, 0)))
 	chatTokens, chatCosts := a.chatBudgetUsageForScope(ctx)
 	sb.WriteString(fmt.Sprintf("群日聊天 token 额度：%s\n", int64BudgetText(policy.ChatTokensQuota, chatTokens)))
 	sb.WriteString(fmt.Sprintf("群日聊天费用额度：%s\n", costBudgetText(policy.ChatCostQuota, chatCosts)))
 	sb.WriteString(fmt.Sprintf("静默时段：%s\n", quiet))
-	sb.WriteString(fmt.Sprintf("群分析：%s；学习：%s；历史记录：%s\n", enabledText(policy.IsGroupAnalysisEnabled()), enabledText(policy.IsLearningEnabled()), enabledText(policy.IsHistoryEnabled())))
+	sb.WriteString(fmt.Sprintf("群分析：%s；学习：%s；历史记录：%s；知识库：%s；语音转写：%s；提醒/投票/报名：%s\n", enabledText(policy.IsGroupAnalysisEnabled()), enabledText(policy.IsLearningEnabled()), enabledText(policy.IsHistoryEnabled()), enabledText(policy.IsKnowledgeEnabled()), enabledText(policy.IsASREnabled()), enabledText(policy.IsServicesEnabled())))
 	actions := policy.LearningModerationActionsValue()
 	if len(actions) == 0 {
 		actions = []string{"无"}
@@ -169,6 +174,39 @@ func costBudgetText(limit float64, usedMicros int64) string {
 	return fmt.Sprintf("已用 %.6f / %.6f（剩余 %.6f）", used, limit, remaining)
 }
 
+func (a *Agent) rawGroupPolicy(scope session.Scope) config.GroupPolicyConfig {
+	if a == nil {
+		return config.GroupPolicyConfig{}
+	}
+	key := contextOverflowKey(scope)
+	a.groupPolicyMu.RLock()
+	defer a.groupPolicyMu.RUnlock()
+	return a.groupPolicy[key]
+}
+
+func (a *Agent) groupMergeWindow(ctx context.Context) time.Duration {
+	if a == nil {
+		return 0
+	}
+	scope := a.baseScope(ctx)
+	policy := a.rawGroupPolicy(scope)
+	ms := policy.MergeWindowMS
+	if ms <= 0 {
+		return 0
+	}
+	if ms > 10000 {
+		ms = 10000
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func mergeWindowText(ms int) string {
+	if ms <= 0 {
+		return "关闭"
+	}
+	return fmt.Sprintf("%d ms", ms)
+}
+
 func displayStringList(values []string) string {
 	if len(values) == 0 {
 		return "无"
@@ -190,6 +228,10 @@ func groupPolicyFieldAuditValue(policy config.GroupPolicyConfig, field string) s
 		return displayStringList(policy.WakeKeywords)
 	case "response":
 		return policy.ResponseModeValue()
+	case "thread-mode":
+		return policy.ThreadModeValue()
+	case "merge-window":
+		return strconv.Itoa(policy.MergeWindowMS)
 	case "default-mode":
 		if policy.DefaultMode == "" {
 			return "inherit"
@@ -211,10 +253,14 @@ func groupPolicyFieldAuditValue(policy config.GroupPolicyConfig, field string) s
 		return strconv.Itoa(policy.ImageQuota)
 	case "vision-quota":
 		return strconv.Itoa(policy.VisionQuota)
+	case "asr-quota":
+		return strconv.Itoa(policy.ASRQuota)
 	case "user-image-quota":
 		return strconv.Itoa(policy.UserImageQuota)
 	case "user-vision-quota":
 		return strconv.Itoa(policy.UserVisionQuota)
+	case "user-asr-quota":
+		return strconv.Itoa(policy.UserASRQuota)
 	case "chat-tokens-quota":
 		return strconv.FormatInt(policy.ChatTokensQuota, 10)
 	case "chat-cost-quota":
@@ -227,6 +273,12 @@ func groupPolicyFieldAuditValue(policy config.GroupPolicyConfig, field string) s
 		return enabledText(policy.IsLearningEnabled())
 	case "history":
 		return enabledText(policy.IsHistoryEnabled())
+	case "knowledge":
+		return enabledText(policy.IsKnowledgeEnabled())
+	case "asr":
+		return enabledText(policy.IsASREnabled())
+	case "services":
+		return enabledText(policy.IsServicesEnabled())
 	case "learning-moderation":
 		return enabledText(policy.LearningModeration)
 	case "learning-moderation-actions":
@@ -271,6 +323,22 @@ func (a *Agent) SetGroupPolicy(ctx context.Context, field, value string) (string
 		default:
 			return "", fmt.Errorf("无效的响应模式 %q，可选：mention、all、keyword、reply、off", value)
 		}
+	case "thread-mode":
+		mode := strings.ToLower(strings.TrimSpace(value))
+		switch mode {
+		case "group", "shared", "multi", "multi_user", "multi-user":
+			policy.ThreadMode = config.ThreadModeGroup
+		case "per_user", "per-user", "single", "isolated", "inherit", "clear", "reset", "default":
+			policy.ThreadMode = ""
+		default:
+			return "", fmt.Errorf("无效的会话线程模式 %q，可选：per-user、group", value)
+		}
+	case "merge-window":
+		ms, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || ms < 0 || ms > 10000 {
+			return "", fmt.Errorf("连续消息合并窗口必须是 0-10000 之间的整数毫秒")
+		}
+		policy.MergeWindowMS = ms
 	case "default-mode":
 		mode := strings.ToLower(strings.TrimSpace(value))
 		switch mode {
@@ -336,6 +404,12 @@ func (a *Agent) SetGroupPolicy(ctx context.Context, field, value string) (string
 			return "", fmt.Errorf("视觉日额度必须是非负整数")
 		}
 		policy.VisionQuota = n
+	case "asr-quota":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || n < 0 {
+			return "", fmt.Errorf("语音转写日额度必须是非负整数")
+		}
+		policy.ASRQuota = n
 	case "user-image-quota":
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || n < 0 {
@@ -348,6 +422,12 @@ func (a *Agent) SetGroupPolicy(ctx context.Context, field, value string) (string
 			return "", fmt.Errorf("单用户视觉日额度必须是非负整数")
 		}
 		policy.UserVisionQuota = n
+	case "user-asr-quota":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || n < 0 {
+			return "", fmt.Errorf("单用户语音转写日额度必须是非负整数")
+		}
+		policy.UserASRQuota = n
 	case "chat-tokens-quota":
 		n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 		if err != nil || n < 0 {
@@ -386,6 +466,24 @@ func (a *Agent) SetGroupPolicy(ctx context.Context, field, value string) (string
 			return "", err
 		}
 		policy.History = &enabled
+	case "knowledge":
+		enabled, err := parseEnabled(value)
+		if err != nil {
+			return "", err
+		}
+		policy.Knowledge = &enabled
+	case "services":
+		enabled, err := parseEnabled(value)
+		if err != nil {
+			return "", err
+		}
+		policy.Services = &enabled
+	case "asr":
+		enabled, err := parseEnabled(value)
+		if err != nil {
+			return "", err
+		}
+		policy.ASR = &enabled
 	case "learning-moderation":
 		enabled, err := parseEnabled(value)
 		if err != nil {
@@ -465,6 +563,10 @@ func (a *Agent) ResetGroupPolicy(ctx context.Context, field string) (string, err
 		policy.WakeKeywords = nil
 	case "response":
 		policy.ResponseMode = ""
+	case "thread-mode":
+		policy.ThreadMode = ""
+	case "merge-window":
+		policy.MergeWindowMS = 0
 	case "default-mode":
 		policy.DefaultMode = ""
 	case "default-model":
@@ -478,10 +580,14 @@ func (a *Agent) ResetGroupPolicy(ctx context.Context, field string) (string, err
 		policy.ImageQuota = 0
 	case "vision-quota":
 		policy.VisionQuota = 0
+	case "asr-quota":
+		policy.ASRQuota = 0
 	case "user-image-quota":
 		policy.UserImageQuota = 0
 	case "user-vision-quota":
 		policy.UserVisionQuota = 0
+	case "user-asr-quota":
+		policy.UserASRQuota = 0
 	case "chat-tokens-quota":
 		policy.ChatTokensQuota = 0
 	case "chat-cost-quota":
@@ -494,6 +600,12 @@ func (a *Agent) ResetGroupPolicy(ctx context.Context, field string) (string, err
 		policy.Learning = nil
 	case "history":
 		policy.History = nil
+	case "knowledge":
+		policy.Knowledge = nil
+	case "services":
+		policy.Services = nil
+	case "asr":
+		policy.ASR = nil
 	case "learning-moderation":
 		policy.LearningModeration = false
 		policy.LearningModerationActions = nil
@@ -519,6 +631,10 @@ func canonicalGroupPolicyField(field string) string {
 		return "wake"
 	case "response", "response-mode", "mode":
 		return "response"
+	case "thread-mode", "thread", "threads", "shared-session", "session-thread":
+		return "thread-mode"
+	case "merge-window", "merge", "merge-ms", "merge-window-ms":
+		return "merge-window"
 	case "default-mode", "session-mode":
 		return "default-mode"
 	case "default-model", "model":
@@ -531,10 +647,14 @@ func canonicalGroupPolicyField(field string) string {
 		return "image-quota"
 	case "vision-quota", "vision":
 		return "vision-quota"
+	case "asr-quota", "voice-quota", "speech-quota":
+		return "asr-quota"
 	case "user-image-quota", "user-image":
 		return "user-image-quota"
 	case "user-vision-quota", "user-vision":
 		return "user-vision-quota"
+	case "user-asr-quota", "user-asr", "user-voice-quota":
+		return "user-asr-quota"
 	case "chat-tokens-quota", "chat-tokens", "tokens-quota":
 		return "chat-tokens-quota"
 	case "chat-cost-quota", "chat-cost", "cost-quota":
@@ -547,6 +667,12 @@ func canonicalGroupPolicyField(field string) string {
 		return "learning"
 	case "history":
 		return "history"
+	case "knowledge", "kb", "faq":
+		return "knowledge"
+	case "services", "service", "group-services", "reminders", "polls", "signups":
+		return "services"
+	case "asr", "voice", "voice-transcription":
+		return "asr"
 	case "learning-moderation", "moderation":
 		return "learning-moderation"
 	case "learning-moderation-actions", "moderation-actions", "learning-actions":

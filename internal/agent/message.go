@@ -20,6 +20,12 @@ func (a *Agent) CommandInfos() []command.Info {
 
 // HandleMessage dispatches commands and chat messages.
 func (a *Agent) HandleMessage(ctx context.Context, text string) (err error) {
+	if a == nil {
+		return nil
+	}
+	if a.groupRuntimeBlocked(ctx) {
+		return nil
+	}
 	actor := a.actor(ctx)
 	ctx = security.WithPolicy(security.WithActor(ctx, actor), a.securityPolicy)
 	segments := inboundSegments(ctx, text)
@@ -46,6 +52,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (err error) {
 	waiting := a.hookRuntime != nil && a.hookRuntime.RouteHookID(event) != ""
 	if woken || waiting {
 		ctx = a.materializePlatformMedia(ctx)
+		ctx = a.transcribePlatformAudio(ctx)
 		segments = inboundSegments(ctx, text)
 		event = a.fillHookContext(ctx, hook.Event{Point: hook.PointPlatformMessageReceived, Actor: actorContext(actor), Message: hook.MessagePayload{Role: string(llm.RoleUser), Segments: segments}})
 	}

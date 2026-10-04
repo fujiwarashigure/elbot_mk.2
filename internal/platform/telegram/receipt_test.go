@@ -2,11 +2,13 @@ package telegram
 
 import (
 	"context"
-	"elbot/internal/delivery"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"elbot/internal/delivery"
 )
 
 func TestMultiTargetKeepsPartiallySuccessfulTargetReceipt(t *testing.T) {
@@ -30,5 +32,26 @@ func TestMultiTargetKeepsPartiallySuccessfulTargetReceipt(t *testing.T) {
 		if receipt.SentMessages[i].ScopeID != want || receipt.SentMessages[i].OutputIndexes[0] != i%2 {
 			t.Fatalf("message %d = %#v", i, receipt.SentMessages[i])
 		}
+	}
+}
+
+func TestSendOutputsKeepsPartialReceiptForPaginatedText(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 2 {
+			fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"failed"}`)
+			return
+		}
+		fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%d}}`, calls)
+	}))
+	defer server.Close()
+	a := New(Config{BotToken: "token", APIBaseURL: server.URL, Format: "plain"}, nil, nil, nil)
+	receipt, err := a.sendOutputs(context.Background(), target{ChatID: 1}, []delivery.Output{delivery.Text(strings.Repeat("界", telegramTextPageRunes+1))})
+	if err == nil {
+		t.Fatal("expected later page failure")
+	}
+	if !receipt.Failed || len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "1" {
+		t.Fatalf("partial receipt = %#v", receipt)
 	}
 }

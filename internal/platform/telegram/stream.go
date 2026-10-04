@@ -98,6 +98,11 @@ func (s *messageStream) Replace(ctx context.Context, text string) (delivery.Rece
 			s.finished = true
 			return receipt, nil
 		}
+		if len(receipt.PlatformMessageIDs) > 0 {
+			// The rich-message attempt already delivered one or more pages.
+			// Falling back to sendMessage would duplicate visible content.
+			return receipt.MarkPartialFailure(err), err
+		}
 		s.adapter.logWarn("telegram rich stream final failed, fallback to sendMessage", "error", err)
 	}
 	pages := telegramTextPages(text)
@@ -119,7 +124,7 @@ func (s *messageStream) Replace(ctx context.Context, text string) (delivery.Rece
 		pageText, pageParseMode := s.adapter.streamPreviewPayload(page)
 		sent, err := s.adapter.client.sendMessage(ctx, sendMessageRequest{ChatID: s.target.ChatID, Text: pageText, ParseMode: pageParseMode})
 		if err != nil {
-			return delivery.Receipt{}, err
+			return receipt.MarkPartialFailure(err), err
 		}
 		if sent.MessageID != 0 {
 			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, formatMessageID(sent.MessageID))

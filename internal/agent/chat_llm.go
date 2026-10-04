@@ -133,12 +133,31 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 	showReasoning := a.shouldShowCLIReasoning(ctx)
 	reasoningOpen := false
 
-	if err := a.checkChatBudget(ctx, selection); err != nil {
-		return llmCallResult{Messages: baseMessages, Stream: stream}, err
+	maxOutput := 0
+	if requestOptions.MaxTokens != nil {
+		maxOutput = *requestOptions.MaxTokens
 	}
 	usageCallID := storage.NewID()
+	reservation, err := a.beginChatBudget(ctx, selection, requestMessages, tools, maxOutput, usageCallID)
+	if err != nil {
+		return llmCallResult{Messages: baseMessages, Stream: stream}, err
+	}
+	if reservation != nil {
+		defer func() {
+			if reservation != nil {
+				a.settleChatBudget(ctx, reservation, usage, false)
+			}
+		}()
+	}
+	releaseChatReservation := func() {
+		if reservation != nil {
+			a.settleChatBudget(ctx, reservation, nil, true)
+			reservation = nil
+		}
+	}
 	releaseProvider, err := a.acquireProviderSlot(ctx, selection.Provider)
 	if err != nil {
+		releaseChatReservation()
 		a.audit("provider_concurrency_rejected", "provider", selection.Provider, "error", err.Error())
 		return llmCallResult{Messages: baseMessages, Stream: stream}, err
 	}
@@ -150,6 +169,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 		}
 		if shouldFallbackVision(requestMessages, err) && visionFallbackTransparent(assistant.Len(), len(toolCalls), reasoningOpen) && !visionFallbackAttempted(ctx) {
 			a.notifyVisionFallbackOnce(ctx, sessionID, out)
+			releaseChatReservation()
 			releaseProvider()
 			return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
 		}
@@ -170,6 +190,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 			if shouldFallbackVision(requestMessages, chunk.Error) {
 				if visionFallbackTransparent(assistant.Len(), len(toolCalls), reasoningOpen) && !visionFallbackAttempted(ctx) {
 					a.notifyVisionFallbackOnce(ctx, sessionID, out)
+					releaseChatReservation()
 					releaseProvider()
 					return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
 				}
@@ -243,7 +264,9 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 	a.logLLMOutput(ctx, sessionID, selection, finalText, event.LLM.SourceText, len(toolCalls), elapsedMs)
 
 	a.auditUsage(sessionID, selection, usage, elapsedMs)
-	a.recordChatUsage(ctx, selection.Model, usage, usageCallID)
+	if reservation == nil {
+		a.recordChatUsage(ctx, selection.Model, usage, usageCallID)
+	}
 	return llmCallResult{Text: finalText, RawText: content, Usage: usage, ToolCalls: toolCalls, Outputs: event.Outputs, Messages: baseMessages, Stream: stream}, nil
 }
 
@@ -372,7 +395,10 @@ func platformSegmentsToLLM(segments []platform.MessageSegment, fallbackText stri
 				out = append(out, llm.MessageSegment{Type: llm.SegmentText, Text: fileSegmentText(segment.Name, "图片")})
 			}
 		case platform.SegmentFile:
-			// TODO: 后续支持语音、视频和普通文件的真实模型输入；当前统一回滚为文本描述。
+			// Voice segments are replaced by an ASR text segment earlier in the
+			// inbound path when [asr] is enabled. Video and ordinary files still
+			// fall back to a text reference here; sending them as real model
+			// input is a separate capability.
 			out = append(out, llm.MessageSegment{Type: llm.SegmentFile, MediaID: segment.MediaID, URL: segment.URL, Text: fileSegmentText(segment.Name, segment.Text), MIMEType: segment.MIMEType, Name: segment.Name})
 		}
 	}

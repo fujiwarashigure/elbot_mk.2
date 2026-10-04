@@ -51,6 +51,38 @@ func normalizeMessage(msg message) normalizedMessage {
 			out.Text = "[文件]"
 		}
 	}
+	if msg.Voice != nil {
+		segment := platform.MessageSegment{
+			Type:           platform.SegmentFile,
+			Text:           "语音",
+			Name:           "voice.ogg",
+			MIMEType:       firstNonEmpty(msg.Voice.MIMEType, "audio/ogg"),
+			PlatformFileID: msg.Voice.FileID,
+			Size:           msg.Voice.FileSize,
+		}
+		out.Segments = append(out.Segments, segment)
+		if out.Text == "" {
+			out.Text = "[语音]"
+		}
+	}
+	if msg.Audio != nil {
+		name := strings.TrimSpace(msg.Audio.FileName)
+		if name == "" {
+			name = "audio" + audioExtension(msg.Audio.MIMEType)
+		}
+		segment := platform.MessageSegment{
+			Type:           platform.SegmentFile,
+			Text:           "语音",
+			Name:           name,
+			MIMEType:       firstNonEmpty(msg.Audio.MIMEType, "audio/mpeg"),
+			PlatformFileID: msg.Audio.FileID,
+			Size:           msg.Audio.FileSize,
+		}
+		out.Segments = append(out.Segments, segment)
+		if out.Text == "" {
+			out.Text = "[语音]"
+		}
+	}
 	if len(out.Segments) == 0 && out.Text != "" {
 		out.Segments = append(out.Segments, platform.MessageSegment{Type: platform.SegmentText, Text: out.Text})
 	}
@@ -284,4 +316,19 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func audioExtension(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "audio/ogg", "audio/opus":
+		return ".ogg"
+	case "audio/mp4", "audio/m4a", "audio/x-m4a":
+		return ".m4a"
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return ".wav"
+	case "audio/webm":
+		return ".webm"
+	default:
+		return ".mp3"
+	}
 }

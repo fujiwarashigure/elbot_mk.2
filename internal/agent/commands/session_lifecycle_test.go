@@ -2,14 +2,17 @@ package commands
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"elbot/internal/angelmemory"
 	"elbot/internal/command"
 	"elbot/internal/request"
 	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/turn"
-	"strings"
-	"testing"
-	"time"
 )
 
 func TestLifecycleCommandsArchiveAndArchives(t *testing.T) {
@@ -182,5 +185,48 @@ func TestFormatSessionsShowsLifecycleMarkers(t *testing.T) {
 	content := formatSessions([]storage.SessionSummary{{ID: "s1", Title: "one", UpdatedAt: now, PinnedAt: &now, ArchivedAt: &now}}, "s1")
 	if !strings.Contains(content, "[current, pinned, archived]") {
 		t.Fatalf("content = %q", content)
+	}
+}
+
+func TestDeleteSessionForgetsMemoriesWithMatchingSessionSource(t *testing.T) {
+	ctx := context.Background()
+	store := newCommandTestStore(t)
+	svc := session.NewService(store)
+	scope := session.Scope{ActorID: "u1", Platform: "cli", PlatformScopeID: "local", IsCLI: true}
+	ses, err := svc.Create(ctx, scope, session.CreateRequest{Title: "delete me"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	memoryStore, err := angelmemory.Open(ctx, filepath.Join(t.TempDir(), "angel-memory.db"))
+	if err != nil {
+		t.Fatalf("open angel memory: %v", err)
+	}
+	defer func() { _ = memoryStore.Close() }()
+	memSvc := angelmemory.NewService(memoryStore, angelmemory.Options{MaxWritesPerMinute: 100})
+	if _, err := memSvc.RememberWithSource(ctx, scope.Platform, scope.PlatformScopeID, "会话派生记忆", "", angelmemory.Source{SessionID: ses.ID, ActorID: "u1"}); err != nil {
+		t.Fatalf("remember session memory: %v", err)
+	}
+	other, err := memSvc.RememberWithSource(ctx, scope.Platform, scope.PlatformScopeID, "其他会话记忆", "", angelmemory.Source{SessionID: "other-session", ActorID: "u1"})
+	if err != nil {
+		t.Fatalf("remember other memory: %v", err)
+	}
+	deps := Deps{
+		Sessions:     svc,
+		Requests:     request.NewManager(0),
+		Turns:        turn.NewManager(),
+		Store:        store,
+		Scope:        func(context.Context) session.Scope { return scope },
+		SessionState: NewSessionCommandState(1, 30),
+		AngelMemory:  memSvc,
+	}
+	if _, err := NewDelete(deps).Handle(ctx, command.Request{Prefix: "/", Args: ses.ID + " --confirm"}); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	memories, err := memSvc.List(ctx, scope.Platform, scope.PlatformScopeID, angelmemory.SourceFilter{}, 10)
+	if err != nil {
+		t.Fatalf("list memories: %v", err)
+	}
+	if len(memories) != 1 || memories[0].ID != other.ID {
+		t.Fatalf("remaining memories = %#v", memories)
 	}
 }

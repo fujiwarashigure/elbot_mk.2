@@ -10,6 +10,7 @@ import (
 	"elbot/internal/delivery"
 	"elbot/internal/hook"
 	"elbot/internal/llm"
+	"elbot/internal/platform"
 	"elbot/internal/request"
 	runtimestatus "elbot/internal/runtime"
 	"elbot/internal/storage"
@@ -76,6 +77,10 @@ func (d agentToolRunDeps) StartToolRequest(ctx context.Context, sessionID, toolN
 func (d agentToolRunDeps) PrepareToolContext(ctx context.Context, session *storage.Session, call llm.ToolCallRequest) context.Context {
 	if session == nil {
 		return ctx
+	}
+	if msg, ok := platform.MessageContextFrom(ctx); ok {
+		msg.SessionID = strings.TrimSpace(session.ID)
+		ctx = platform.WithMessageContext(ctx, msg)
 	}
 	ctx = tool.WithShownRuleCardFormats(ctx, decodeSessionMetadata(session.Metadata).ShownRuleCardFormats)
 	if allow := d.agent.groupToolAllowlist(ctx); allow != nil {

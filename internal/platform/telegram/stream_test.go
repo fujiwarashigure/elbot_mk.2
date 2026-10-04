@@ -62,6 +62,32 @@ func TestMessageStreamSendEditReplace(t *testing.T) {
 	}
 }
 
+func TestMessageStreamReplaceKeepsPartialReceiptOnLaterPageFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/editMessageText") {
+			_ = json.NewEncoder(w).Encode(apiResponse[sentMessage]{OK: true, Result: sentMessage{MessageID: 55}})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			_ = json.NewEncoder(w).Encode(apiResponse[sentMessage]{OK: false, ErrorCode: 400, Description: "failed"})
+			return
+		}
+		t.Fatalf("unexpected path %s", r.URL.Path)
+	}))
+	defer server.Close()
+
+	adapter := New(Config{Enabled: true, BotToken: "token", APIBaseURL: server.URL, Format: "plain"}, nil, nil, nil)
+	stream := &messageStream{adapter: adapter, target: target{ChatID: 1}, message: 55}
+	receipt, err := stream.Replace(context.Background(), strings.Repeat("界", telegramTextPageRunes+1))
+	if err == nil {
+		t.Fatal("expected later page failure")
+	}
+	if !receipt.Failed || len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "55" {
+		t.Fatalf("partial receipt = %#v", receipt)
+	}
+}
+
 func TestPrivateMessageStreamUsesRichDraft(t *testing.T) {
 	var mu sync.Mutex
 	methods := []string{}

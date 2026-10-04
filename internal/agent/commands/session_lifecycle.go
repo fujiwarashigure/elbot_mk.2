@@ -7,8 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	"elbot/internal/angelmemory"
 	"elbot/internal/command"
 	"elbot/internal/security"
+	"elbot/internal/session"
 	"elbot/internal/storage"
 )
 
@@ -169,11 +171,31 @@ func NewDelete(deps Deps) command.Handler {
 			if err != nil {
 				return nil, err
 			}
-			if err := deps.Sessions.Delete(ctx, deps.Scope(ctx), sessionID); err != nil {
+			scope := deps.Scope(ctx)
+			if err := deps.Sessions.Delete(ctx, scope, sessionID); err != nil {
 				return nil, err
 			}
+			forgetSessionMemories(deps, ctx, scope, sessionID)
 			return &command.Result{Content: fmt.Sprintf("deleted session:\n  id: %s", sessionID)}, nil
 		},
+	}
+}
+
+// forgetSessionMemories removes long-memory rows whose structured provenance
+// points at the deleted session. Old memory rows written before the source
+// columns existed have no session id and are intentionally left untouched: the
+// legacy Source label is not reliable enough to delete from.
+func forgetSessionMemories(deps Deps, ctx context.Context, scope session.Scope, sessionID string) {
+	if deps.AngelMemory == nil || !deps.AngelMemory.Ready() {
+		return
+	}
+	count, err := deps.AngelMemory.DeleteBySource(ctx, scope.Platform, scope.PlatformScopeID, angelmemory.SourceFilter{SessionID: sessionID})
+	if err != nil {
+		commandAudit(deps, "angel_memory_delete_by_session_failed", "platform", scope.Platform, "scope", scope.PlatformScopeID, "session_id", sessionID, "error", err.Error())
+		return
+	}
+	if count > 0 {
+		commandAudit(deps, "angel_memory_delete_by_session", "platform", scope.Platform, "scope", scope.PlatformScopeID, "session_id", sessionID, "count", count)
 	}
 }
 

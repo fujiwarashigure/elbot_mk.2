@@ -84,13 +84,13 @@ func (s *Service) Create(ctx context.Context, scope Scope, req CreateRequest) (*
 		req.Title = "New session"
 	}
 	session := &storage.Session{
-		OwnerID:         scope.ActorID,
+		OwnerID:         sessionOwnerID(scope),
 		Platform:        scope.Platform,
 		PlatformScopeID: scope.PlatformScopeID,
 		Mode:            req.Mode,
 		Status:          storage.SessionStatusActive,
 		Title:           req.Title,
-		Metadata:        req.Metadata,
+		Metadata:        sharedThreadMetadataForScope(scope, req.Metadata),
 	}
 	if err := s.store.Sessions().Create(ctx, session); err != nil {
 		return nil, err
@@ -161,19 +161,25 @@ func (s *Service) clearCurrentIf(scope Scope, sessionID string) {
 }
 
 func (s *Service) scopeKey(scope Scope) string {
+	if scope.Shared {
+		return "\x00shared\x00" + scope.Platform + "\x00" + scope.PlatformScopeID
+	}
 	return scope.ActorID + "\x00" + scope.Platform + "\x00" + scope.PlatformScopeID
 }
-
 func (s *Service) canAccess(scope Scope, session *storage.Session) bool {
 	if scope.IsCLI {
 		return true
+	}
+	if scope.Shared {
+		return session.Platform == scope.Platform &&
+			session.PlatformScopeID == scope.PlatformScopeID &&
+			isSharedThreadSession(session)
 	}
 	if session.OwnerID != scope.ActorID || session.Platform != scope.Platform {
 		return false
 	}
 	return session.PlatformScopeID == scope.PlatformScopeID || isBackgroundSession(session)
 }
-
 func isBackgroundSession(session *storage.Session) bool {
 	if session == nil {
 		return false

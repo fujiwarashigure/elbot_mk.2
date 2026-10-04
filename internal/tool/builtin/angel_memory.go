@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"elbot/internal/angelmemory"
 	"elbot/internal/llm"
 	"elbot/internal/platform"
+	"elbot/internal/ratelimit"
+	"elbot/internal/security"
 	"elbot/internal/tool"
 	"elbot/internal/tool/runtimeinfo"
 )
@@ -24,6 +27,10 @@ type AngelRememberTool struct {
 
 type AngelRecallTool struct {
 	service *angelmemory.Service
+	// exposeForget adds angel_forget as a dependency of angel_recall. Hidden
+	// tools only reach the model as a dependency of a visible root, so this is
+	// what makes the opt-in forget tool reachable once it is registered.
+	exposeForget bool
 }
 
 type angelRememberArgs struct {
@@ -36,11 +43,15 @@ type angelRecallArgs struct {
 	Limit int    `json:"limit"`
 }
 
-func NewAngelMemoryTools(service *angelmemory.Service, _ ...runtimeinfo.Info) []tool.Tool {
-	return []tool.Tool{
+func NewAngelMemoryTools(service *angelmemory.Service, opts AngelMemoryToolOptions, _ ...runtimeinfo.Info) []tool.Tool {
+	tools := []tool.Tool{
 		AngelRememberTool{service: service},
-		AngelRecallTool{service: service},
+		AngelRecallTool{service: service, exposeForget: opts.AllowForget},
 	}
+	if !opts.AllowForget {
+		return tools
+	}
+	return append(tools, AngelForgetTool{service: service, deletions: ratelimit.New(angelForgetMaxPerMinute, time.Minute)})
 }
 
 func (AngelRememberTool) Name() string { return angelRememberToolName }
@@ -50,9 +61,17 @@ func (t AngelRememberTool) Info() tool.Info { return angelRememberBuilder().Buil
 func (t AngelRememberTool) Schema() llm.ToolSchema {
 	return angelRememberBuilder().BuildSchema()
 }
-func (t AngelRecallTool) Info() tool.Info { return angelRecallBuilder().BuildInfo() }
+func (t AngelRecallTool) Info() tool.Info { return t.builder().BuildInfo() }
 func (t AngelRecallTool) Schema() llm.ToolSchema {
-	return angelRecallBuilder().BuildSchema()
+	return t.builder().BuildSchema()
+}
+
+func (t AngelRecallTool) builder() *tool.Builder {
+	builder := angelRecallBuilder()
+	if t.exposeForget {
+		builder = builder.DependsOn(angelForgetToolName)
+	}
+	return builder
 }
 
 func (t AngelRememberTool) Call(ctx context.Context, req tool.CallRequest) (*tool.Result, error) {
@@ -73,7 +92,20 @@ func (t AngelRememberTool) Call(ctx context.Context, req tool.CallRequest) (*too
 	if content == "" {
 		return &tool.Result{Content: "content 不能为空。"}, nil
 	}
-	memory, err := t.service.Remember(ctx, msgCtx.Platform, msgCtx.ScopeID, content, args.Tags, "tool")
+	actorID := ""
+	if actor, ok := security.ActorFromContext(ctx); ok {
+		actorID = strings.TrimSpace(actor.ID)
+	}
+	if actorID == "" {
+		actorID = strings.TrimSpace(msgCtx.ActorID)
+	}
+	memory, err := t.service.RememberWithSource(ctx, msgCtx.Platform, msgCtx.ScopeID, content, args.Tags, angelmemory.Source{
+		Kind:      "tool",
+		ActorID:   actorID,
+		MessageID: strings.TrimSpace(msgCtx.PlatformMessageID),
+		SessionID: strings.TrimSpace(msgCtx.SessionID),
+		Label:     "tool",
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -103,9 +135,34 @@ func (t AngelRecallTool) Call(ctx context.Context, req tool.CallRequest) (*tool.
 	}
 	lines := []string{fmt.Sprintf("找到 %d 条相关记忆：", len(memories))}
 	for i, memory := range memories {
-		lines = append(lines, fmt.Sprintf("%d. [%d] %s", i+1, memory.Strength, memory.Content))
+		lines = append(lines, fmt.Sprintf("%d. [%d] id=%s %s%s", i+1, memory.Strength, memory.ID, memory.Content, memoryTraceSuffix(memory)))
 	}
 	return &tool.Result{Content: strings.Join(lines, "\n")}, nil
+}
+
+func memoryTraceSuffix(memory angelmemory.Memory) string {
+	parts := make([]string, 0, 4)
+	if kind := strings.TrimSpace(memory.SourceKind); kind != "" {
+		parts = append(parts, "source="+kind)
+	}
+	if actorID := strings.TrimSpace(memory.SourceActorID); actorID != "" {
+		parts = append(parts, "actor="+actorID)
+	}
+	if messageID := strings.TrimSpace(memory.SourceMessageID); messageID != "" {
+		parts = append(parts, "message="+messageID)
+	}
+	if sessionID := strings.TrimSpace(memory.SourceSessionID); sessionID != "" {
+		parts = append(parts, "session="+sessionID)
+	}
+	if len(parts) == 0 {
+		if label := strings.TrimSpace(memory.Source); label != "" {
+			parts = append(parts, "source="+label)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, " ") + ")"
 }
 
 func angelRememberBuilder() *tool.Builder {

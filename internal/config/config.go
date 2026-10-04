@@ -49,7 +49,10 @@ type Config struct {
 	ImageGeneration     ImageGenerationConfig            `toml:"image_generation"`
 	ImageToPrompt       ImageToPromptConfig              `toml:"image_to_prompt"`
 	Vision              VisionConfig                     `toml:"vision"`
+	ASR                 ASRConfig                        `toml:"asr"`
 	GroupAnalysis       GroupAnalysisConfig              `toml:"group_analysis"`
+	GroupKnowledge      GroupKnowledgeConfig             `toml:"group_knowledge"`
+	GroupServices       GroupServicesConfig              `toml:"group_services"`
 	AngelMemory         AngelMemoryConfig                `toml:"angel_memory"`
 	SelfLearning        SelfLearningConfig               `toml:"self_learning"`
 	ModelProfiles       map[string]ModelProfileConfig    `toml:"model_profiles"`
@@ -97,6 +100,11 @@ type ProviderConfig struct {
 	// false. Per-model values in [providers.<name>.model_configs.<model>]
 	// override this default.
 	Vision *bool `toml:"vision"`
+	// Audio declares whether models from this provider can be used for audio
+	// transcription through an OpenAI-compatible /audio/transcriptions
+	// endpoint. It is a pointer so "unset" (unknown) is distinct from an
+	// explicit false. Per-model audio values override this default.
+	Audio *bool `toml:"audio"`
 	// FallbackMode controls when the fallback provider takes over:
 	// "circuit" (default) waits until the provider breaker opens; "on_error"
 	// switches on the first pre-stream error. "off" disables fallback.
@@ -128,6 +136,9 @@ type ModelConfig struct {
 	ExtraPayload  map[string]any `toml:"extra_payload"`
 	// Vision overrides the provider-level capability for this single model.
 	Vision *bool `toml:"vision"`
+	// Audio overrides the provider-level transcription capability for this
+	// single model.
+	Audio *bool `toml:"audio"`
 }
 
 type ModelConfigs map[string]ModelConfig
@@ -175,6 +186,50 @@ func visionSupportFromBool(supported bool) VisionSupport {
 		return VisionSupported
 	}
 	return VisionUnsupported
+}
+
+// AudioSupport is a tri-state transcription capability declaration.
+type AudioSupport int
+
+const (
+	// AudioUnknown means the config does not declare transcription support.
+	AudioUnknown AudioSupport = iota
+	// AudioSupported means the config declares transcription support.
+	AudioSupported
+	// AudioUnsupported means the config declares transcription is rejected.
+	AudioUnsupported
+)
+
+// AudioSupportFor resolves the declared transcription capability for a
+// provider/model pair. Model-level config wins over the provider default and
+// both default to unknown, so existing configs keep working unchanged.
+func (c *Config) AudioSupportFor(provider, model string) AudioSupport {
+	if c == nil {
+		return AudioUnknown
+	}
+	providerCfg, ok := c.Providers[provider]
+	if !ok {
+		return AudioUnknown
+	}
+	return providerCfg.AudioSupport(model)
+}
+
+// AudioSupport resolves the capability for one model.
+func (p ProviderConfig) AudioSupport(model string) AudioSupport {
+	if modelConfig, ok := p.ModelConfigs[model]; ok && modelConfig.Audio != nil {
+		return audioSupportFromBool(*modelConfig.Audio)
+	}
+	if p.Audio != nil {
+		return audioSupportFromBool(*p.Audio)
+	}
+	return AudioUnknown
+}
+
+func audioSupportFromBool(supported bool) AudioSupport {
+	if supported {
+		return AudioSupported
+	}
+	return AudioUnsupported
 }
 
 type ModelMetadataConfig struct {
@@ -256,10 +311,20 @@ type BudgetLimitsConfig struct {
 	UserImageDaily        int     `toml:"user_image_daily"`
 	GlobalVisionDaily     int     `toml:"global_vision_daily"`
 	UserVisionDaily       int     `toml:"user_vision_daily"`
+	GlobalASRDaily        int     `toml:"global_asr_daily"`
+	UserASRDaily          int     `toml:"user_asr_daily"`
 	GlobalChatTokensDaily int64   `toml:"global_chat_tokens_daily"`
 	UserChatTokensDaily   int64   `toml:"user_chat_tokens_daily"`
 	GlobalChatCostDaily   float64 `toml:"global_chat_cost_daily"`
 	UserChatCostDaily     float64 `toml:"user_chat_cost_daily"`
+	// ChatHardLimit turns every active chat token/cost limit into a hard
+	// pre-reserved budget. Without it, concurrent in-flight calls may overshoot
+	// the limit by one request; with it, the estimate is reserved atomically
+	// before the provider call and settled afterwards.
+	ChatHardLimit bool `toml:"chat_hard_limit"`
+	// ChatHardLimitReserveOutputTokens overrides the output-token part of the
+	// pre-reservation. 0 uses the per-model prompt budget.
+	ChatHardLimitReserveOutputTokens int `toml:"chat_hard_limit_reserve_output_tokens"`
 }
 
 // Normalized clamps negative limits to zero (unlimited).
@@ -277,6 +342,12 @@ func (c BudgetLimitsConfig) Normalized() BudgetLimitsConfig {
 	if out.UserVisionDaily < 0 {
 		out.UserVisionDaily = 0
 	}
+	if out.GlobalASRDaily < 0 {
+		out.GlobalASRDaily = 0
+	}
+	if out.UserASRDaily < 0 {
+		out.UserASRDaily = 0
+	}
 	if out.GlobalChatTokensDaily < 0 {
 		out.GlobalChatTokensDaily = 0
 	}
@@ -288,6 +359,9 @@ func (c BudgetLimitsConfig) Normalized() BudgetLimitsConfig {
 	}
 	if out.UserChatCostDaily < 0 {
 		out.UserChatCostDaily = 0
+	}
+	if out.ChatHardLimitReserveOutputTokens < 0 {
+		out.ChatHardLimitReserveOutputTokens = 0
 	}
 	return out
 }
@@ -423,10 +497,25 @@ type AngelMemoryConfig struct {
 	MaxContextRunes    int   `toml:"max_context_runes"`
 	MaxPerScope        int   `toml:"max_per_scope"`
 	MaxWritesPerMinute int   `toml:"max_writes_per_minute"`
+	// ForgetOnRecall removes long-memory entries whose source message is
+	// recalled. Defaults to true.
+	ForgetOnRecall *bool `toml:"forget_on_recall"`
+	// AllowToolForget registers the high-risk angel_forget tool, which lets the
+	// model delete one long-memory entry that belongs to the current speaker.
+	// Defaults to false: model-initiated deletion is opt-in.
+	AllowToolForget *bool `toml:"allow_tool_forget"`
 }
 
 func (c AngelMemoryConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
+}
+
+func (c AngelMemoryConfig) ForgetOnRecallEnabled() bool {
+	return c.ForgetOnRecall == nil || *c.ForgetOnRecall
+}
+
+func (c AngelMemoryConfig) AllowToolForgetEnabled() bool {
+	return c.AllowToolForget != nil && *c.AllowToolForget
 }
 
 // SelfLearningConfig controls the clean-room expression/jargon learning layer.
@@ -446,6 +535,126 @@ type SelfLearningConfig struct {
 
 func (c SelfLearningConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
+}
+
+// GroupKnowledgeConfig controls the deterministic per-group FAQ/knowledge
+// base. It is intentionally separate from the LLM and never injects prompts.
+type GroupKnowledgeConfig struct {
+	Enabled            *bool `toml:"enabled"`
+	MaxEntriesPerScope int   `toml:"max_entries_per_scope"`
+	MaxQuestionRunes   int   `toml:"max_question_runes"`
+	MaxAnswerRunes     int   `toml:"max_answer_runes"`
+	MaxAliases         int   `toml:"max_aliases"`
+	MaxKeywords        int   `toml:"max_keywords"`
+	MaxMatchRunes      int   `toml:"max_match_runes"`
+}
+
+const (
+	defaultGroupKnowledgeMaxEntries  = 200
+	defaultGroupKnowledgeMaxQuestion = 200
+	defaultGroupKnowledgeMaxAnswer   = 2000
+	defaultGroupKnowledgeMaxAliases  = 8
+	defaultGroupKnowledgeMaxKeywords = 16
+	defaultGroupKnowledgeMaxMatch    = 2000
+)
+
+func (c GroupKnowledgeConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// Normalized fills zero limits with conservative defaults. An explicit 0 is
+// treated as "use the default"; use enabled=false to disable the feature.
+func (c GroupKnowledgeConfig) Normalized() GroupKnowledgeConfig {
+	if c.MaxEntriesPerScope <= 0 {
+		c.MaxEntriesPerScope = defaultGroupKnowledgeMaxEntries
+	}
+	if c.MaxQuestionRunes <= 0 {
+		c.MaxQuestionRunes = defaultGroupKnowledgeMaxQuestion
+	}
+	if c.MaxAnswerRunes <= 0 {
+		c.MaxAnswerRunes = defaultGroupKnowledgeMaxAnswer
+	}
+	if c.MaxAliases <= 0 {
+		c.MaxAliases = defaultGroupKnowledgeMaxAliases
+	}
+	if c.MaxKeywords <= 0 {
+		c.MaxKeywords = defaultGroupKnowledgeMaxKeywords
+	}
+	if c.MaxMatchRunes <= 0 {
+		c.MaxMatchRunes = defaultGroupKnowledgeMaxMatch
+	}
+	return c
+}
+
+// GroupKnowledgeEntry is one deterministic FAQ entry. Match is exact
+// (default), contains or keywords. Aliases participate in exact/contains
+// matching; Keywords are required for keywords mode.
+type GroupKnowledgeEntry struct {
+	ID        string   `toml:"id"`
+	Question  string   `toml:"question"`
+	Answer    string   `toml:"answer"`
+	Aliases   []string `toml:"aliases,omitempty"`
+	Keywords  []string `toml:"keywords,omitempty"`
+	Match     string   `toml:"match,omitempty"`
+	Enabled   *bool    `toml:"enabled,omitempty"`
+	UpdatedAt string   `toml:"updated_at,omitempty"`
+}
+
+func (e GroupKnowledgeEntry) IsEnabled() bool {
+	return e.Enabled == nil || *e.Enabled
+}
+
+// GroupServicesConfig controls the deterministic group reminders, polls and
+// sign-ups. All state is local and never enters the model prompt.
+type GroupServicesConfig struct {
+	Enabled              *bool `toml:"enabled"`
+	MaxRemindersPerScope int   `toml:"max_reminders_per_scope"`
+	MaxReminderDays      int   `toml:"max_reminder_days"`
+	MaxPollsPerScope     int   `toml:"max_polls_per_scope"`
+	MaxPollOptions       int   `toml:"max_poll_options"`
+	MaxSignupsPerScope   int   `toml:"max_signups_per_scope"`
+	MaxSignupCapacity    int   `toml:"max_signup_capacity"`
+	MaxTextRunes         int   `toml:"max_text_runes"`
+}
+
+const (
+	defaultGroupRemindersPerScope = 50
+	defaultGroupReminderDays      = 365
+	defaultGroupPollsPerScope     = 20
+	defaultGroupPollOptions       = 10
+	defaultGroupSignupsPerScope   = 20
+	defaultGroupSignupCapacity    = 500
+	defaultGroupServiceTextRunes  = 500
+)
+
+func (c GroupServicesConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// Normalized fills zero limits with conservative defaults.
+func (c GroupServicesConfig) Normalized() GroupServicesConfig {
+	if c.MaxRemindersPerScope <= 0 {
+		c.MaxRemindersPerScope = defaultGroupRemindersPerScope
+	}
+	if c.MaxReminderDays <= 0 {
+		c.MaxReminderDays = defaultGroupReminderDays
+	}
+	if c.MaxPollsPerScope <= 0 {
+		c.MaxPollsPerScope = defaultGroupPollsPerScope
+	}
+	if c.MaxPollOptions <= 0 {
+		c.MaxPollOptions = defaultGroupPollOptions
+	}
+	if c.MaxSignupsPerScope <= 0 {
+		c.MaxSignupsPerScope = defaultGroupSignupsPerScope
+	}
+	if c.MaxSignupCapacity <= 0 {
+		c.MaxSignupCapacity = defaultGroupSignupCapacity
+	}
+	if c.MaxTextRunes <= 0 {
+		c.MaxTextRunes = defaultGroupServiceTextRunes
+	}
+	return c
 }
 
 // ModelProfileConfig is one named model profile for the @model: directive.
@@ -471,6 +680,7 @@ type ServicesConfig struct {
 	ImageGeneration *ImageGenerationConfig        `toml:"image_generation"`
 	ImageToPrompt   *ImageToPromptConfig          `toml:"image_to_prompt"`
 	Vision          *VisionConfig                 `toml:"vision"`
+	ASR             *ASRConfig                    `toml:"asr"`
 }
 
 // TurnDirectivesConfig controls how @model: / @image: / @use: style declarations
@@ -756,6 +966,83 @@ func (c VisionConfig) LanguageValue() string {
 		return "en"
 	}
 	return "zh"
+}
+
+// ASRConfig controls the optional voice-message transcription pipeline. It
+// reuses one existing [providers.*] entry, so no extra API key is needed. The
+// feature is opt-in (enabled defaults to false) because every voice message
+// that wakes the bot adds one paid transcription call.
+type ASRConfig struct {
+	Enabled  *bool  `toml:"enabled"`
+	Provider string `toml:"provider"`
+	Model    string `toml:"model"`
+	// Language is an optional ISO-639-1 hint ("zh", "en", ...). Empty means
+	// the provider auto-detects.
+	Language string `toml:"language"`
+	// Prompt is an optional provider hint for names or domain terms.
+	Prompt         string `toml:"prompt"`
+	TimeoutSeconds int    `toml:"timeout_seconds"`
+	MaxAudioBytes  int64  `toml:"max_audio_bytes"`
+	MaxConcurrent  int    `toml:"max_concurrent"`
+	QueueSize      int    `toml:"queue_size"`
+	// MaxSegments bounds how many recordings one inbound message transcribes.
+	MaxSegments int `toml:"max_segments"`
+
+	CacheTTLSeconds         int `toml:"cache_ttl_seconds"`
+	CacheMaxEntries         int `toml:"cache_max_entries"`
+	NegativeCacheTTLSeconds int `toml:"negative_cache_ttl_seconds"`
+	NegativeCacheMaxEntries int `toml:"negative_cache_max_entries"`
+
+	MaxRetries               int `toml:"max_retries"`
+	RetryInitialDelaySeconds int `toml:"retry_initial_delay_seconds"`
+}
+
+// IsEnabled reports whether ASR is explicitly switched on.
+func (c ASRConfig) IsEnabled() bool {
+	return c.Enabled != nil && *c.Enabled
+}
+
+// Normalized fills the documented defaults and trims user-provided strings.
+func (c ASRConfig) Normalized() ASRConfig {
+	out := c
+	out.Provider = strings.TrimSpace(out.Provider)
+	out.Model = strings.TrimSpace(out.Model)
+	out.Language = strings.TrimSpace(out.Language)
+	out.Prompt = strings.TrimSpace(out.Prompt)
+	if out.TimeoutSeconds <= 0 {
+		out.TimeoutSeconds = 120
+	}
+	if out.MaxAudioBytes <= 0 {
+		out.MaxAudioBytes = 20 * 1024 * 1024
+	}
+	if out.MaxConcurrent <= 0 {
+		out.MaxConcurrent = 2
+	}
+	if out.QueueSize <= 0 {
+		out.QueueSize = 8
+	}
+	if out.MaxSegments <= 0 {
+		out.MaxSegments = 4
+	}
+	if out.CacheTTLSeconds <= 0 {
+		out.CacheTTLSeconds = 1800
+	}
+	if out.CacheMaxEntries <= 0 {
+		out.CacheMaxEntries = 128
+	}
+	if out.NegativeCacheTTLSeconds <= 0 {
+		out.NegativeCacheTTLSeconds = 30
+	}
+	if out.NegativeCacheMaxEntries <= 0 {
+		out.NegativeCacheMaxEntries = 128
+	}
+	if out.MaxRetries <= 0 {
+		out.MaxRetries = 2
+	}
+	if out.RetryInitialDelaySeconds <= 0 {
+		out.RetryInitialDelaySeconds = 1
+	}
+	return out
 }
 
 type ViewConfig struct {
@@ -1244,7 +1531,60 @@ type StateConfig struct {
 	CompactModel    ModelSelection                   `toml:"compact_model"`
 	ContextOverflow map[string]ContextOverflowConfig `toml:"context_overflow,omitempty"`
 	GroupPolicy     map[string]GroupPolicyConfig     `toml:"group_policy,omitempty"`
+	GroupRuntime    map[string]GroupRuntimeConfig    `toml:"group_runtime,omitempty"`
+	GroupKnowledge  map[string][]GroupKnowledgeEntry `toml:"group_knowledge,omitempty"`
+	GroupServices   StateGroupServicesConfig         `toml:"group_services,omitempty"`
 	Budget          StateBudgetConfig                `toml:"budget,omitempty"`
+}
+
+// GroupRuntimeConfig is the persisted, event-derived runtime state of one
+// group scope. It does not grant any permission; it only pauses paid calls and
+// output while the bot itself is muted, removed or otherwise unavailable.
+type GroupRuntimeConfig struct {
+	State     string `toml:"state,omitempty"`
+	Reason    string `toml:"reason,omitempty"`
+	UpdatedAt string `toml:"updated_at,omitempty"`
+}
+
+// StateGroupServicesConfig stores deterministic group reminders, polls and
+// sign-ups. Each map is keyed by platform:scope exactly like group policy.
+type StateGroupServicesConfig struct {
+	Reminders map[string][]GroupReminderConfig `toml:"reminders,omitempty"`
+	Polls     map[string][]GroupPollConfig     `toml:"polls,omitempty"`
+	Signups   map[string][]GroupSignupConfig   `toml:"signups,omitempty"`
+}
+
+type GroupReminderConfig struct {
+	ID            string `toml:"id"`
+	Text          string `toml:"text"`
+	DueAt         string `toml:"due_at"`
+	CreatedBy     string `toml:"created_by,omitempty"`
+	CreatedByName string `toml:"created_by_name,omitempty"`
+	CreatedAt     string `toml:"created_at,omitempty"`
+	Status        string `toml:"status,omitempty"`
+}
+
+type GroupPollConfig struct {
+	ID            string            `toml:"id"`
+	Question      string            `toml:"question"`
+	Options       []string          `toml:"options,omitempty"`
+	Votes         map[string]int    `toml:"votes,omitempty"`
+	Voters        map[string]string `toml:"voters,omitempty"`
+	CreatedBy     string            `toml:"created_by,omitempty"`
+	CreatedByName string            `toml:"created_by_name,omitempty"`
+	CreatedAt     string            `toml:"created_at,omitempty"`
+	Status        string            `toml:"status,omitempty"`
+}
+
+type GroupSignupConfig struct {
+	ID            string            `toml:"id"`
+	Title         string            `toml:"title"`
+	Capacity      int               `toml:"capacity,omitempty"`
+	Participants  map[string]string `toml:"participants,omitempty"`
+	CreatedBy     string            `toml:"created_by,omitempty"`
+	CreatedByName string            `toml:"created_by_name,omitempty"`
+	CreatedAt     string            `toml:"created_at,omitempty"`
+	Status        string            `toml:"status,omitempty"`
 }
 
 type ContextOverflowConfig struct {
@@ -1262,7 +1602,16 @@ type StateBudgetConfig struct {
 	Costs        map[string]int64  `toml:"costs,omitempty"`
 	Retries      map[string]int64  `toml:"retries,omitempty"`
 	Executions   map[string]string `toml:"executions,omitempty"`
+	// Uncertain marks hard-budget pre-reservations that could not be settled
+	// with real provider usage. The reserved amount stays charged.
+	Uncertain map[string]int64 `toml:"uncertain,omitempty"`
 }
+
+// ThreadModeGroup makes all members of a group scope share one Session and
+// serializes their turns. The zero value keeps the historical per-user mode.
+const ThreadModeGroup = "group"
+
+const maxGroupMergeWindowMS = 10000
 
 // GroupPolicyConfig is the per-group interaction and authorization policy. It
 // is intentionally a local/server-side policy: prompts and roles never decide
@@ -1294,19 +1643,34 @@ type GroupPolicyConfig struct {
 	// inside this group.
 	ImageQuota      int `toml:"image_quota,omitempty"`
 	VisionQuota     int `toml:"vision_quota,omitempty"`
+	ASRQuota        int `toml:"asr_quota,omitempty"`
 	UserImageQuota  int `toml:"user_image_quota,omitempty"`
 	UserVisionQuota int `toml:"user_vision_quota,omitempty"`
+	UserASRQuota    int `toml:"user_asr_quota,omitempty"`
 	// ChatTokensQuota and ChatCostQuota cap one group's daily paid chat
 	// usage. Cost is in [maintenance.daily_report].currency and stored in
 	// micro-units. 0 means no local group limit.
 	ChatTokensQuota int64   `toml:"chat_tokens_quota,omitempty"`
 	ChatCostQuota   float64 `toml:"chat_cost_quota,omitempty"`
+	// ThreadMode selects how group members share conversation state:
+	// per_user (default) keeps one Session per actor; group uses one shared
+	// Session per group scope and serializes turns across members.
+	ThreadMode string `toml:"thread_mode,omitempty"`
+	// MergeWindowMS is the quiet window used to merge consecutive messages
+	// from the same actor before starting a turn. 0 disables pre-turn merging.
+	// It is clamped to [0, 10000].
+	MergeWindowMS int `toml:"merge_window_ms,omitempty"`
 	// QuietHours is an optional local-time window such as "23:00-07:30".
 	QuietHours string `toml:"quiet_hours,omitempty"`
 	// Feature switches. nil means enabled (preserves existing behavior).
 	GroupAnalysis *bool `toml:"group_analysis,omitempty"`
 	Learning      *bool `toml:"learning,omitempty"`
 	History       *bool `toml:"history,omitempty"`
+	Knowledge     *bool `toml:"knowledge,omitempty"`
+	Services      *bool `toml:"services,omitempty"`
+	// ASR switches voice-message transcription for this group. nil means
+	// enabled (subject to the global [asr] switch and per-group quotas).
+	ASR *bool `toml:"asr,omitempty"`
 	// LearningModeration grants the current group owner/admin permission to
 	// review this group's learning candidates. Only a superadmin may set it.
 	LearningModeration bool `toml:"learning_moderation,omitempty"`
@@ -1367,6 +1731,21 @@ func (c GroupPolicyConfig) Normalize() GroupPolicyConfig {
 	default:
 		out.DefaultMode = ""
 	}
+	switch strings.ToLower(strings.TrimSpace(c.ThreadMode)) {
+	case "group", "shared", "multi", "multi_user", "multi-user":
+		out.ThreadMode = ThreadModeGroup
+	case "per_user", "per-user", "single", "isolated":
+		out.ThreadMode = ""
+	default:
+		out.ThreadMode = ""
+	}
+	out.MergeWindowMS = c.MergeWindowMS
+	if out.MergeWindowMS < 0 {
+		out.MergeWindowMS = 0
+	}
+	if out.MergeWindowMS > maxGroupMergeWindowMS {
+		out.MergeWindowMS = maxGroupMergeWindowMS
+	}
 	out.DefaultModel = strings.TrimSpace(c.DefaultModel)
 	out.QuietHours = strings.TrimSpace(c.QuietHours)
 	if out.ImageQuota < 0 {
@@ -1375,11 +1754,17 @@ func (c GroupPolicyConfig) Normalize() GroupPolicyConfig {
 	if out.VisionQuota < 0 {
 		out.VisionQuota = 0
 	}
+	if out.ASRQuota < 0 {
+		out.ASRQuota = 0
+	}
 	if out.UserImageQuota < 0 {
 		out.UserImageQuota = 0
 	}
 	if out.UserVisionQuota < 0 {
 		out.UserVisionQuota = 0
+	}
+	if out.UserASRQuota < 0 {
+		out.UserASRQuota = 0
 	}
 	if out.ChatTokensQuota < 0 {
 		out.ChatTokensQuota = 0
@@ -1392,6 +1777,15 @@ func (c GroupPolicyConfig) Normalize() GroupPolicyConfig {
 
 func (c GroupPolicyConfig) ResponseModeValue() string {
 	return c.Normalize().ResponseMode
+}
+
+// ThreadModeValue returns the effective thread mode, treating the zero value
+// as the backwards-compatible per-user mode.
+func (c GroupPolicyConfig) ThreadModeValue() string {
+	if c.Normalize().ThreadMode == ThreadModeGroup {
+		return ThreadModeGroup
+	}
+	return "per_user"
 }
 
 func (c GroupPolicyConfig) WakeKeywordsValue() []string {
@@ -1410,9 +1804,21 @@ func (c GroupPolicyConfig) IsHistoryEnabled() bool {
 	return c.History == nil || *c.History
 }
 
+func (c GroupPolicyConfig) IsKnowledgeEnabled() bool {
+	return c.Knowledge == nil || *c.Knowledge
+}
+
+func (c GroupPolicyConfig) IsServicesEnabled() bool {
+	return c.Services == nil || *c.Services
+}
+
+func (c GroupPolicyConfig) IsASREnabled() bool {
+	return c.ASR == nil || *c.ASR
+}
+
 func (c GroupPolicyConfig) IsZero() bool {
 	n := c.Normalize()
-	return len(n.WakeKeywords) == 0 && n.ResponseMode == "mention" && n.DefaultMode == "" && n.DefaultModel == "" && len(n.AllowedModels) == 0 && len(n.ToolAllowlist) == 0 && !n.ToolAllowlistSet && n.ImageQuota == 0 && n.VisionQuota == 0 && n.UserImageQuota == 0 && n.UserVisionQuota == 0 && n.ChatTokensQuota == 0 && n.ChatCostQuota == 0 && n.QuietHours == "" && c.GroupAnalysis == nil && c.Learning == nil && c.History == nil && !c.LearningModeration && len(n.LearningModerationActions) == 0
+	return len(n.WakeKeywords) == 0 && n.ResponseMode == "mention" && n.DefaultMode == "" && n.DefaultModel == "" && len(n.AllowedModels) == 0 && len(n.ToolAllowlist) == 0 && !n.ToolAllowlistSet && n.ImageQuota == 0 && n.VisionQuota == 0 && n.ASRQuota == 0 && n.UserImageQuota == 0 && n.UserVisionQuota == 0 && n.UserASRQuota == 0 && n.ChatTokensQuota == 0 && n.ChatCostQuota == 0 && n.ThreadMode == "" && n.MergeWindowMS == 0 && n.QuietHours == "" && c.GroupAnalysis == nil && c.Learning == nil && c.History == nil && c.Knowledge == nil && c.Services == nil && c.ASR == nil && !c.LearningModeration && len(n.LearningModerationActions) == 0
 }
 
 // ToolAllowlistRestricted reports whether a group has an explicit tool policy.
@@ -1666,6 +2072,8 @@ func (c *Config) applyAppDefaults() {
 	if c.Soul.Path == "" {
 		c.Soul.Path = "SOUL.md"
 	}
+	c.GroupKnowledge = c.GroupKnowledge.Normalized()
+	c.GroupServices = c.GroupServices.Normalized()
 	if c.CharacterLibrary.Root == "" {
 		c.CharacterLibrary.Root = "characters"
 	}
@@ -1777,6 +2185,7 @@ func (c *Config) applyAppDefaults() {
 		c.Vision.Provider = c.ImageToPrompt.Provider
 		c.Vision.Model = c.ImageToPrompt.Model
 	}
+	c.ASR = c.ASR.Normalized()
 	if c.Maintenance.DailyReport.Schedule == "" {
 		c.Maintenance.DailyReport.Schedule = "0 9,21 * * *"
 	}
@@ -2133,6 +2542,9 @@ func (c *Config) mergeServices(services *ServicesConfig) {
 	}
 	if services.Vision != nil {
 		c.Vision = *services.Vision
+	}
+	if services.ASR != nil {
+		c.ASR = *services.ASR
 	}
 }
 

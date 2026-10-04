@@ -34,11 +34,13 @@ type RegisterOptions struct {
 	GroupAnalysisService     *groupanalysis.Service
 	GroupAnalysisMaxMessages int
 	AngelMemory              *angelmemory.Service
-	SelfLearning             *selflearning.Service
-	LongMemoryDir            string
-	FileManager              *FileManager
-	ProcessEnv               processenv.Environment
-	ChildProcessEnv          processenv.Environment
+	// AngelMemoryAllowToolForget registers the opt-in high-risk angel_forget tool.
+	AngelMemoryAllowToolForget bool
+	SelfLearning               *selflearning.Service
+	LongMemoryDir              string
+	FileManager                *FileManager
+	ProcessEnv                 processenv.Environment
+	ChildProcessEnv            processenv.Environment
 }
 
 func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
@@ -68,7 +70,7 @@ func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
 		}
 	}
 	if opts.AngelMemory != nil {
-		for _, memoryTool := range NewAngelMemoryTools(opts.AngelMemory, info) {
+		for _, memoryTool := range NewAngelMemoryTools(opts.AngelMemory, AngelMemoryToolOptions{AllowForget: opts.AngelMemoryAllowToolForget}, info) {
 			if err := registry.Register(memoryTool); err != nil {
 				return err
 			}

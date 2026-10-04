@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"elbot/internal/angelmemory"
 	"elbot/internal/command"
 	"elbot/internal/config"
 	"elbot/internal/security"
@@ -16,6 +17,9 @@ func (MemoryLearningModule) RegisterCommands(registrar Registrar, deps Deps) err
 	if err := registrar.Register(memoryCommand{deps: deps}); err != nil {
 		return err
 	}
+	if err := registrar.Register(forgetCommand{deps: deps}); err != nil {
+		return err
+	}
 	return registrar.Register(learningCommand{deps: deps})
 }
 
@@ -25,12 +29,22 @@ func (c memoryCommand) Info() command.Info {
 	return command.Info{
 		Name:        "memory",
 		Aliases:     []string{"angel_memory"},
-		Usage:       "/memory status | recall <关键词>",
-		Description: "查看或检索当前平台/会话的 clean-room 长期记忆。",
+		Usage:       "/memory status | list [n] | recall [关键词] | show <id> | delete <id> | source <消息id> | backfill [--confirm]",
+		Description: "查看、检索或删除当前平台/会话的 clean-room 长期记忆。",
 		MinRole:     security.RoleSuperadmin,
 		Help: strings.TrimSpace(`Usage:
-  /memory status
-  /memory recall [关键词]`),
+  /memory status                     # 查看当前范围条数
+  /memory list [n]                   # 列出记忆（默认 20，上限 100）
+  /memory recall [关键词]             # 按关键词检索
+  /memory show <id>                  # 查看一条记忆的来源与内容
+  /memory delete <id>                # 删除一条记忆
+  /memory source <平台消息id>         # 删除由该消息派生的记忆
+  /memory backfill                   # 预检旧记忆来源回填（全库统计）
+  /memory backfill --confirm         # 为旧记忆回填可确定的 source_kind
+
+说明:
+  id 支持唯一前缀；删除只作用于当前平台/会话 scope。
+  旧记忆没有记录来源成员 / 消息 ID / Session ID，无法回填，也不会被按来源删除命中。`),
 	}
 }
 
@@ -51,6 +65,23 @@ func (c memoryCommand) Handle(ctx context.Context, req command.Request) (*comman
 			return nil, err
 		}
 		return &command.Result{Content: fmt.Sprintf("当前范围长期记忆：%d 条。", count)}, nil
+	case "list", "ls":
+		limit := 20
+		if len(args) > 1 {
+			limit = memoryParseLimit(args[1], 20, 100)
+		}
+		memories, err := c.deps.AngelMemory.List(ctx, scope.Platform, scope.PlatformScopeID, angelmemory.SourceFilter{}, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(memories) == 0 {
+			return &command.Result{Content: "当前范围没有长期记忆。"}, nil
+		}
+		lines := []string{fmt.Sprintf("长期记忆 %d 条（最多显示 %d 条）：", len(memories), limit)}
+		for i, memory := range memories {
+			lines = append(lines, memoryEntryLine(i+1, memory))
+		}
+		return &command.Result{Content: strings.Join(lines, "\n")}, nil
 	case "recall":
 		query := strings.TrimSpace(strings.TrimPrefix(req.Args, args[0]))
 		memories, err := c.deps.AngelMemory.Recall(ctx, scope.Platform, scope.PlatformScopeID, query, 10)
@@ -62,12 +93,79 @@ func (c memoryCommand) Handle(ctx context.Context, req command.Request) (*comman
 		}
 		lines := []string{fmt.Sprintf("记忆 %d 条：", len(memories))}
 		for i, memory := range memories {
-			lines = append(lines, fmt.Sprintf("%d. [%d] %s", i+1, memory.Strength, memory.Content))
+			lines = append(lines, memoryEntryLine(i+1, memory))
 		}
 		return &command.Result{Content: strings.Join(lines, "\n")}, nil
+	case "show", "detail":
+		if len(args) < 2 {
+			return &command.Result{Content: "用法：/memory show <id>"}, nil
+		}
+		memory, err := resolveScopedMemory(ctx, c.deps.AngelMemory, scope.Platform, scope.PlatformScopeID, args[1], angelmemory.SourceFilter{})
+		if err != nil {
+			return nil, err
+		}
+		return &command.Result{Content: memoryEntryDetail(*memory)}, nil
+	case "delete", "forget", "rm":
+		if len(args) < 2 {
+			return &command.Result{Content: "用法：/memory delete <id>"}, nil
+		}
+		memory, err := resolveScopedMemory(ctx, c.deps.AngelMemory, scope.Platform, scope.PlatformScopeID, args[1], angelmemory.SourceFilter{})
+		if err != nil {
+			return nil, err
+		}
+		if err := c.deps.AngelMemory.Delete(ctx, scope.Platform, scope.PlatformScopeID, memory.ID); err != nil {
+			return nil, err
+		}
+		commandAudit(c.deps, "angel_memory_delete", "platform", scope.Platform, "scope", scope.PlatformScopeID, "memory_id", memory.ID, "source_message_id", memory.SourceMessageID)
+		return &command.Result{Content: fmt.Sprintf("已删除记忆 %s。", shortMemoryID(memory.ID))}, nil
+	case "source":
+		if len(args) < 2 {
+			return &command.Result{Content: "用法：/memory source <平台消息id>"}, nil
+		}
+		count, err := c.deps.AngelMemory.DeleteBySource(ctx, scope.Platform, scope.PlatformScopeID, angelmemory.SourceFilter{MessageID: args[1]})
+		if err != nil {
+			return nil, err
+		}
+		commandAudit(c.deps, "angel_memory_delete_source", "platform", scope.Platform, "scope", scope.PlatformScopeID, "source_message_id", args[1], "count", count)
+		return &command.Result{Content: fmt.Sprintf("已删除 %d 条由消息 %s 派生的记忆。", count, args[1])}, nil
+	case "backfill":
+		stats, err := c.deps.AngelMemory.LegacySourceBackfillStats(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !hasFlag(args[1:], "--confirm") {
+			return &command.Result{Content: formatLegacyBackfillPreview(stats)}, nil
+		}
+		count, err := c.deps.AngelMemory.BackfillLegacySourceKind(ctx)
+		if err != nil {
+			return nil, err
+		}
+		commandAudit(c.deps, "angel_memory_backfill_legacy_source", "updated", count, "total", stats.Total, "linked", stats.Linked)
+		return &command.Result{Content: fmt.Sprintf("已为 %d 条旧记忆回填 source_kind（全库共 %d 条，其中 %d 条已有结构化来源）。\n旧记忆的来源成员、消息 ID 和 Session ID 无法回填，仍按“不匹配、不误删”处理。", count, stats.Total, stats.Linked)}, nil
 	default:
-		return &command.Result{Content: "用法：/memory status 或 /memory recall <关键词>"}, nil
+		return &command.Result{Content: "用法：/memory status|list|recall|show|delete|source|backfill"}, nil
 	}
+}
+
+func formatLegacyBackfillPreview(stats angelmemory.LegacySourceBackfill) string {
+	unlinked := stats.Total - stats.Linked
+	if unlinked < 0 {
+		unlinked = 0
+	}
+	lines := []string{
+		"旧记忆来源回填预检（全库统计，尚未修改任何数据）：",
+		fmt.Sprintf("记忆总数：%d 条", stats.Total),
+		fmt.Sprintf("已有结构化来源：%d 条", stats.Linked),
+		fmt.Sprintf("可确定性回填 source_kind=tool：%d 条（旧版只写自由文本 source=\"tool\"，写入方唯一，可直接确定）", stats.Backfillable),
+		fmt.Sprintf("无法回填的来源成员 / 消息 ID / Session ID：涉及 %d 条旧记忆（旧数据没有记录这些字段）", unlinked),
+		"这部分按“不匹配、不误删”处理：不会按来源消息或 Session 删除旧记忆，也不会被 /forget source、撤回清理和 /delete Session 命中。",
+	}
+	if stats.Backfillable == 0 {
+		lines = append(lines, "当前没有需要回填的条目。")
+	} else {
+		lines = append(lines, "执行回填：/memory backfill --confirm")
+	}
+	return strings.Join(lines, "\n")
 }
 
 type learningCommand struct{ deps Deps }

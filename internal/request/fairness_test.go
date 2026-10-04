@@ -216,3 +216,29 @@ func TestQueueSnapshotMetricsRecordRejectionsAndWaiters(t *testing.T) {
 		t.Fatalf("queued metric = %d, want 1", snapshot.QueuedByKind[KindTurn])
 	}
 }
+func TestCancelScopeCancelsOnlyMatchingScope(t *testing.T) {
+	m := NewManager(time.Minute)
+	_, aCtx, aDone, err := m.Start(context.Background(), StartRequest{Kind: KindTurn, ScopeKey: "qqonebot:group:9"})
+	if err != nil {
+		t.Fatalf("start group 9: %v", err)
+	}
+	defer aDone()
+	_, bCtx, bDone, err := m.Start(context.Background(), StartRequest{Kind: KindTurn, ScopeKey: "qqonebot:group:10"})
+	if err != nil {
+		t.Fatalf("start group 10: %v", err)
+	}
+	defer bDone()
+	if got := m.CancelScope("qqonebot:group:9"); got != 1 {
+		t.Fatalf("CancelScope = %d, want 1", got)
+	}
+	select {
+	case <-aCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("matching scope context was not canceled")
+	}
+	select {
+	case <-bCtx.Done():
+		t.Fatal("other scope was canceled")
+	case <-time.After(50 * time.Millisecond):
+	}
+}

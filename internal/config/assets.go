@@ -266,11 +266,50 @@ report_schedule = "0 9 * * *"
 # report_scope_id = "group:123456"
 report_days = 1
 
+[group_services]
+# 群内提醒 / 投票 / 报名；全部本地确定性执行，不调用模型。
+enabled = true
+# 每个群 scope 最多保留多少条待发送提醒。
+max_reminders_per_scope = 50
+# 提醒最长可设置多少天。
+max_reminder_days = 365
+# 每个群 scope 最多保留多少个投票。
+max_polls_per_scope = 20
+# 单个投票最多几个选项。
+max_poll_options = 10
+# 每个群 scope 最多保留多少个报名。
+max_signups_per_scope = 20
+# 单个报名最多人数；0 表示不限制。
+max_signup_capacity = 500
+# 标题/问题/选项/提醒文本最大字符数。
+max_text_runes = 500
+
+[group_knowledge]
+# 确定性群知识库 / FAQ；命中后直接本地回答，不调用模型。
+enabled = true
+# 每个群 scope 最多保存多少条知识。
+max_entries_per_scope = 200
+# 问题/触发词最大字符数。
+max_question_runes = 200
+# 答案最大字符数。
+max_answer_runes = 2000
+# 每条知识最多别名数。
+max_aliases = 8
+# keyword 模式每条知识最多关键词数。
+max_keywords = 16
+# 匹配时最多扫描的入站字符数。
+max_match_runes = 2000
+
 [angel_memory]
 # clean-room 长期记忆；默认启用。
 enabled = true
 # 0 表示不按时间清理。
 retention_days = 365
+# 源消息被撤回时删除由它派生的长期记忆；默认 true。
+forget_on_recall = true
+# 允许模型通过 angel_forget 工具删除来源为当前用户的长期记忆；默认 false。
+# 开启后仍需用户确认高风险工具调用，且每次调用只删除一条、有速率上限。
+# allow_tool_forget = false
 # 单条记忆最大字符数（rune）；超过会拒绝写入。
 # max_content_runes = 1000
 # 单个会话最多保留多少条记忆。
@@ -346,15 +385,21 @@ circuit_breaker_open_cooldown_seconds = 60
 circuit_breaker_half_open_max = 1
 
 [budget_limits]
-# 可选：全局 / 单用户每日额度；0 表示不限制。生图/视觉按调用次数，chat 按 token 与费用统计。
+# 可选：全局 / 单用户每日额度；0 表示不限制。生图/视觉/语音转写按调用次数，chat 按 token 与费用统计。
 global_image_daily = 0
 user_image_daily = 0
 global_vision_daily = 0
 user_vision_daily = 0
+global_asr_daily = 0
+user_asr_daily = 0
 global_chat_tokens_daily = 0
 user_chat_tokens_daily = 0
 global_chat_cost_daily = 0
 user_chat_cost_daily = 0
+# 可选：把 token/费用限制变成调用前原子预占、返回 usage 后结算的硬预算。
+chat_hard_limit = false
+# 预占使用的输出 token 预算；0 使用模型 prompt budget。
+chat_hard_limit_reserve_output_tokens = 0
 
 [resident_memory]
 # Memory length units: CJK characters count as one each; English/digits count by word.
@@ -422,6 +467,13 @@ token_env = ["ELBOT_CLI_LOCAL_TOKEN"]
 # api_timeout_seconds = 15 # base timeout for OneBot writes and API responses
 # trigger_keywords = ["bot"]
 # send_file_mode = "base64" # base64 works across machines; use file_uri for a shared filesystem
+# inbound_dedup_enabled = true # suppress reconnect replays by platform+bot+scope+message-id, independent of history
+# inbound_dedup_ttl_seconds = 1800
+# inbound_dedup_max_entries = 4096
+# preprocess_workers = 4 # bounded pool for @ / quote / merged-forward lookups
+# preprocess_queue_size = 256 # full means the message is dropped locally, not queued as unbounded goroutines
+# high_priority_workers = 1 # recall / member / admin notices must not wait behind chat traffic
+# high_priority_queue_size = 128
 
 # [platform.telegram]
 # enabled = false
@@ -557,6 +609,30 @@ const defaultVisionTOML = `# Optional automatic vision fallback: when a text-onl
 # negative_cache_ttl_seconds = 30
 `
 
+// defaultASRTOML documents the optional voice-message transcription pipeline.
+// It is opt-in because it adds one provider call per transcribed recording.
+const defaultASRTOML = `# Optional voice-message transcription (ASR). Disabled unless enabled = true.
+# It reuses one existing [providers.*] entry (base_url, api_key_env, proxy) and
+# calls POST {base_url}/audio/transcriptions with multipart/form-data.
+# [asr]
+# enabled = false
+# provider = "openai"
+# model = "whisper-1"
+# language = "zh"             # optional ISO-639-1 hint; empty = auto-detect
+# prompt = ""                 # optional hint for names/domain terms
+# timeout_seconds = 120
+# max_audio_bytes = 20971520
+# max_concurrent = 2
+# queue_size = 8
+# max_segments = 4
+# cache_ttl_seconds = 1800
+# cache_max_entries = 128
+# negative_cache_ttl_seconds = 30
+# negative_cache_max_entries = 128
+# max_retries = 2
+# retry_initial_delay_seconds = 1
+`
+
 // defaultServicesTOML is the single read-only service config generated for new
 // installs. It combines the legacy providers.toml and the [image_generation]
 // section. Runtime state stays in state.toml; secrets stay in .env.
@@ -565,6 +641,7 @@ const defaultServicesTOML = `# Shared read-only service config for ElBot and com
 # - Image generation: [image_generation]
 # - Image to prompt: [image_to_prompt]
 # - Vision fallback: [vision]
+# - Voice transcription: [asr]
 # - Secrets: reference .env via api_key_env; never put real keys in this file.
 # - Runtime state: keep state.toml separate; ElBot rewrites it at runtime.
 # Other services may mount this file read-only and consume only their sections.
@@ -572,7 +649,8 @@ const defaultServicesTOML = `# Shared read-only service config for ElBot and com
 ` + defaultProvidersTOML + `
 ` + defaultImageGenerationTOML + `
 ` + defaultImageToPromptTOML + `
-` + defaultVisionTOML
+` + defaultVisionTOML + `
+` + defaultASRTOML
 
 const defaultStateTOML = `[session]
 default_mode = "work"

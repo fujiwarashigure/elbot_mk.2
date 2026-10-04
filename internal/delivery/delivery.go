@@ -184,6 +184,43 @@ type SentMessage struct {
 type Receipt struct {
 	PlatformMessageIDs []string
 	SentMessages       []SentMessage
+	// Failed reports that the send attempt stopped before every requested
+	// page/segment was accepted by the platform. PlatformMessageIDs and
+	// SentMessages still describe the deliveries that did succeed, so a caller
+	// can track and avoid re-sending those again.
+	Failed bool
+	// Failure is a short, non-secret reason for Failed. It is intentionally
+	// not a wrapped error so the receipt stays serializable.
+	Failure string
+}
+
+// MarkPartialFailure annotates a receipt that already contains successful
+// deliveries with the failure that stopped the remaining ones.
+func (r Receipt) MarkPartialFailure(err error) Receipt {
+	if err == nil {
+		return r
+	}
+	r.Failed = true
+	if r.Failure == "" {
+		r.Failure = err.Error()
+	}
+	return r
+}
+
+// Merge appends the successful deliveries from another receipt and preserves
+// its partial-failure marker. Multi-output and multi-target send loops use
+// this so the outer receipt does not lose a page-level failure recorded by an
+// inner adapter call.
+func (r Receipt) Merge(other Receipt) Receipt {
+	r.PlatformMessageIDs = append(r.PlatformMessageIDs, other.PlatformMessageIDs...)
+	r.SentMessages = append(r.SentMessages, other.SentMessages...)
+	if other.Failed {
+		r.Failed = true
+		if r.Failure == "" {
+			r.Failure = other.Failure
+		}
+	}
+	return r
 }
 
 // StreamingMessageSender is an optional platform capability for editable streaming delivery.
@@ -223,8 +260,16 @@ func NewManager(sender Sender, logger *slog.Logger) Manager {
 }
 
 func (m Manager) SendNotices(ctx context.Context, outputs []Output) error {
-	_, err := m.SendNotice(ctx, Notice{Outputs: outputs})
+	_, err := m.SendNoticesWithReceipt(ctx, outputs)
 	return err
+}
+
+// SendNoticesWithReceipt is the receipt-preserving form of SendNotices. When a
+// multi-output send stops after some outputs already reached the platform, the
+// returned receipt still describes those successful deliveries so callers can
+// audit or reconcile the partial send instead of assuming nothing was sent.
+func (m Manager) SendNoticesWithReceipt(ctx context.Context, outputs []Output) (Receipt, error) {
+	return m.SendNotice(ctx, Notice{Outputs: outputs})
 }
 
 func (m Manager) SendChat(ctx context.Context, outputs []Output) (Receipt, error) {
@@ -237,7 +282,13 @@ func (m Manager) SendChat(ctx context.Context, outputs []Output) (Receipt, error
 	if err := ValidateOutputs(outputs); err != nil {
 		return Receipt{}, err
 	}
-	return m.Sender.SendChat(ctx, outputs)
+	receipt, err := m.Sender.SendChat(ctx, outputs)
+	if err != nil {
+		// Adapters already mark paginated sends; mark defensively here so a
+		// platform that only accumulates IDs is not reported as a clean failure.
+		return receipt.MarkPartialFailure(err), err
+	}
+	return receipt, nil
 }
 
 func (m Manager) SendNotice(ctx context.Context, notice Notice) (Receipt, error) {
@@ -263,7 +314,7 @@ func (m Manager) SendNotice(ctx context.Context, notice Notice) (Receipt, error)
 			attrs := outputLogAttrs(notice.Outputs[0], "platform", notice.Target.Platform, "error", err.Error())
 			m.Logger.WarnContext(ctx, "notice output failed", attrs...)
 		}
-		return Receipt{}, wrapOutputSourceError(notice.Outputs[0], err)
+		return receipt.MarkPartialFailure(err), wrapOutputSourceError(notice.Outputs[0], err)
 	}
 	return receipt, nil
 }

@@ -2,13 +2,16 @@ package commands
 
 import (
 	"context"
+	"time"
 
 	"elbot/internal/angelmemory"
 	"elbot/internal/character"
 	"elbot/internal/command"
+	"elbot/internal/config"
 	"elbot/internal/hook"
 	hookruntime "elbot/internal/hook/runtime"
 	"elbot/internal/logging"
+	"elbot/internal/memory/resident"
 	"elbot/internal/request"
 	runtimestatus "elbot/internal/runtime"
 	"elbot/internal/selflearning"
@@ -95,6 +98,37 @@ type ContextPolicyService interface {
 	ResetContextPolicy(ctx context.Context, target string) (string, error)
 }
 
+type GroupKnowledgeService interface {
+	GroupKnowledgeList(ctx context.Context) ([]config.GroupKnowledgeEntry, error)
+	GroupKnowledgeAdd(ctx context.Context, question, answer, match string, aliases, keywords []string) (config.GroupKnowledgeEntry, error)
+	GroupKnowledgeRemove(ctx context.Context, id string) (bool, error)
+	GroupKnowledgeClear(ctx context.Context) (int, error)
+	GroupKnowledgeTest(ctx context.Context, text string) (config.GroupKnowledgeEntry, bool, error)
+}
+
+// MemberPanelService builds the ordinary member's self-service task/quota view.
+type MemberPanelService interface {
+	MemberPanel(ctx context.Context, view string) (string, error)
+}
+
+// GroupServicesService provides deterministic reminders, polls and sign-ups.
+type GroupServicesService interface {
+	ReminderCreate(ctx context.Context, whenText, text string) (string, error)
+	ReminderList(ctx context.Context) (string, error)
+	ReminderRemove(ctx context.Context, id string) (string, error)
+	PollCreate(ctx context.Context, question string, options []string) (string, error)
+	PollList(ctx context.Context) (string, error)
+	PollShow(ctx context.Context, id string) (string, error)
+	PollVote(ctx context.Context, id, option string) (string, error)
+	PollClose(ctx context.Context, id string) (string, error)
+	SignupCreate(ctx context.Context, title string, capacity int) (string, error)
+	SignupList(ctx context.Context) (string, error)
+	SignupShow(ctx context.Context, id string) (string, error)
+	SignupJoin(ctx context.Context, id string) (string, error)
+	SignupLeave(ctx context.Context, id string) (string, error)
+	SignupClose(ctx context.Context, id string) (string, error)
+}
+
 type GroupPolicyService interface {
 	GroupPolicyStatus(ctx context.Context) string
 	SetGroupPolicy(ctx context.Context, field, value string) (string, error)
@@ -128,27 +162,62 @@ type LogService interface {
 	QueryLogs(ctx context.Context, query logging.LogQuery) ([]logging.LogEntry, error)
 }
 
+// RuntimeStateReloadReport describes one state.toml hot reload.
+type RuntimeStateReloadReport struct {
+	Path string
+	// Applied is true when the file was read and merged into runtime state.
+	Applied bool
+	// Changed lists the runtime sections whose effective value changed.
+	Changed []string
+	// ModTime is the state.toml mtime that was applied.
+	ModTime time.Time
+}
+
+// RuntimeStateStatus describes the loaded state file and whether the on-disk
+// file is newer than what the process has applied.
+type RuntimeStateStatus struct {
+	Path          string
+	LoadedModTime time.Time
+	FileModTime   time.Time
+	Pending       bool
+}
+
+// RuntimeStateService exposes state.toml to operators so an external edit can be
+// applied without restarting the process.
+type RuntimeStateService interface {
+	ReloadRuntimeState(ctx context.Context) (RuntimeStateReloadReport, error)
+	RuntimeStateStatus() RuntimeStateStatus
+}
+
 type Deps struct {
-	Router        *command.Router
-	Sessions      *session.Service
-	Requests      *request.Manager
-	Turns         *turn.Manager
-	Store         storage.Store
-	Scope         func(context.Context) session.Scope
-	Models        ModelService
-	Compact       CompactService
-	ContextStatus ContextStatusService
-	ContextPolicy ContextPolicyService
-	GroupPolicy   GroupPolicyService
-	Tools         ToolService
-	Hooks         HookService
-	SessionState  *SessionCommandState
-	Characters    *character.Store
-	AngelMemory   *angelmemory.Service
-	SelfLearning  *selflearning.Service
-	Audit         func(event string, attrs ...any)
-	Logs          LogService
-	RuntimeStatus func(sessionID string) runtimestatus.Snapshot
+	Router         *command.Router
+	Sessions       *session.Service
+	Requests       *request.Manager
+	Turns          *turn.Manager
+	Store          storage.Store
+	Scope          func(context.Context) session.Scope
+	Models         ModelService
+	Compact        CompactService
+	ContextStatus  ContextStatusService
+	ContextPolicy  ContextPolicyService
+	GroupPolicy    GroupPolicyService
+	GroupKnowledge GroupKnowledgeService
+	MemberPanel    MemberPanelService
+	GroupServices  GroupServicesService
+	Tools          ToolService
+	Hooks          HookService
+	SessionState   *SessionCommandState
+	Characters     *character.Store
+	AngelMemory    *angelmemory.Service
+	ResidentMemory *resident.Store
+	SelfLearning   *selflearning.Service
+	Audit          func(event string, attrs ...any)
+	Logs           LogService
+	RuntimeState   RuntimeStateService
+	RuntimeStatus  func(sessionID string) runtimestatus.Snapshot
+	// CancelSessionInbox drops ordinary chat messages that are still waiting
+	// in the agent-side merge/serialization queue for one Session.
+	CancelSessionInbox func(sessionID string) int
 }
 
 func RegisterFactories(registrar Registrar, deps Deps, factories ...HandlerFactory) error {
@@ -177,11 +246,15 @@ func DefaultModules() []Module {
 		CompactModule{},
 		ContextPolicyModule{},
 		GroupPolicyModule{},
+		KnowledgeModule{},
+		MemberPanelModule{},
+		GroupServicesModule{},
 		RequestModule{},
 		LogModule{},
 		ToolModule{},
 		CharacterModule{},
 		HookModule{},
+		StateModule{},
 		MemoryLearningModule{},
 	}
 }

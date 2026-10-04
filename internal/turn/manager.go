@@ -49,10 +49,30 @@ type Snapshot struct {
 	Tools        map[string]int
 }
 
+// Speaker identifies who authored one inbound message. ActorID is the stable
+// ElBot actor identity used for authorization and grouping; UserID/Name are
+// display attributes only.
+type Speaker struct {
+	ActorID string
+	UserID  string
+	Name    string
+	Role    string
+}
+
+// Part is one original inbound message inside a merged Input.
+type Part struct {
+	Text         string
+	PlatformText string
+	Segments     []llm.MessageSegment
+	Speaker      Speaker
+}
+
 type Input struct {
 	Text         string
 	PlatformText string
 	Segments     []llm.MessageSegment
+	Speaker      Speaker
+	Parts        []Part
 }
 
 type Manager struct {
@@ -463,6 +483,12 @@ func appendPending(turn *state, input Input) bool {
 	return true
 }
 
+// MergeInputs merges a batch of inbound inputs while preserving per-part
+// speaker attribution. It is used by the agent-side merge window.
+func MergeInputs(inputs []Input) Input {
+	return mergeInputs(inputs)
+}
+
 func mergeInputs(inputs []Input) Input {
 	clean := []Input{}
 	for _, input := range inputs {
@@ -484,7 +510,27 @@ func mergeInputs(inputs []Input) Input {
 		segments = append(segments, input.Segments...)
 		platformTexts = append(platformTexts, input.PlatformText)
 	}
-	return Input{Text: llm.SegmentsTextOnly(segments), PlatformText: mergeTextInputs(platformTexts), Segments: segments}
+	parts := make([]Part, 0, len(clean))
+	speaker := clean[0].Speaker
+	sameSpeaker := true
+	for _, input := range clean {
+		if len(input.Parts) > 0 {
+			parts = append(parts, input.Parts...)
+		} else {
+			parts = append(parts, Part{Text: input.Text, PlatformText: input.PlatformText, Segments: append([]llm.MessageSegment(nil), input.Segments...), Speaker: input.Speaker})
+		}
+		if !equalSpeaker(input.Speaker, speaker) {
+			sameSpeaker = false
+		}
+	}
+	if !sameSpeaker {
+		speaker = Speaker{}
+	}
+	return Input{Text: llm.SegmentsTextOnly(segments), PlatformText: mergeTextInputs(platformTexts), Segments: segments, Speaker: speaker, Parts: parts}
+}
+
+func equalSpeaker(left, right Speaker) bool {
+	return left.ActorID == right.ActorID && left.UserID == right.UserID && left.Name == right.Name && left.Role == right.Role
 }
 
 func textInput(text string) Input {
@@ -501,6 +547,14 @@ func normalizeInput(input Input) Input {
 	}
 	if input.Text == "" {
 		input.Text = strings.TrimSpace(llm.SegmentsTextOnly(input.Segments))
+	}
+	if len(input.Parts) > 0 {
+		parts := make([]Part, 0, len(input.Parts))
+		for _, part := range input.Parts {
+			part.Segments = append([]llm.MessageSegment(nil), part.Segments...)
+			parts = append(parts, part)
+		}
+		input.Parts = parts
 	}
 	return input
 }

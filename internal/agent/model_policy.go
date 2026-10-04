@@ -15,7 +15,13 @@ import (
 // request so the catalog governs the model that actually runs, not just the
 // /model menu.
 func (a *Agent) authorizeExecutionModelSelection(ctx context.Context, selection config.ModelSelection) error {
-	if a == nil || !a.isGroupScope(ctx) {
+	if a == nil {
+		return nil
+	}
+	if a.groupRuntimeBlocked(ctx) {
+		return fmt.Errorf("当前群已暂停模型调用：机器人被禁言、已离群或状态不可用")
+	}
+	if !a.isGroupScope(ctx) {
 		return nil
 	}
 	policy := a.groupPolicyForScope(a.scope(ctx))

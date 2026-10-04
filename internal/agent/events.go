@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"elbot/internal/angelmemory"
 	"elbot/internal/platform"
 )
 
@@ -20,12 +21,19 @@ func (a *Agent) HandlePlatformEvent(ctx context.Context, event platform.Platform
 	eventType := strings.ToLower(strings.TrimSpace(event.Type))
 	a.audit("platform_event", "platform", event.Platform, "kind", string(event.Kind), "type", eventType, "scope", scope.PlatformScopeID, "actor", scope.ActorID)
 
+	// Bot self mute/leave/unmute is a local runtime state, not a user work
+	// cancellation. Consume it before the member-level notices below.
+	if a.updateGroupRuntimeFromEvent(event) {
+		return nil
+	}
+
 	switch string(event.Kind) {
 	case string(platform.EventNotice):
 		switch {
 		case strings.Contains(eventType, "recall"):
 			// Recall is bound to one platform message, not the whole group.
 			a.cancelMessageWork(eventCtx, event)
+			a.forgetMemoriesForRecalledMessage(eventCtx, event)
 			return nil
 		case strings.Contains(eventType, "decrease"):
 			// Member leave/kick: cancel only that member's in-flight work in
@@ -65,24 +73,61 @@ func messageWorkKey(platformName, scopeID, messageID string) string {
 	return strings.Join([]string{strings.TrimSpace(platformName), strings.TrimSpace(scopeID), strings.TrimSpace(messageID)}, "\x00")
 }
 
-// registerMessageWork binds the current platform message to the turn request
-// that is processing it. Recall can then cancel exactly that request.
+type messageWorkKeysContextKey struct{}
+
+func withMessageWorkKeys(ctx context.Context, keys []string) context.Context {
+	if len(keys) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, messageWorkKeysContextKey{}, append([]string(nil), keys...))
+}
+
+func messageWorkKeysFromContext(ctx context.Context) []string {
+	keys, _ := ctx.Value(messageWorkKeysContextKey{}).([]string)
+	return keys
+}
+
+func withoutMessageWorkKeys(ctx context.Context) context.Context {
+	return context.WithValue(ctx, messageWorkKeysContextKey{}, []string(nil))
+}
+
+// registerMessageWork binds the current platform message (and any extra
+// messages merged into the same turn) to the turn request that is processing
+// them. Recall can then cancel exactly that request.
 func (a *Agent) registerMessageWork(ctx context.Context, sessionID, requestID string) bool {
 	if a == nil || strings.TrimSpace(requestID) == "" {
 		return false
 	}
 	msg, ok := platform.MessageContextFrom(ctx)
-	if !ok || strings.TrimSpace(msg.PlatformMessageID) == "" {
+	if !ok {
 		return false
 	}
-	key := messageWorkKey(msg.Platform, msg.ScopeID, msg.PlatformMessageID)
+	keys := make([]string, 0, 1+len(messageWorkKeysFromContext(ctx)))
+	if strings.TrimSpace(msg.PlatformMessageID) != "" {
+		keys = append(keys, messageWorkKey(msg.Platform, msg.ScopeID, msg.PlatformMessageID))
+	}
+	keys = append(keys, messageWorkKeysFromContext(ctx)...)
+	if len(keys) == 0 {
+		return false
+	}
+	seen := map[string]bool{}
 	a.messageWorkMu.Lock()
 	if a.messageWork == nil {
 		a.messageWork = map[string]messageWorkRef{}
 	}
-	a.messageWork[key] = messageWorkRef{Platform: msg.Platform, ScopeID: msg.ScopeID, SessionID: sessionID, RequestID: requestID}
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		a.messageWork[key] = messageWorkRef{Platform: msg.Platform, ScopeID: msg.ScopeID, SessionID: sessionID, RequestID: requestID}
+	}
 	a.messageWorkMu.Unlock()
-	if a.consumeRecentRecall(key) {
+	for key := range seen {
+		if !a.consumeRecentRecall(key) {
+			continue
+		}
 		// The recall arrived before this message finished registering (for
 		// example after a reconnect). Cancel the just-bound request and tell
 		// the caller not to continue producing output for it.
@@ -112,6 +157,10 @@ func (a *Agent) unregisterMessageWork(requestID string) {
 
 func (a *Agent) cancelMessageWork(ctx context.Context, event platform.PlatformEvent) {
 	key := messageWorkKey(event.Platform, event.ScopeID, event.MessageID)
+	if a.cancelInboxMessage(key) > 0 {
+		a.audit("platform_recall_cancel_queued", "platform", event.Platform, "scope", event.ScopeID, "message_id", event.MessageID)
+		return
+	}
 	a.messageWorkMu.Lock()
 	ref, ok := a.messageWork[key]
 	if ok {
@@ -187,7 +236,31 @@ func (a *Agent) cancelUserWork(ctx context.Context, event platform.PlatformEvent
 		a.markTurnCanceled(requestID)
 	}
 	count := a.requests.CancelFairKey(fairKey)
+	count += a.cancelInboxFairKey(fairKey)
 	a.audit("platform_user_cancel", "platform", event.Platform, "scope", event.ScopeID, "user_id", userID, "fair_key", fairKey, "count", count)
+}
+
+func (a *Agent) forgetMemoriesForRecalledMessage(ctx context.Context, event platform.PlatformEvent) {
+	if a == nil || a.angelMemory == nil || !a.angelMemory.Ready() || !a.angelMemoryForgetOnRecall {
+		return
+	}
+	platformName := strings.TrimSpace(event.Platform)
+	scopeID := strings.TrimSpace(event.ScopeID)
+	messageID := strings.TrimSpace(event.MessageID)
+	if platformName == "" || scopeID == "" || messageID == "" {
+		return
+	}
+	count, err := a.angelMemory.DeleteBySource(ctx, platformName, scopeID, angelmemory.SourceFilter{MessageID: messageID})
+	if err != nil {
+		if a.logger != nil {
+			a.logger.WarnContext(ctx, "forget recalled angel memory failed", "platform", platformName, "scope", scopeID, "message_id", messageID, "error", err.Error())
+		}
+		a.audit("angel_memory_forget_failed", "platform", platformName, "scope", scopeID, "message_id", messageID, "error", err.Error())
+		return
+	}
+	if count > 0 {
+		a.audit("angel_memory_forget_recalled", "platform", platformName, "scope", scopeID, "message_id", messageID, "count", count)
+	}
 }
 
 func platformContextForEvent(ctx context.Context, event platform.PlatformEvent) context.Context {

@@ -44,6 +44,7 @@ func (a *Agent) startChatWithOutput(ctx context.Context, session *storage.Sessio
 		}
 		session = nextSession
 		text = pending.Text
+		ctx = withoutMessageWorkKeys(ctx)
 		ctx = withInboundTurnInput(ctx, pending)
 	}
 }
@@ -61,7 +62,7 @@ func (a *Agent) runChatTurnWithOutput(ctx context.Context, session *storage.Sess
 		session = next
 		_, _ = out.SendAssistant(ctx, content)
 	}
-	if !a.turns.StartLLMInput(session.ID, inboundTurnInput(ctx, text)) {
+	if !a.turns.StartLLMInput(session.ID, a.turnInputForMessage(ctx, text)) {
 		return session, turn.Input{}, nil
 	}
 	defer a.turns.FinishRequest(session.ID)
@@ -95,7 +96,9 @@ func (a *Agent) handleTurnContextDone(ctx context.Context, sessionID string, err
 }
 
 func (a *Agent) runChat(ctx context.Context, session *storage.Session, text string, out turnOutput, selection config.ModelSelection, completedPending *turn.Input) error {
+	inbound := a.turnInputForMessage(ctx, text)
 	userSegments := a.materializeMedia(ctx, inboundSegments(ctx, text))
+	userSegments = a.attachSpeakerMarker(ctx, inbound, userSegments)
 	userContent := llm.SegmentsContentText(userSegments)
 
 	userMessage := &storage.Message{
@@ -104,6 +107,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		Role:                     storage.RoleUser,
 		Content:                  userContent,
 		Segments:                 storedMessageSegments(userSegments),
+		Metadata:                 inputSpeakerMetadata(inbound),
 		ReplyToPlatformMessageID: inboundReplyMessageID(ctx),
 	}
 	if a.logger != nil {
@@ -157,7 +161,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	turnEvent, err := a.runHook(ctx, hook.Event{
 		Point:   hook.PointLLMTurnPrepared,
 		Session: hook.SessionContext{ID: session.ID},
-		Message: hook.MessagePayload{ID: userMessage.ID, Role: string(llm.RoleUser), PlatformText: inboundTurnInput(ctx, text).PlatformText, Segments: append([]llm.MessageSegment(nil), userSegments...)},
+		Message: hook.MessagePayload{ID: userMessage.ID, Role: string(llm.RoleUser), PlatformText: inbound.PlatformText, Segments: append([]llm.MessageSegment(nil), userSegments...)},
 		LLM: hook.LLMPayload{
 			Provider: selection.Provider,
 			Model:    selection.Model,
@@ -219,7 +223,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	for {
 		var pending *pendingUserMessage
 		if inToolPhase {
-			llmMessages, pending = a.drainPendingUserInput(session.ID, llmMessages)
+			llmMessages, pending = a.drainPendingUserInput(ctx, session.ID, llmMessages)
 		}
 		stream := out.StartStream(reqCtx)
 		llmStageStartedAt := storage.Now()
@@ -276,7 +280,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 			out.SendPreview(reqCtx, fmt.Sprintf("已达到 max_rounds_per_turn=%d，后续工具调用未执行，正在请求模型总结当前进度。", a.maxToolRoundsPerTurn()))
 			llmMessages = append(llmMessages, skippedToolMessages(result.ToolCalls, a.maxToolRoundsPerTurn())...)
 			var summaryPending *pendingUserMessage
-			llmMessages, summaryPending = a.drainPendingUserInput(session.ID, llmMessages)
+			llmMessages, summaryPending = a.drainPendingUserInput(ctx, session.ID, llmMessages)
 			llmMessages = append(llmMessages, llm.LLMMessage{Role: llm.RoleUser, Segments: llm.TextSegments("工具调用轮次已达到上限，可以询问用户是否继续或者基于已有工具结果和当前上下文总结当前进度。")})
 			tools = nil
 			stream := out.StartStream(reqCtx)
@@ -351,10 +355,12 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 			if finalStream != nil {
 				receipt, err := out.ReplaceAndFinishStream(ctx, reqCtx, finalStream, platformOutputText)
 				if err != nil {
+					a.auditPartialPlatformSend(session.ID, "replace_and_finish_stream", receipt, err)
 					return err
 				}
 				finalReceipt = receipt
 			} else if receipt, err := out.SendAssistant(reqCtx, platformOutputText); err != nil {
+				a.auditPartialPlatformSend(session.ID, "send_assistant_message", receipt, err)
 				return err
 			} else {
 				finalReceipt = receipt
@@ -393,6 +399,10 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		if strings.TrimSpace(platformOutputText) != "" {
 			receipt, err := out.SendAssistant(reqCtx, platformOutputText)
 			if err != nil {
+				if persistedAssistant {
+					a.mapSentAssistantMessage(ctx, session.ID, assistantMessage.ID, receipt)
+				}
+				a.auditPartialPlatformSend(session.ID, "send_assistant_message", receipt, err)
 				a.audit("platform_send_error", "session_id", session.ID, "operation", "send_assistant_message", "error", err.Error())
 				return err
 			}
@@ -449,6 +459,16 @@ func (a *Agent) modelSelectionForTurn(ctx context.Context, session *storage.Sess
 		}
 	}
 	return selection
+}
+
+// auditPartialPlatformSend records a send that delivered at least one platform
+// message before failing, so operators can reconcile the already-visible part
+// instead of re-sending the whole report.
+func (a *Agent) auditPartialPlatformSend(sessionID, operation string, receipt delivery.Receipt, err error) {
+	if a == nil || err == nil || len(receipt.PlatformMessageIDs) == 0 {
+		return
+	}
+	a.audit("platform_send_partial", "session_id", sessionID, "operation", operation, "platform_message_count", len(receipt.PlatformMessageIDs), "error", err.Error())
 }
 
 func hasStorageUserMessage(messages []storage.Message) bool {
