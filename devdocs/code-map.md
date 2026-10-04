@@ -25,6 +25,9 @@ rg -n "locator:tool" devdocs/code-map.md
 - `internal/launcher/cli.go`：命令行解析和补全生成。
 - `internal/app/app.go`、`runner.go`、`dependencies.go`：稳定启动入口、分阶段 Runner 和可替换依赖组。
 - `internal/app/foundation.go`、`models.go`、`runtime.go`：配置/存储基础设施、模型客户端，以及 Cron/Tool/Hook/Agent 核心装配。
+- `internal/app/image_rewriter.go`、`image_to_prompt.go`：把 `image_generate` 的低成本改写模型和 `image_to_prompt` 的视觉模型接到已有 `ModelClients`，再以接口形式注入 builtin 工具；`image_to_prompt` 显式启用但 provider/model 有误时在启动阶段报错。
+- `internal/app/vision.go`、`internal/agent/vision.go`、`internal/vision/`：自动视觉兜底。`[vision]` 段显式开启后，`agent.callLLM` 在 `APIError.Category == vision_unsupported` 时调用 `VisionDescriber` 把图片段替换成文字描述（有界并行 + 整批时间预算），失败则降级回文本引用；`internal/vision` 是 `image_to_prompt` 工具与兜底共用的唯一描述引擎（预处理 + 流式调用 + 版本化指纹缓存 + 成功/负缓存 + 同 key 合并 + 运行器/等待者上限 + `Stats()` 接入 `/metrics` + panic 隔离），不反向依赖 `internal/media`。`internal/llm/openai` 的 `parseError` 负责把上游错误映射为 `APIError.Category`，`shouldFallbackVision` 只读该字段。
+- `internal/llm/errors.go`：结构化 `APIError`（`StatusCode`/`Code`/`Type`/`Param`/`Message`/`Cause`）与确定性失败分类；`openai` 适配器的 `parseError` 在此保留上游错误码，供视觉兜底判定和负缓存使用。
 - `internal/app/platforms.go`、`integrations.go`：平台运行、Elnis 和平台能力接线；同目录 `service_marker*.go` 使用 `flock` 文件锁做服务单实例互斥，避免陈旧 PID 在容器重建后误判。
 
 常用搜索：
@@ -163,6 +166,7 @@ rg -n "Phase|Request|Cancel|pending|confirm|runtime status|sending" internal/req
 - `internal/tool/builtin/group_analysis.go`：`group_analysis` 工具，读取本地历史并输出群统计，可选 LLM 摘要。
 - `internal/tool/builtin/angel_memory.go`：`angel_remember` / `angel_recall` 工具。
 - `internal/tool/builtin/self_learning.go`：`self_learning_review` 工具。
+- `internal/tool/builtin/image_to_prompt.go`：`image_to_prompt` 内置工具，读取 Media Center 图片并通过 `ImagePromptService` 委托给共享的 `internal/vision.Service`（app 层用已有 provider 配置它）；工具自身不缓存、不做 singleflight，缓存键、并发合并与失败/空/截断处理都在 `internal/vision`。
 - `internal/groupanalysis/`：群分析 clean-room 统计与可选 `Summarizer`；只依赖 `chat_history` / `outbound_messages`。
 - `internal/angelmemory/`：clean-room SQLite 长期记忆、召回和上下文构造。
 - `internal/selflearning/`：clean-room 观察、候选挖掘、review-before-apply 和上下文构造。

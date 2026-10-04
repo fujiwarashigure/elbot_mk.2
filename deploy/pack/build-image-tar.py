@@ -10,7 +10,7 @@
 
 用法：
   python build-image-tar.py --binary ./elbot-linux-amd64 --arch amd64 \
-      --version 0.6.6 --output elbot-0.6.6-linux-amd64.tar.gz
+      --version 0.6.7 --output elbot-0.6.7-linux-amd64.tar.gz
 
 注意：scratch 镜像内没有 /bin/sh 和 coreutils，ElBot 的 shell 工具不可用；
 需要完整工具能力请用同目录的 Dockerfile（基于 debian:bookworm-slim）在服务器上构建。

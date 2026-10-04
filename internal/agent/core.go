@@ -45,6 +45,10 @@ type Agent struct {
 	contextOverflow    map[string]config.ContextOverflowConfig
 	store              storage.Store
 	media              *media.Manager
+	vision             VisionDescriber
+	visionParallelism  int
+	visionMaxImages    int
+	visionBudget       time.Duration
 	sessions           *session.Service
 	requests           *request.Manager
 	turns              *turn.Manager
@@ -265,6 +269,10 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		contextOverflow:         cloneContextOverflow(opts.ContextOverflow),
 		store:                   store,
 		media:                   opts.Media,
+		vision:                  opts.VisionDescriber,
+		visionParallelism:       opts.VisionParallelism,
+		visionMaxImages:         opts.VisionMaxImages,
+		visionBudget:            opts.VisionBudget,
 		mediaRetentionDays:      opts.MediaRetentionDays,
 		sessions:                sessions,
 		requests:                requests,

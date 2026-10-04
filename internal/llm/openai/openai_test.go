@@ -1298,3 +1298,135 @@ func TestChatStream_ModelExtraPayload(t *testing.T) {
 		t.Errorf("overridden: expected request_value, got %v", body["overridden"])
 	}
 }
+
+func TestChatStream_ReservedExtraFieldsAreIgnored(t *testing.T) {
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: [DONE]\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	adapter := New(srv.URL, "test-key", map[string]any{"provider_field": "provider"})
+	_, err := adapter.ChatStream(context.Background(), llm.ChatRequest{
+		Model:    "real-model",
+		Messages: []llm.LLMMessage{{Role: llm.RoleUser, Segments: llm.TextSegments("Hi")}},
+		ExtraBody: map[string]any{
+			"model":          "hijacked-model",
+			"messages":       []any{map[string]any{"role": "user", "content": "other"}},
+			"stream":         false,
+			"stream_options": map[string]any{"include_usage": false},
+			"custom_field":   "kept",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("unmarshal captured body: %v", err)
+	}
+	if body["model"] != "real-model" {
+		t.Fatalf("model = %#v, want the caller's model", body["model"])
+	}
+	if body["stream"] != true {
+		t.Fatalf("stream = %#v, want true", body["stream"])
+	}
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("messages = %#v, want the caller's messages", body["messages"])
+	}
+	streamOptions, ok := body["stream_options"].(map[string]any)
+	if !ok || streamOptions["include_usage"] != true {
+		t.Fatalf("stream_options = %#v", body["stream_options"])
+	}
+	// Non-reserved extras still pass through, and the provider payload still applies.
+	if body["custom_field"] != "kept" || body["provider_field"] != "provider" {
+		t.Fatalf("extra fields were dropped: %#v", body)
+	}
+	for _, option := range []string{"model", "messages", "stream", "stream_options"} {
+		if _, reserved := reservedRequestFields[option]; !reserved {
+			t.Fatalf("%s should be reserved", option)
+		}
+	}
+}
+
+func TestChatStream_ProviderExtraPayloadCannotDisableStreaming(t *testing.T) {
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: [DONE]\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	adapter := mustNewWithOptions(t, srv.URL, "test-key", map[string]any{
+		"stream":      false,
+		"enable_beta": true,
+	}, nil, RequestOptions{})
+	if _, err := adapter.ChatStream(context.Background(), llm.ChatRequest{
+		Model:    "test-model",
+		Messages: []llm.LLMMessage{{Role: llm.RoleUser, Segments: llm.TextSegments("Hi")}},
+	}); err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("unmarshal captured body: %v", err)
+	}
+	if body["stream"] != true {
+		t.Fatalf("stream = %#v, want true", body["stream"])
+	}
+	if body["enable_beta"] != true {
+		t.Fatalf("enable_beta = %#v, want true", body["enable_beta"])
+	}
+}
+
+func TestChatStream_LogsIgnoredReservedExtraFields(t *testing.T) {
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: [DONE]\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	var logs bytes.Buffer
+	adapter := mustNewWithOptions(t, srv.URL, "test-key", map[string]any{
+		"stream":    false,
+		"custom":    "kept",
+		"messages":  []any{},
+		"model":     "hijacked",
+		"other_key": 1,
+	}, nil, RequestOptions{})
+	adapter.SetLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	if _, err := adapter.ChatStream(context.Background(), llm.ChatRequest{
+		Model:    "test-model",
+		Messages: []llm.LLMMessage{{Role: llm.RoleUser, Segments: llm.TextSegments("Hi")}},
+	}); err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	logged := logs.String()
+	if !strings.Contains(logged, "reserved request fields") {
+		t.Fatalf("expected a warning about ignored reserved fields, got %q", logged)
+	}
+	// Only the field names are logged, sorted and deduplicated: never values.
+	if !strings.Contains(logged, "fields=messages,model,stream") {
+		t.Fatalf("warning fields = %q", logged)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("unmarshal captured body: %v", err)
+	}
+	if body["stream"] != true || body["model"] != "test-model" || body["custom"] != "kept" || body["other_key"] != float64(1) {
+		t.Fatalf("body = %#v", body)
+	}
+}

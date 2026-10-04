@@ -501,18 +501,61 @@ queue_size = 0
 queue_timeout_seconds = 0
 `
 
+// defaultImageToPromptTOML is the optional built-in image_to_prompt backend.
+// It reuses a [providers.*] entry as its vision model, so no extra key is needed.
+const defaultImageToPromptTOML = `# Optional image_to_prompt tool: turn a reference image into a drawing prompt.
+# It calls a vision-capable model from the [providers.*] entries above, so it
+# reuses the same api_key_env, proxy and retry settings. Setting provider+model
+# is enough to enable it; enabled=false force-disables it. An explicitly
+# enabled section with a missing provider/model fails startup instead of
+# silently disappearing.
+# [image_to_prompt]
+# provider = "openai"
+# model = "gpt-4o-mini"
+# max_tokens = 400          # cap the prompt returned to the chat model
+# temperature = 0.2         # 0 = do not override the provider's own temperature
+# max_edge = 1536           # downscale the long edge before upload; 0 keeps original
+# max_image_bytes = 12582912
+# timeout_seconds = 90
+`
+
+// defaultVisionTOML documents the optional automatic vision fallback. It is
+// opt-in because it adds one extra model call per described image.
+const defaultVisionTOML = `# Optional automatic vision fallback: when a text-only chat model rejects image
+# content, ElBot describes the images with this vision model and retries with
+# the descriptions. It reuses [providers.*], so no extra key is needed.
+# Disabled unless enabled = true. When provider/model are omitted they are
+# inherited from [image_to_prompt] above.
+# [vision]
+# enabled = false
+# provider = "openai"        # optional; defaults to [image_to_prompt].provider
+# model = "gpt-4o-mini"      # optional; defaults to [image_to_prompt].model
+# max_tokens = 400
+# temperature = 0.2
+# max_edge = 1536
+# max_image_bytes = 12582912
+# timeout_seconds = 90
+# language = "zh"            # description language: zh or en
+# cache_ttl_seconds = 1800
+# negative_cache_ttl_seconds = 30
+`
+
 // defaultServicesTOML is the single read-only service config generated for new
 // installs. It combines the legacy providers.toml and the [image_generation]
 // section. Runtime state stays in state.toml; secrets stay in .env.
 const defaultServicesTOML = `# Shared read-only service config for ElBot and compatible services.
 # - LLM providers: [providers.*] and [model_metadata]
 # - Image generation: [image_generation]
+# - Image to prompt: [image_to_prompt]
+# - Vision fallback: [vision]
 # - Secrets: reference .env via api_key_env; never put real keys in this file.
 # - Runtime state: keep state.toml separate; ElBot rewrites it at runtime.
 # Other services may mount this file read-only and consume only their sections.
 
 ` + defaultProvidersTOML + `
-` + defaultImageGenerationTOML
+` + defaultImageGenerationTOML + `
+` + defaultImageToPromptTOML + `
+` + defaultVisionTOML
 
 const defaultStateTOML = `[session]
 default_mode = "work"

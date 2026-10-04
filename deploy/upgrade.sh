@@ -4,7 +4,7 @@
 #
 # 用法：
 #   bash upgrade.sh            # 使用 deploy/VERSION 作为新版本
-#   ELBOT_VERSION=0.6.6 bash upgrade.sh
+#   ELBOT_VERSION=0.6.7 bash upgrade.sh
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

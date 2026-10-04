@@ -26,6 +26,7 @@ type RegisterOptions struct {
 	DefaultImageProfile      string
 	ImageLimiter             *concurrency.Limiter
 	PromptRewriter           ImagePromptRewriter
+	ImagePromptService       ImagePromptService
 	SkillManager             *skill.Manager
 	CronService              *elcron.Service
 	ChatHistory              storage.ChatHistoryRepository
@@ -146,6 +147,15 @@ func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
 			center = opts.FileManager.Media
 		}
 		if err := registry.Register(NewImageGenerateTool(opts.ImageProfiles, opts.DefaultImageProfile, opts.CharacterStore, center, opts.ChatHistory, opts.PromptRewriter, opts.ImageLimiter)); err != nil {
+			return err
+		}
+	}
+	if opts.ImagePromptService != nil {
+		var center *media.Manager
+		if opts.FileManager != nil {
+			center = opts.FileManager.Media
+		}
+		if err := registry.Register(NewImageToPromptTool(center, opts.ImagePromptService)); err != nil {
 			return err
 		}
 	}

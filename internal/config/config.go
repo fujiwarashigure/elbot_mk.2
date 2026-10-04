@@ -45,6 +45,8 @@ type Config struct {
 	Soul                SoulConfig                       `toml:"soul"`
 	CharacterLibrary    CharacterLibraryConfig           `toml:"character_library"`
 	ImageGeneration     ImageGenerationConfig            `toml:"image_generation"`
+	ImageToPrompt       ImageToPromptConfig              `toml:"image_to_prompt"`
+	Vision              VisionConfig                     `toml:"vision"`
 	GroupAnalysis       GroupAnalysisConfig              `toml:"group_analysis"`
 	AngelMemory         AngelMemoryConfig                `toml:"angel_memory"`
 	SelfLearning        SelfLearningConfig               `toml:"self_learning"`
@@ -87,6 +89,11 @@ type ProviderConfig struct {
 	ExtraPayload     map[string]any         `toml:"extra_payload"`
 	FallbackProvider string                 `toml:"fallback_provider"`
 	FallbackModel    string                 `toml:"fallback_model"`
+	// Vision declares whether models from this provider accept image content.
+	// It is a pointer so "unset" (nil, unknown) is distinct from an explicit
+	// false. Per-model values in [providers.<name>.model_configs.<model>]
+	// override this default.
+	Vision *bool `toml:"vision"`
 	// FallbackMode controls when the fallback provider takes over:
 	// "circuit" (default) waits until the provider breaker opens; "on_error"
 	// switches on the first pre-stream error. "off" disables fallback.
@@ -116,9 +123,56 @@ func (p ProviderConfig) UsesFallbackOnError() bool {
 type ModelConfig struct {
 	ContextWindow int            `toml:"context_window"`
 	ExtraPayload  map[string]any `toml:"extra_payload"`
+	// Vision overrides the provider-level capability for this single model.
+	Vision *bool `toml:"vision"`
 }
 
 type ModelConfigs map[string]ModelConfig
+
+// VisionSupport is a tri-state image-input capability declaration.
+type VisionSupport int
+
+const (
+	// VisionUnknown means the config does not declare support either way.
+	VisionUnknown VisionSupport = iota
+	// VisionSupported means the config declares image input is accepted.
+	VisionSupported
+	// VisionUnsupported means the config declares image input is rejected.
+	VisionUnsupported
+)
+
+// VisionSupportFor resolves the declared vision capability for a
+// provider/model pair. Model-level config wins over the provider default and
+// both default to unknown, so existing configs keep working unchanged.
+func (c *Config) VisionSupportFor(provider, model string) VisionSupport {
+	if c == nil {
+		return VisionUnknown
+	}
+	providerCfg, ok := c.Providers[provider]
+	if !ok {
+		return VisionUnknown
+	}
+	return providerCfg.VisionSupport(model)
+}
+
+// VisionSupport resolves the capability for one model, honoring the
+// model-level override before the provider default.
+func (p ProviderConfig) VisionSupport(model string) VisionSupport {
+	if modelConfig, ok := p.ModelConfigs[model]; ok && modelConfig.Vision != nil {
+		return visionSupportFromBool(*modelConfig.Vision)
+	}
+	if p.Vision != nil {
+		return visionSupportFromBool(*p.Vision)
+	}
+	return VisionUnknown
+}
+
+func visionSupportFromBool(supported bool) VisionSupport {
+	if supported {
+		return VisionSupported
+	}
+	return VisionUnsupported
+}
 
 type ModelMetadataConfig struct {
 	DefaultContextWindow int `toml:"default_context_window"`
@@ -361,6 +415,8 @@ type ServicesConfig struct {
 	ModelMetadata   *ModelMetadataConfig          `toml:"model_metadata"`
 	ModelProfiles   map[string]ModelProfileConfig `toml:"model_profiles"`
 	ImageGeneration *ImageGenerationConfig        `toml:"image_generation"`
+	ImageToPrompt   *ImageToPromptConfig          `toml:"image_to_prompt"`
+	Vision          *VisionConfig                 `toml:"vision"`
 }
 
 // TurnDirectivesConfig controls how @model: / @image: / @use: style declarations
@@ -566,6 +622,86 @@ func (c ImageGenerationConfig) IsAutoContext() bool {
 // active character folder (default true).
 func (c ImageGenerationConfig) IsSaveToCharacter() bool {
 	return c.SaveToCharacter == nil || *c.SaveToCharacter
+}
+
+// ImageToPromptConfig controls the built-in image_to_prompt tool. It reuses one
+// existing [providers.*] entry as its vision model, so no extra API key is
+// needed; set provider + model (optionally enabled = false) to turn it on.
+type ImageToPromptConfig struct {
+	Enabled        *bool    `toml:"enabled"`
+	Provider       string   `toml:"provider"`
+	Model          string   `toml:"model"`
+	MaxTokens      int      `toml:"max_tokens"`
+	Temperature    *float64 `toml:"temperature"`
+	MaxEdge        int      `toml:"max_edge"`
+	MaxImageBytes  int64    `toml:"max_image_bytes"`
+	TimeoutSeconds int      `toml:"timeout_seconds"`
+}
+
+// TemperatureValue returns the configured sampling temperature (default 0.2).
+// The field is a pointer so an explicit 0 is preserved instead of being treated
+// as "unset"; the OpenAI adapter omits a non-positive temperature, which means
+// "use the provider default".
+func (c ImageToPromptConfig) TemperatureValue() float64 {
+	if c.Temperature == nil {
+		return 0.2
+	}
+	return *c.Temperature
+}
+
+// IsEnabled reports whether the tool is usable. It defaults to true once a
+// provider and model are both configured, so enabling the tool stays a one-liner.
+func (c ImageToPromptConfig) IsEnabled() bool {
+	if c.Enabled != nil {
+		return *c.Enabled
+	}
+	return strings.TrimSpace(c.Provider) != "" && strings.TrimSpace(c.Model) != ""
+}
+
+// VisionConfig controls the automatic vision fallback: when a text-only chat
+// model rejects image content, ElBot describes the images with this vision model
+// and retries with the descriptions in place of the images.
+//
+// The fallback is opt-in (enabled defaults to false) because it adds an extra
+// model call and cost. When provider/model are left empty they are inherited
+// from [image_to_prompt] at startup, so an existing install can enable it with a
+// single "enabled = true".
+type VisionConfig struct {
+	Enabled        *bool    `toml:"enabled"`
+	Provider       string   `toml:"provider"`
+	Model          string   `toml:"model"`
+	MaxTokens      int      `toml:"max_tokens"`
+	Temperature    *float64 `toml:"temperature"`
+	MaxEdge        int      `toml:"max_edge"`
+	MaxImageBytes  int64    `toml:"max_image_bytes"`
+	TimeoutSeconds int      `toml:"timeout_seconds"`
+	// Language is the description language for the fallback ("zh" or "en").
+	Language                string `toml:"language"`
+	CacheTTLSeconds         int    `toml:"cache_ttl_seconds"`
+	NegativeCacheTTLSeconds int    `toml:"negative_cache_ttl_seconds"`
+}
+
+// IsEnabled reports whether the automatic vision fallback is switched on. It is
+// explicit rather than inferred from provider/model so enabling it is never a
+// surprise cost.
+func (c VisionConfig) IsEnabled() bool {
+	return c.Enabled != nil && *c.Enabled
+}
+
+// TemperatureValue returns the configured sampling temperature (default 0.2).
+func (c VisionConfig) TemperatureValue() float64 {
+	if c.Temperature == nil {
+		return 0.2
+	}
+	return *c.Temperature
+}
+
+// LanguageValue normalizes the description language to "zh" or "en".
+func (c VisionConfig) LanguageValue() string {
+	if strings.EqualFold(strings.TrimSpace(c.Language), "en") {
+		return "en"
+	}
+	return "zh"
 }
 
 type ViewConfig struct {
@@ -1199,6 +1335,51 @@ func (c *Config) applyAppDefaults() {
 	if c.ImageGeneration.ReferenceField == "" {
 		c.ImageGeneration.ReferenceField = "image"
 	}
+	if c.ImageToPrompt.MaxTokens <= 0 {
+		c.ImageToPrompt.MaxTokens = 400
+	}
+	if c.ImageToPrompt.Temperature == nil {
+		defaultTemperature := 0.2
+		c.ImageToPrompt.Temperature = &defaultTemperature
+	}
+	if c.ImageToPrompt.MaxEdge <= 0 {
+		c.ImageToPrompt.MaxEdge = 1536
+	}
+	if c.ImageToPrompt.MaxImageBytes <= 0 {
+		c.ImageToPrompt.MaxImageBytes = 12 * 1024 * 1024
+	}
+	if c.ImageToPrompt.TimeoutSeconds <= 0 {
+		c.ImageToPrompt.TimeoutSeconds = 90
+	}
+	if c.Vision.MaxTokens <= 0 {
+		c.Vision.MaxTokens = 400
+	}
+	if c.Vision.Temperature == nil {
+		defaultVisionTemperature := 0.2
+		c.Vision.Temperature = &defaultVisionTemperature
+	}
+	if c.Vision.MaxEdge <= 0 {
+		c.Vision.MaxEdge = 1536
+	}
+	if c.Vision.MaxImageBytes <= 0 {
+		c.Vision.MaxImageBytes = 12 * 1024 * 1024
+	}
+	if c.Vision.TimeoutSeconds <= 0 {
+		c.Vision.TimeoutSeconds = 90
+	}
+	if c.Vision.CacheTTLSeconds <= 0 {
+		c.Vision.CacheTTLSeconds = 1800
+	}
+	if c.Vision.NegativeCacheTTLSeconds <= 0 {
+		c.Vision.NegativeCacheTTLSeconds = 30
+	}
+	// [vision] inherits the backend already configured for the image_to_prompt
+	// tool so enabling the chat fallback stays a one-liner. An explicit provider
+	// or model in [vision] always wins.
+	if strings.TrimSpace(c.Vision.Provider) == "" && strings.TrimSpace(c.Vision.Model) == "" {
+		c.Vision.Provider = c.ImageToPrompt.Provider
+		c.Vision.Model = c.ImageToPrompt.Model
+	}
 	if c.Maintenance.DailyReport.Schedule == "" {
 		c.Maintenance.DailyReport.Schedule = "0 9,21 * * *"
 	}
@@ -1501,6 +1682,12 @@ func (c *Config) mergeServices(services *ServicesConfig) {
 	}
 	if services.ImageGeneration != nil {
 		c.ImageGeneration = *services.ImageGeneration
+	}
+	if services.ImageToPrompt != nil {
+		c.ImageToPrompt = *services.ImageToPrompt
+	}
+	if services.Vision != nil {
+		c.Vision = *services.Vision
 	}
 }
 

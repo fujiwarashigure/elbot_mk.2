@@ -9,7 +9,7 @@
 > **不想在服务器上编译 Go？**
 > 仓库**不提交**预编译 / 离线产物，`deploy/dist/` 默认不存在；需要时先在本地或 CI 运行
 > `deploy/pack/prepare-offline.sh` 生成，再上传服务器。生成方式见 [`pack/README-OFFLINE.md`](pack/README-OFFLINE.md)：
-> - `deploy/dist/elbot-0.6.6-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
+> - `deploy/dist/elbot-0.6.7-linux-amd64.tar.gz`：`docker load` 直接可用（scratch 精简版，无 shell）；
 > - `deploy/dist/offline-amd64/`：预编译二进制 + Debian 运行时，服务器只需拉约 30MB debian 基础镜像，功能完整；
 > - 如果从仓库里找不到 `deploy/dist/`，属于正常现象，请先自行生成。
 
@@ -160,6 +160,8 @@ DEEPSEEK_API_KEY=sk-xxxx
 OPENAI_API_KEY=sk-xxxx
 # 可选：生图服务（services.toml 的 [image_generation]）的 API Key
 IMAGE_API_KEY=sk-xxxx
+# 可选：image_to_prompt 复用 [providers.*] 的 Key（例如 OPENAI_API_KEY），
+# 在 services.toml 的 [image_to_prompt] 指定 provider/model 即启用，无需新 Key。
 ELBOT_CLI_LOCAL_TOKEN=请换成随机长字符串
 ELNIS_HOME_TOKEN=请换成随机长字符串
 
@@ -611,7 +613,7 @@ bash /opt/elbot/deploy/restore-verify.sh /opt/elbot/deploy/backups/elbot-data-*.
 
 ```bash
 # 1 / 0 / auto 之外，也接受 required / require / true / yes / false / no / off
-RESTORE_VERIFY_START=required RESTORE_VERIFY_IMAGE=elbot:0.6.6 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
+RESTORE_VERIFY_START=required RESTORE_VERIFY_IMAGE=elbot:0.6.7 bash /opt/elbot/deploy/restore-verify.sh /path/to/elbot-data-*.tar.gz
 # 等待 /ready 的上限，默认 45 秒：
 RESTORE_VERIFY_START_TIMEOUT=90 ...
 # 关闭隔离启动检查：
@@ -687,7 +689,7 @@ bash rollback.sh
 `upgrade.sh` 只从**当前工作区**构建镜像，不会自动切换代码，所以它有两条硬性保护：
 
 - `deploy/VERSION` 与目标版本不一致时直接拒绝执行（`ELBOT_VERSION` / 默认值任一与源码不符都算），避免“只给旧代码贴新版本号”；确实只想改版本号时用 `ELBOT_ALLOW_VERSION_MISMATCH=1`；
-- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.6 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
+- 需要自动切源码时可以设置 `ELBOT_GIT_REF`（例如 `ELBOT_GIT_REF=v0.6.7 bash upgrade.sh`），脚本会先用 `git rev-parse --show-toplevel` 找到仓库根目录，再在根目录 `git fetch --tags` + `checkout --detach` 后校验一次版本；不要求 `.git` 在 `deploy/` 下。
 
 重建之后 `upgrade.sh` 会等待容器 healthcheck 变成 `healthy`，再在容器内执行 `elbot doctor --no-model` 作为验收；任一步失败都会提示回滚命令并以非 0 退出。需要跳过或加严：
 
@@ -759,14 +761,14 @@ s3_secret_key_env = "ELBOT_S3_SECRET_ACCESS_KEY"
 
 ```bash
 docker login registry.cn-hangzhou.aliyuncs.com
-bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.6
+bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.7
 ```
 
 ### 9.2 腾讯云 TCR
 
 ```bash
 docker login ccr.ccs.tencentyun.com
-bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.6
+bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.7
 ```
 
 ### 9.3 服务器使用远端镜像
@@ -774,7 +776,7 @@ bash deploy/build-push.sh ccr.ccs.tencentyun.com/<命名空间>/elbot:0.6.6
 编辑 `deploy/.env`：
 
 ```dotenv
-ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.6
+ELBOT_IMAGE=registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.7
 ```
 
 服务器登录私有仓库后：
@@ -798,7 +800,7 @@ Dockerfile 的 `VERSION` 构建参数只影响镜像内的版本字符串与 OCI
 
 ```bash
 PLATFORM=linux/amd64,linux/arm64 \
-  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.6
+  bash deploy/build-push.sh registry.cn-hangzhou.aliyuncs.com/<命名空间>/elbot:0.6.7
 ```
 
 多平台只能 `--push`（buildx 限制），脚本已处理。Dockerfile 的构建阶段固定在
@@ -889,6 +891,22 @@ systemctl enable --now elbot
 - 默认保持 `services.toml` 的 `[image_generation] superadmin_only = true`；如果改为 `false`，普通用户还要 `security.user_max_tool_risk >= "medium"` 才能调用。
 - 建议在中转站 / 上游按 Key 设置 **额度、限速和每日上限**，并使用和 LLM 分开的 `IMAGE_API_KEY`；不要把无限额度的主 Key 注入面向群聊的进程。
 - 详细说明见 [生图服务](../docs/image-generation.md#权限与费用)。
+
+### 11.3 图片反推提示词 image_to_prompt
+
+- `image_to_prompt` 复用 `services.toml` 里已有 `[providers.*]` 的 Key（如 `OPENAI_API_KEY`），不新增环境变量；在 `[image_to_prompt]` 指定 `provider` + `model` 即启用。
+- 显式 `enabled = true` 但 provider/model 不完整、或 provider 不在 `[providers.*]` 时，启动会直接报配置错误，不会静默禁用工具。
+- 它按 `risk = medium` 走 `security.user_max_tool_risk`；默认 `user_max_tool_risk = "low"` 时普通用户不可调用，只有超级管理员可用。
+- 建议选便宜的视觉模型，并保留默认的 `max_edge` / `max_image_bytes` 缩放和进程内缓存：同一张图 + 同一组参数只调用一次视觉模型，并发重复请求也会合并为一次；详细配置见 [配置说明](../docs/configuration.md#图片反推提示词-image_to_prompt)。
+- 上传前会对图片做边界检查（单文件 64 MiB、长边 20000 px、总像素 2400 万、限制并发解码）；重编码为 JPEG 时透明背景合成为白色，动图只取第一帧。
+
+### 11.4 视觉兜底 vision
+
+- `[vision]` 是可选段，**默认关闭**；主模型是纯文本模型、上游明确拒绝图片内容时，先用视觉模型把图片转写成文字描述再重试。
+- 复用 `[providers.*]` 的 Key，不新增环境变量。`provider` / `model` 留空时继承 `[image_to_prompt]`，已有该配置只需在 `[vision]` 加 `enabled = true`。
+- 显式 `enabled = true` 但 provider/model 不完整、或 provider 不在 `[providers.*]` 时，启动直接报配置错误。
+- 因为它会为每张被拒绝的图片增加一次视觉调用与费用，所以设计成显式开启；只想用工具反推提示词、不需要自动兜底时可以不开。
+- 成功结果按“配置指纹”缓存（含模型、提示词、预处理参数），普通 400 / 429 / 5xx / 超时不会触发兜底、也不会写负缓存；详细配置见 [配置说明](../docs/configuration.md#视觉兜底-vision)。
 
 ---
 

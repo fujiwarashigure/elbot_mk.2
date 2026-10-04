@@ -93,6 +93,12 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		foundation.Maintenance.Media = mediaCenter
 	}
 	imageRewriter := buildImagePromptRewriter(cfg, req.Models)
+	visionMetrics := newVisionMetricsState()
+	imageToPrompt, err := buildImagePromptService(ctx, cfg, req.Models, visionMetrics.countersValue())
+	if err != nil {
+		return nil, err
+	}
+	visionMetrics.set("image_to_prompt", imageToPrompt)
 	var groupAnalysisSummarizer groupanalysis.Summarizer
 	if selection := cfg.DefaultModelSelection(); selection.Provider != "" && selection.Model != "" {
 		if client := req.Models.ByProvider[selection.Provider]; client != nil {
@@ -124,12 +130,13 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 			MaxUnitsPerEntry:         cfg.ResidentMemory.NormalMaxUnitsPerEntryValue(),
 			BlockInstructionPatterns: cfg.ResidentMemory.IsNormalBlockInstructionPatterns(),
 		},
-		CharacterEnabled: cfg.CharacterLibrary.IsEnabled(),
-		CharacterRoot:    cfg.CharacterLibrary.Root,
-		ImageGeneration:  cfg.ImageGeneration,
-		PromptRewriter:   imageRewriter,
-		ProcessEnv:       credentialEnv,
-		ChildProcessEnv:  shellProcessEnv,
+		CharacterEnabled:   cfg.CharacterLibrary.IsEnabled(),
+		CharacterRoot:      cfg.CharacterLibrary.Root,
+		ImageGeneration:    cfg.ImageGeneration,
+		PromptRewriter:     imageRewriter,
+		ImagePromptService: imageToPrompt,
+		ProcessEnv:         credentialEnv,
+		ChildProcessEnv:    shellProcessEnv,
 	})
 	if err != nil {
 		return nil, err
@@ -217,7 +224,7 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	hookService := buildHookService(foundation, req.Platforms, toolRuntime, cronService, hooks, hookRuntime, hookProcessEnv, notifyHookIssue, sendNotice)
 	req.Profiler.Mark("hook register")
 
-	agt, err = buildAgent(foundation, req.Models, req.Platforms, toolRuntime, securityPolicy, hooks, hookRuntime, hookService)
+	agt, err = buildAgent(ctx, foundation, req.Models, req.Platforms, toolRuntime, securityPolicy, hooks, hookRuntime, hookService, visionMetrics)
 	if err != nil {
 		if closeErr := hookRuntime.Close(context.Background()); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("cleanup hook runtime after agent build: %w", closeErr))
@@ -249,6 +256,7 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 		CronService:  cronService,
 		ElvenaBus:    elvenaBus,
 		ImageLimiter: toolRuntime.ImageLimiter,
+		VisionStats:  visionMetrics.snapshot,
 		Lifecycle:    hookRuntimeLifecycle{runtime: hookRuntime},
 	}, nil
 }
@@ -372,6 +380,7 @@ func buildHookService(
 }
 
 func buildAgent(
+	ctx context.Context,
 	foundation *FoundationComponents,
 	models ModelClients,
 	platforms PlatformComponents,
@@ -380,6 +389,7 @@ func buildAgent(
 	hooks *hook.DefaultManager,
 	hookRuntime *hookruntime.Manager,
 	hookService *hookcontrol.Service,
+	visionMetrics *visionMetricsState,
 ) (*agent.Agent, error) {
 	cfg := foundation.Config
 	modelProfiles := map[string]config.ModelSelection{}
@@ -425,6 +435,13 @@ func buildAgent(
 			}
 		}
 	}
+	visionDescriber, err := buildVisionDescriber(ctx, cfg, models, visionMetrics.countersValue())
+	if err != nil {
+		return nil, err
+	}
+	if describer, ok := visionDescriber.(visionChatDescriber); ok {
+		visionMetrics.set("fallback", describer.service)
+	}
 	agt, err := agent.NewWithOptions(agent.Options{
 		Platform:              platforms.Primary,
 		Clients:               models.ByProvider,
@@ -434,6 +451,7 @@ func buildAgent(
 		ContextOverflow:       cfg.ContextOverflow,
 		Store:                 foundation.Store,
 		Media:                 toolRuntime.FileManager.Media,
+		VisionDescriber:       visionDescriber,
 		CommandPrefixes:       cfg.Commands.Prefixes,
 		SessionConfig:         session.Config{NamingConfig: session.NamingConfig{TriggerStep: cfg.Session.Naming.TriggerStep}, DefaultMode: cfg.Session.DefaultMode},
 		NamingSelection:       cfg.NamingModel,

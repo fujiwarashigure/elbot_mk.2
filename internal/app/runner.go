@@ -131,7 +131,7 @@ func (r *Runner) Run(ctx context.Context, opts Options) (runErr error) {
 
 	tasksProvider.Set(func() any { return runtime.Agent.ActiveRequests() })
 	metricsProvider.Set(func() any {
-		return collectOpsMetrics(foundation.Config, healthState, runtime.Agent, runtime.ImageLimiter)
+		return collectOpsMetrics(foundation.Config, healthState, runtime.Agent, runtime.ImageLimiter, runtime.VisionStats)
 	})
 	diagnosticsProvider.Set(func() any { return collectOpsDiagnostics(healthState, runtime.Agent) })
 	memoryAdminProvider.Set(func(w http.ResponseWriter, r *http.Request) {

@@ -170,10 +170,23 @@ func TestLLMInterruptKeepsAppendConfirmationUntilConfirm(t *testing.T) {
 	if err := a.HandleMessage(ctx, "同时计算2+2"); err != nil {
 		t.Fatalf("append pending: %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
-	if got := f.requestCount(); got != 1 {
-		t.Fatalf("request count after pending append = %d, want 1", got)
+	// A pending append must only be queued, never turned into a model call.
+	// Assert the queue state itself (synchronous and therefore deterministic)
+	// and then give any *chat* request a bounded chance to appear. Session
+	// naming runs in a background goroutine and can add unrelated, title-only
+	// requests at any moment, so requestCount() is not a stable signal here;
+	// chatRequests() excludes those and keeps the check meaningful.
+	session, err := a.sessions.Current(ctx, a.scope(ctx))
+	if err != nil {
+		t.Fatalf("current session: %v", err)
 	}
+	snap := a.turns.Snapshot(session.ID)
+	// "stop" interrupts the turn and is itself queued as the first pending
+	// message, so the new message must land behind it instead of replacing it.
+	if snap.Phase != turn.PhaseAwaitAppendConfirm || snap.PendingCount != 2 {
+		t.Fatalf("turn state after pending append = {phase:%s pending:%d}, want {phase:%s pending:2}", snap.Phase, snap.PendingCount, turn.PhaseAwaitAppendConfirm)
+	}
+	waitNoExtraChatRequest(t, f, 1, 200*time.Millisecond)
 
 	if err := a.HandleMessage(ctx, "再计算3+3"); err != nil {
 		t.Fatalf("append pending 2: %v", err)

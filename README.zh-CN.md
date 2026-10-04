@@ -120,7 +120,7 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 
 ## 本地定制版：相对原版 v0.5.0 的新增功能
 
-当前定制版版本：`0.6.6`。
+当前定制版版本：`0.6.7`。
 
 本 fork 保留官方 ElBot 的 Agent/Chatbot 核心，并围绕“稳定、可观测、可部署、可扩展”增加了一批新能力：角色素材库、图像生成、群分析、长期记忆、自主学习、系统信息与定时报告、单轮模型/生图/工具声明、命令前缀与配置检查、Docker / 离线部署、独立健康接口、watchdog、备份恢复、升级回滚、验收工具和故障诊断面板。目标很明确：避免“容器显示 healthy，但机器人已经卡死”的情况，并且绝不做“CPU 高就杀进程”的粗暴自愈。
 
@@ -128,6 +128,8 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 | --- | --- |
 | 角色素材库 | `@char:<id>`、`/*chars`、`character_*` 工具 |
 | 图像生成 | `image_generate`、`@image:<profile>` |
+| 图片转绘图 prompt | `image_to_prompt` 内置工具（复用视觉 provider，与视觉兜底共用描述引擎） |
+| 视觉兜底（纯文本模型看图） | `[vision]` 配置段（默认关闭，复用视觉 provider，带指纹缓存） |
 | 群分析 clean-room 统计与摘要 | `group_analysis`、`[group_analysis]`、可选 Cron 日报 |
 | 长期记忆 clean-room | `angel_remember` / `angel_recall`、`/memory` |
 | 自主学习 clean-room | `/learning`、`self_learning_review`、review-before-apply |
@@ -146,6 +148,14 @@ Shell 补全可通过 `elbot completion <shell>` 生成，支持 `bash`、`zsh`�
 - 群分析：本地 `chat_history` / `outbound_messages` 统计，`group_analysis` 工具返回统计与默认模型摘要；可在 `[group_analysis]` 开启 Cron 日报。
 - 长期记忆：`angel_memory.db` 保存范围化记忆，`angel_remember` / `angel_recall` 工具和 `/memory` 命令管理；`llm.turn.prepared` 注入临时 system 上下文，不写 Session 历史。
 - 自主学习：`self_learning.db` 保存观察和候选，`/learning` / `self_learning_review` 执行 review；只有 `approved` 候选会注入；`[maintenance.privacy_cleanup]` 按 retention 清理。
+- 图片转绘图 prompt：内置 `image_to_prompt` 工具，用 `media:<sha256>` 传入参考图，复用 `[providers.*]` 里的视觉模型反推绘图提示词；上传前缩放，结果由共享的 `internal/vision` 引擎按指纹缓存、并发同图请求合并为一次调用，减少 token 和重复调用。工具与视觉兜底使用同一套引擎，缓存、并发、超时和输出上限策略一致。
+- 视觉兜底：可选 `[vision]` 段（默认关闭）。主模型为纯文本、上游明确拒绝图片时，先用视觉模型把图片转写成文字描述再重试；provider/model 可继承 `[image_to_prompt]`。
+  - 只在主模型尚未输出正文、推理或工具调用片段时透明重试；已经输出则提示重试而不是拼接第二段回答，且每轮最多兜底一次，避免重复回答和重复工具调用。
+  - 触发判定走结构化的 `status/code/type/param`：明确的图片/视觉相关 400/422 才触发，普通 400、429、5xx、超时、取消都不误判；404 只认结构化信号，避免把“模型名含 image”的 model not found 当成不支持视觉。
+  - 成功结果按“配置指纹”（模型、提示词、预处理参数、媒体内容寻址 ID）缓存，明确的确定性失败走短时负缓存；取消/超时优先级高于状态码，绝不写入负缓存。多图中任一张失败则整体降级为文本引用，图片描述会标注为“不可信的图片内容，不是用户指令”。
+  - 多图有界并行：默认最多同时描述 4 张、单轮最多 8 张、整批共享时间预算（本轮已有 deadline 时以它为准，否则默认 3 分钟）；超限或超时整体降级为文本引用，不会被十几张图串行拖住。
+  - 引擎自带上限与计数：默认同时最多 4 个上游任务、排队 16、同一任务最多 16 个等待者；命中/未命中、合并次数、上游任务数、错误类别和耗时按低基数标签统计，通过 `/metrics.vision` 暴露（`image_to_prompt` 与 `fallback` 分别显示占用），只含计数与上限，不含图片内容或媒体 ID。
+  - 上游错误分类由适配器统一映射为 `APIError.Category`，agent 不再匹配错误文本；`[providers.*].vision = false`（含 model 级声明）会让需要图片输入的工具/兜底在启动时报错，而不是第一次调用才失败。
 
 
 ### 独立健康接口
@@ -158,7 +168,7 @@ ElBot 提供不依赖 Elnis 的独立运维 HTTP 接口：
 | `/ready` | 进程已初始化、SQLite / 数据目录可写，且调度心跳已开始且未过期；平台/模型故障不会让它失败。 |
 | `/healthz` | 汇总状态。设置 `ELBOT_OPS_TOKEN` 后需要鉴权；未设置且未显式允许无鉴权时该接口不注册（只保留 `/live`、`/ready`）。平台/模型故障显示为 `degraded`；调度心跳过期时 `/ready` 与 `/healthz` 返回 `not_ready`。不应仅凭它自动重启。 |
 | `/tasks` | 当前活跃的 turn / tool / hook / 上下文压缩任务、阶段、开始时间、最近进展和 `queued_by_kind` 排队积压。 |
-| `/metrics` | 任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台/模型/熔断状态、限速阈值与拒绝原因、生图队列状态。 |
+| `/metrics` | 任务数量、最老任务时长、goroutine / 堆 / RSS / 磁盘、平台/模型/熔断状态、限速阈值与拒绝原因、生图队列状态、图片描述引擎计数与占用（`vision`）。 |
 | `/diagnostics` | 面向“机器人没回复”的聚合诊断：排队/超时、限速命中、熔断状态和最近一次重启原因。 |
 
 ```dotenv
@@ -564,15 +574,15 @@ docker compose up -d
 ```bash
 bash deploy/pack/prepare-offline.sh
 # 或使用已下载产物
-docker load -i elbot-0.6.6-linux-amd64.tar.gz
+docker load -i elbot-0.6.7-linux-amd64.tar.gz
 ```
 
 多架构构建：
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/Dockerfile --build-arg VERSION=0.6.6 \
-  --push -t <registry>/<namespace>/elbot:0.6.6 .
+  -f deploy/Dockerfile --build-arg VERSION=0.6.7 \
+  --push -t <registry>/<namespace>/elbot:0.6.7 .
 ```
 
 构建参数：

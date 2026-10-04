@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -153,20 +155,12 @@ func (a *Adapter) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan l
 		body["tools"] = toOpenAITools(req.Tools)
 	}
 
-	// Merge provider-level extra payload.
-	for k, v := range a.extraPayload {
-		body[k] = v
-	}
-
-	// Merge model-level extra payload.
-	for k, v := range a.modelExtraPayloads[req.Model] {
-		body[k] = v
-	}
-
-	// Merge request-level extra body (highest priority).
-	for k, v := range req.ExtraBody {
-		body[k] = v
-	}
+	// Merge provider-, model- and request-level extra payloads (later wins).
+	// Reserved protocol fields are never replaced: see reservedRequestFields.
+	dropped := mergeExtraFields(body, a.extraPayload)
+	dropped = append(dropped, mergeExtraFields(body, a.modelExtraPayloads[req.Model])...)
+	dropped = append(dropped, mergeExtraFields(body, req.ExtraBody)...)
+	a.logDroppedExtraFields(dropped)
 
 	bodyBytes, err := marshalJSONNoEscape(body)
 	if err != nil {
@@ -275,6 +269,55 @@ func retryableStatusError(resp *http.Response) error {
 		return err
 	}
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
+}
+
+// reservedRequestFields are the JSON fields owned by the adapter. ElBot always
+// streams and the envelope must describe the messages and model the caller
+// actually sent, so an extra payload may add provider-specific parameters but
+// never replace these. Applying them silently would let a hook turn streaming
+// off (the reader would then wait for an SSE body that never arrives) or swap
+// the model/messages behind the caller's back.
+var reservedRequestFields = map[string]struct{}{
+	"model":          {},
+	"messages":       {},
+	"stream":         {},
+	"stream_options": {},
+}
+
+// mergeExtraFields copies extras into the request body and returns the reserved
+// keys it refused to apply.
+func mergeExtraFields(body, extra map[string]any) []string {
+	if len(extra) == 0 {
+		return nil
+	}
+	var dropped []string
+	for key, value := range extra {
+		if _, reserved := reservedRequestFields[strings.ToLower(strings.TrimSpace(key))]; reserved {
+			dropped = append(dropped, key)
+			continue
+		}
+		body[key] = value
+	}
+	return dropped
+}
+
+// logDroppedExtraFields records ignored reserved keys once per request. It logs
+// only field names, never values.
+func (a *Adapter) logDroppedExtraFields(fields []string) {
+	if a.logger == nil || len(fields) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(fields))
+	unique := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		unique = append(unique, field)
+	}
+	sort.Strings(unique)
+	a.logger.Warn("openai extra payload tried to override reserved request fields; ignored", "fields", strings.Join(unique, ","))
 }
 
 func (a *Adapter) logChatRequest(req llm.ChatRequest, bodyBytes []byte) {
@@ -718,6 +761,11 @@ type openAIError struct {
 	Error struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
+		// Code and Param are untyped on purpose: OpenAI-compatible gateways are
+		// inconsistent and send strings, numbers or null. stringifyErrorField
+		// normalizes them for classification.
+		Code  any `json:"code"`
+		Param any `json:"param"`
 	} `json:"error"`
 }
 
@@ -1051,18 +1099,159 @@ func jsonInt(value any) int {
 
 // --- error handling ---
 
+// parseError converts an upstream failure response into a structured
+// *llm.APIError. The message is always a safe summary; raw bodies are never
+// attached wholesale because they can echo request content or credentials.
 func parseError(resp *http.Response) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, streamPrefixBytes+1))
 	if err != nil {
-		return fmt.Errorf("HTTP %d (failed to read body: %w)", resp.StatusCode, err)
+		return &llm.APIError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("failed to read body: %v", err),
+			Cause:      err,
+		}
 	}
 
 	var apiErr openAIError
 	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Error.Message != "" {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, responseSummary([]byte(apiErr.Error.Message)))
+		code := stringifyErrorField(apiErr.Error.Code)
+		typeName := strings.TrimSpace(apiErr.Error.Type)
+		param := stringifyErrorField(apiErr.Error.Param)
+		return &llm.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       code,
+			Type:       typeName,
+			Param:      param,
+			Message:    responseSummary([]byte(apiErr.Error.Message)),
+			Category:   classifyAPIError(resp.StatusCode, code, typeName, param, apiErr.Error.Message),
+		}
 	}
 	if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") || looksLikeHTML(body) {
-		return fmt.Errorf("HTTP %d: 上游返回 HTML 而不是 API 响应，请检查 API Base URL、代理或网关", resp.StatusCode)
+		return &llm.APIError{
+			StatusCode: resp.StatusCode,
+			Message:    "上游返回 HTML 而不是 API 响应，请检查 API Base URL、代理或网关",
+			Category:   classifyAPIError(resp.StatusCode, "", "", "", ""),
+		}
 	}
-	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, responseSummary(body))
+	summary := responseSummary(body)
+	return &llm.APIError{
+		StatusCode: resp.StatusCode,
+		Message:    summary,
+		// Gateways that return a bare text body (no JSON envelope) still carry
+		// their dialect in the text, so the mapping gets the summary too.
+		Category: classifyAPIError(resp.StatusCode, "", "", "", summary),
+	}
+}
+
+// visionUnsupportedNeedles are the tested OpenAI-compatible phrases that mean
+// the upstream rejected the image content part, as opposed to a generic request
+// error. Deliberately narrow: a bare "unsupported" must not strip images and
+// retry, because gateways also use it for unrelated parameter problems.
+var visionUnsupportedNeedles = []string{
+	"image",
+	"vision",
+	"multimodal",
+	"content part",
+	"content type",
+	"unexpected item type in content",
+}
+
+// visionUnsupportedImageParams are the fields an upstream names when it rejects
+// an image-bearing message. An unrelated parameter (temperature, tools,
+// max_tokens) vetoes the retry, so a generic hint in the text cannot make a
+// temperature error strip the images.
+var visionUnsupportedImageParams = []string{
+	"image",
+	"images",
+	"messages",
+	"content",
+	"vision",
+	"multimodal",
+	"media",
+	"input",
+}
+
+// classifyAPIError derives the adapter-controlled APIError.Category from the
+// HTTP status plus the machine-readable code/type/param fields.
+//
+// Message is consulted for one case only: the vision/modality rejection, which
+// several OpenAI-compatible gateways report exclusively in prose. That dialect
+// knowledge lives here, next to the response parsing, so no other layer has to
+// pattern-match provider text.
+func classifyAPIError(status int, code, typeName, param, message string) string {
+	code = strings.ToLower(strings.TrimSpace(code))
+	typeName = strings.ToLower(strings.TrimSpace(typeName))
+	param = strings.ToLower(strings.TrimSpace(param))
+	message = strings.ToLower(message)
+
+	if isVisionUnsupported(status, code, typeName, param, message) {
+		return llm.ErrorCategoryVisionUnsupported
+	}
+	switch {
+	case status == http.StatusNotFound || llm.IsModelNotFoundCode(code):
+		return llm.ErrorCategoryModelNotFound
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return llm.ErrorCategoryAuth
+	case status == http.StatusTooManyRequests:
+		return llm.ErrorCategoryRateLimit
+	case status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout:
+		return llm.ErrorCategoryTimeout
+	case status >= 500:
+		return llm.ErrorCategoryServer
+	case status == http.StatusBadRequest || status == http.StatusUnprocessableEntity:
+		// Only an explicit attributing signal makes a 400/422 a request-field
+		// failure; a bare 400 stays unclassified because gateways also use it
+		// for transient upstream problems.
+		if (typeName == "invalid_request_error" && param != "") || llm.IsInvalidParameterCode(code) {
+			return llm.ErrorCategoryInvalidRequest
+		}
+	}
+	return ""
+}
+
+func isVisionUnsupported(status int, code, typeName, param, message string) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity && status != http.StatusNotFound {
+		return false
+	}
+	if param != "" && !containsAnyNeedle(param, visionUnsupportedImageParams) {
+		// The upstream named a different field, so the image part is not the
+		// problem no matter what the prose says.
+		return false
+	}
+	structured := containsAnyNeedle(strings.Join([]string{code, typeName, param}, " "), visionUnsupportedNeedles)
+	if status == http.StatusNotFound {
+		// A 404 is usually "model/endpoint not found", and the model name itself
+		// can contain "image", so only structured evidence counts here.
+		return structured
+	}
+	return structured || containsAnyNeedle(message, visionUnsupportedNeedles)
+}
+
+func containsAnyNeedle(text string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// stringifyErrorField normalizes an untyped upstream error field (string,
+// number, bool, null) into a trimmed string for classification.
+func stringifyErrorField(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
 }

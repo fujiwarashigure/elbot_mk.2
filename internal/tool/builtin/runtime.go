@@ -59,6 +59,7 @@ type RuntimeOptions struct {
 	CharacterRoot           string
 	ImageGeneration         config.ImageGenerationConfig
 	PromptRewriter          ImagePromptRewriter
+	ImagePromptService      ImagePromptService
 	ProcessEnv              processenv.Environment
 	ChildProcessEnv         processenv.Environment
 }
@@ -178,6 +179,7 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 		DefaultImageProfile:      imageDefaultProfile,
 		ImageLimiter:             imageLimiter,
 		PromptRewriter:           opts.PromptRewriter,
+		ImagePromptService:       opts.ImagePromptService,
 		SkillManager:             skillManager,
 		CronService:              opts.CronService,
 		ChatHistory:              opts.ChatHistory,

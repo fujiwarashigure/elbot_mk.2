@@ -82,6 +82,13 @@ func TestResolvePathGeneratesPlatformDefaultsWhenNoConfigExists(t *testing.T) {
 	if !strings.Contains(string(envExampleData), "JINA_API_KEY=") {
 		t.Fatalf("generated .env.example is missing JINA_API_KEY: %q", string(envExampleData))
 	}
+	servicesData, err := os.ReadFile(filepath.Join(filepath.Dir(want), "services.toml"))
+	if err != nil {
+		t.Fatalf("read generated services.toml: %v", err)
+	}
+	if !strings.Contains(string(servicesData), "# [image_to_prompt]") {
+		t.Fatalf("generated services.toml is missing the image_to_prompt example: %q", string(servicesData))
+	}
 	hookEnvData, err := os.ReadFile(filepath.Join(filepath.Dir(want), "plugins", ".env"))
 	if err != nil {
 		t.Fatalf("read generated plugins/.env: %v", err)
@@ -490,6 +497,11 @@ model = "central-image"
 [image_generation.profiles.hq]
 model = "central-image-hq"
 quality = "high"
+
+[image_to_prompt]
+provider = "central"
+model = "central-vision"
+max_tokens = 256
 `)
 	writeFile(t, statePath, `
 [mode_models.work]
@@ -529,6 +541,44 @@ model = "central-fast"
 	}
 	if profile := cfg.ImageGeneration.Profiles["hq"]; profile.Model != "central-image-hq" || profile.Quality != "high" {
 		t.Fatalf("image profile = %#v", profile)
+	}
+	if !cfg.ImageToPrompt.IsEnabled() || cfg.ImageToPrompt.Provider != "central" || cfg.ImageToPrompt.Model != "central-vision" {
+		t.Fatalf("image_to_prompt = %#v", cfg.ImageToPrompt)
+	}
+	if cfg.ImageToPrompt.MaxTokens != 256 || cfg.ImageToPrompt.MaxEdge != 1536 || cfg.ImageToPrompt.TemperatureValue() != 0.2 {
+		t.Fatalf("image_to_prompt defaults = %#v", cfg.ImageToPrompt)
+	}
+}
+
+func TestImageToPromptConfigDefaultsAndEnabled(t *testing.T) {
+	cfg := Default()
+	if cfg.ImageToPrompt.MaxTokens != 400 || cfg.ImageToPrompt.TemperatureValue() != 0.2 || cfg.ImageToPrompt.MaxEdge != 1536 || cfg.ImageToPrompt.MaxImageBytes != 12*1024*1024 {
+		t.Fatalf("defaults = %#v", cfg.ImageToPrompt)
+	}
+	if cfg.ImageToPrompt.IsEnabled() {
+		t.Fatal("image_to_prompt should stay disabled without provider/model")
+	}
+	cfg.ImageToPrompt.Provider = "openai"
+	cfg.ImageToPrompt.Model = "gpt-4o-mini"
+	if !cfg.ImageToPrompt.IsEnabled() {
+		t.Fatal("provider+model should enable image_to_prompt")
+	}
+	disabled := false
+	cfg.ImageToPrompt.Enabled = &disabled
+	if cfg.ImageToPrompt.IsEnabled() {
+		t.Fatal("enabled=false should disable image_to_prompt")
+	}
+}
+
+func TestImageToPromptExplicitValuesSurviveDefaults(t *testing.T) {
+	zeroTemperature := 0.0
+	cfg := Config{ImageToPrompt: ImageToPromptConfig{Temperature: &zeroTemperature}}
+	cfg.applyAppDefaults()
+	if cfg.ImageToPrompt.Temperature == nil || *cfg.ImageToPrompt.Temperature != 0 {
+		t.Fatalf("explicit zero temperature was overwritten: %#v", cfg.ImageToPrompt.Temperature)
+	}
+	if got := cfg.ImageToPrompt.TemperatureValue(); got != 0 {
+		t.Fatalf("TemperatureValue = %v, want 0", got)
 	}
 }
 

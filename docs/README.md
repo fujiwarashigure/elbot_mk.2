@@ -10,12 +10,14 @@
 4. [核心概念](concepts.md)：理解 Chat / Work 模式、工具发现、Session、Hook、Cron、Skill 和安全策略。
 5. [角色素材库](character-library.md)：用文件夹管理角色文本与图片，支持索引检索和 `@char:<id>` 临时启用。
 6. [生图服务](image-generation.md)：对接中转站 GPT Image 2.5，自动拼接预设提示词并出图。
-7. [定时报告](reports.md)：每天两次推送生图量、Token、费用、磁盘和内存。
-8. [Hook](hooks.md)：规则 Hook 配置、action 类型、segments 多段输出、exec 脚本和表情提取示例。
-9. [Elnis 监听枢纽](elnis.md)：了解 Elnis、Elwisp、Elvena 和外部事件接入。
-10. [Elnis 配置与使用](elnis-usage.md)：启用 Elnis、配置 Elwisp，并用 Elvena 投递事件。
-11. [前端 API](frontend-api.md)：WebSocket 协议、消息类型和补全接口，用于编写自定义前端。
-12. [部署与运维](../deploy/README.md)：云服务器 / Linux 容器部署、健康接口、watchdog、备份恢复、升级回滚，以及 [Windows 本地容器部署](../deploy/windows/README.md)。
+7. [图片反推提示词](configuration.md#图片反推提示词-image_to_prompt)：用 `image_to_prompt` 内置工具把参考图交给视觉模型，反推绘图提示词。
+8. [视觉兜底 vision](configuration.md#视觉兜底-vision)：纯文本主模型拒绝图片时，先用视觉模型把图片转写成描述再重试。
+8. [定时报告](reports.md)：每天两次推送生图量、Token、费用、磁盘和内存。
+9. [Hook](hooks.md)：规则 Hook 配置、action 类型、segments 多段输出、exec 脚本和表情提取示例。
+10. [Elnis 监听枢纽](elnis.md)：了解 Elnis、Elwisp、Elvena 和外部事件接入。
+11. [Elnis 配置与使用](elnis-usage.md)：启用 Elnis、配置 Elwisp，并用 Elvena 投递事件。
+12. [前端 API](frontend-api.md)：WebSocket 协议、消息类型和补全接口，用于编写自定义前端。
+13. [部署与运维](../deploy/README.md)：云服务器 / Linux 容器部署、健康接口、watchdog、备份恢复、升级回滚，以及 [Windows 本地容器部署](../deploy/windows/README.md)。
 
 ## 文档维护约定
 

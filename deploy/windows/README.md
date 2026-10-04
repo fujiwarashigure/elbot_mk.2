@@ -119,7 +119,7 @@ deploy/
 ├── backups/             # backup.sh 默认备份目录
 ├── portainer/           # 可选：Portainer 浏览器 Docker 管理界面
 │   └── portainer-compose.yml  # 仅绑定 127.0.0.1:9443，本地 / 云共用
-├── VERSION              # 版本号单点来源，当前 0.6.6
+├── VERSION              # 版本号单点来源，当前 0.6.7
 └── ...
 ```
 
@@ -186,7 +186,7 @@ docker compose --env-file deploy\.env -f deploy\docker-compose.yml up -d --build
 
 脚本会：
 
-- 使用 `deploy/VERSION` 作为镜像版本（当前 `0.6.6`）；
+- 使用 `deploy/VERSION` 作为镜像版本（当前 `0.6.7`）；
 - 后台启动 `elbot` 容器；
 - 等待 `/ready`；
 - 打印容器状态与 `/live`、`/ready`、`/healthz`。

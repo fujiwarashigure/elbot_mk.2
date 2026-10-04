@@ -2,6 +2,7 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -9,6 +10,7 @@ import (
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
+	"net/http"
 	"path/filepath"
 	"strings"
 
@@ -24,6 +26,13 @@ func imageDimensions(data []byte) (int, int, error) {
 }
 
 func compressImage(data []byte, maxBytes int64, maxLength int) ([]byte, error) {
+	return compressImageContext(context.Background(), data, maxBytes, maxLength)
+}
+
+// compressImageContext is compressImage with cooperative cancellation: the
+// quality/shrink loops check ctx between rounds so a deadline can stop a very
+// slow optimisation instead of only being noticed after it returns.
+func compressImageContext(ctx context.Context, data []byte, maxBytes int64, maxLength int) ([]byte, error) {
 	if maxBytes <= 1 || maxLength <= 1 {
 		return nil, fmt.Errorf("image compression limits are too small")
 	}
@@ -41,8 +50,14 @@ func compressImage(data []byte, maxBytes int64, maxLength int) ([]byte, error) {
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		candidate := resizeImage(source, width, height)
 		for quality := 92; quality >= 35; quality -= 5 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			encoded, err := encodeJPEG(candidate, quality)
 			if err != nil {
 				return nil, err
@@ -151,4 +166,161 @@ func compressedName(name string) string {
 		return name + ".jpg"
 	}
 	return strings.TrimSuffix(name, ext) + ".jpg"
+}
+
+const (
+	// visionImageHardLimit caps how much image data PrepareVisionImage will look at.
+	visionImageHardLimit = 64 * 1024 * 1024
+	// visionImageDefaultByteBudget bounds the re-encoded payload when the caller
+	// does not set max_image_bytes. It is deliberately generous because the edge
+	// limit, not the byte limit, is what normally drives this downscale.
+	visionImageDefaultByteBudget = 12 * 1024 * 1024
+	// visionImageMaxInputEdge / visionImageMaxInputPixels bound what we are
+	// willing to decode. max_edge and max_image_bytes only constrain the result,
+	// but a small file can still declare an enormous canvas, so the original
+	// picture is checked before any full decode.
+	visionImageMaxInputEdge   = 20000
+	visionImageMaxInputPixels = 24000000
+	// visionImageMaxConcurrentDecodes bounds how many tool calls may hold a
+	// decoded bitmap at once, so a burst of large references cannot pin the
+	// whole process.
+	visionImageMaxConcurrentDecodes = 2
+)
+
+var visionImageDecodeSlots = make(chan struct{}, visionImageMaxConcurrentDecodes)
+
+// VisionImageInputLimit is the largest stored object image_to_prompt will
+// materialise. It is exported so callers that read the image themselves can use
+// Manager.ReadLimited and reject an oversized object before loading it.
+const VisionImageInputLimit = visionImageHardLimit
+
+// PrepareVisionImage is PrepareVisionImageContext with context.Background().
+func PrepareVisionImage(data []byte, mimeType string, maxEdge int, maxBytes int64) ([]byte, string, error) {
+	return PrepareVisionImageContext(context.Background(), data, mimeType, maxEdge, maxBytes)
+}
+
+// PrepareVisionImageContext returns image bytes ready to upload to a vision model.
+//
+// On success, for a format the local decoders understand, the returned payload
+// satisfies both limits and mimeType matches the actual encoding:
+//
+//   - long edge <= maxEdge (when maxEdge > 0)
+//   - byte length <= maxBytes (when maxBytes > 0, else the default budget)
+//
+// A payload the local decoders do not recognise cannot be measured or shrunk,
+// so it is passed through only while it already fits the byte budget. For those
+// formats only the byte budget is guaranteed; the canvas size is left to the
+// upstream service. An oversized opaque blob is rejected locally instead of
+// being uploaded.
+//
+// When the input already fits it is returned untouched, keeping its original
+// format. Otherwise it is downscaled and re-encoded as JPEG; transparent pixels
+// are composited on white and animated GIFs are reduced to their first frame.
+// The work is cancellable through ctx and serialised so only a bounded number
+// of bitmaps are decoded at once.
+func PrepareVisionImageContext(ctx context.Context, data []byte, mimeType string, maxEdge int, maxBytes int64) ([]byte, string, error) {
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("image is empty")
+	}
+	if int64(len(data)) > visionImageHardLimit {
+		return nil, "", fmt.Errorf("image is %d bytes, exceeds the %d byte decode limit", len(data), visionImageHardLimit)
+	}
+	mimeType = visionImageMIMEType(data, mimeType)
+	width, height, err := imageDimensions(data)
+	if err != nil {
+		if maxBytes > 0 && int64(len(data)) > maxBytes {
+			return nil, "", fmt.Errorf("image format is not supported for local processing and the payload is %d bytes, over the %d byte limit", len(data), maxBytes)
+		}
+		return data, mimeType, nil
+	}
+	if width <= 0 || height <= 0 {
+		return nil, "", fmt.Errorf("image declares invalid dimensions %dx%d", width, height)
+	}
+	if width > visionImageMaxInputEdge || height > visionImageMaxInputEdge {
+		return nil, "", fmt.Errorf("image edge %dx%d exceeds the %d px decode limit", width, height, visionImageMaxInputEdge)
+	}
+	// int64 math also keeps the product from overflowing on 32-bit builds.
+	if pixels := int64(width) * int64(height); pixels > visionImageMaxInputPixels {
+		return nil, "", fmt.Errorf("image is %dx%d (%d pixels), over the %d pixel decode limit", width, height, pixels, visionImageMaxInputPixels)
+	}
+	longEdge := max(width, height)
+	overEdge := maxEdge > 0 && longEdge > maxEdge
+	overBytes := maxBytes > 0 && int64(len(data)) > maxBytes
+	if !overEdge && !overBytes {
+		return data, mimeType, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	limit := maxEdge
+	if limit <= 0 {
+		limit = longEdge
+	}
+	bytesLimit := maxBytes
+	if bytesLimit <= 0 {
+		bytesLimit = visionImageDefaultByteBudget
+	}
+	encoded, err := compressVisionImage(ctx, data, bytesLimit, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := verifyVisionImage(encoded, maxEdge, bytesLimit); err != nil {
+		return nil, "", err
+	}
+	return encoded, "image/jpeg", nil
+}
+
+// visionImageMIMEType prefers what the bytes actually are over a declared type
+// the content contradicts, so an extension or stale metadata cannot pair JPEG
+// bytes with image/png in the upload. Non-image detections fall back to the
+// declared type.
+func visionImageMIMEType(data []byte, declared string) string {
+	declared = strings.TrimSpace(declared)
+	if index := strings.IndexByte(declared, ';'); index >= 0 {
+		declared = strings.TrimSpace(declared[:index])
+	}
+	detected := http.DetectContentType(data)
+	if index := strings.IndexByte(detected, ';'); index >= 0 {
+		detected = strings.TrimSpace(detected[:index])
+	}
+	if strings.HasPrefix(detected, "image/") && !strings.EqualFold(detected, declared) {
+		return detected
+	}
+	if declared != "" {
+		return declared
+	}
+	return detected
+}
+
+// compressVisionImage serialises the CPU/memory-heavy decode behind a small
+// concurrency gate that the caller can abandon through ctx. compressImage
+// itself already enforces the byte budget by lowering JPEG quality and then
+// shrinking the canvas until the output fits.
+func compressVisionImage(ctx context.Context, data []byte, maxBytes int64, maxLength int) ([]byte, error) {
+	select {
+	case visionImageDecodeSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-visionImageDecodeSlots }()
+	return compressImageContext(ctx, data, maxBytes, maxLength)
+}
+
+// verifyVisionImage re-checks the documented output contract. compressImage
+// produces it today; this guard makes a future regression fail loudly instead
+// of silently shipping an over-budget image.
+func verifyVisionImage(data []byte, maxEdge int, maxBytes int64) error {
+	width, height, err := imageDimensions(data)
+	if err != nil {
+		return fmt.Errorf("verify processed image: %w", err)
+	}
+	if maxEdge > 0 {
+		if long := max(width, height); long > maxEdge {
+			return fmt.Errorf("processed image long edge %d exceeds max_edge %d", long, maxEdge)
+		}
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return fmt.Errorf("processed image is %d bytes, over max_image_bytes %d", len(data), maxBytes)
+	}
+	return nil
 }

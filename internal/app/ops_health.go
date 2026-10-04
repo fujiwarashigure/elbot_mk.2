@@ -12,6 +12,7 @@ import (
 	"elbot/internal/health"
 	"elbot/internal/request"
 	"elbot/internal/sysinfo"
+	"elbot/internal/vision"
 )
 
 type lazyJSONProvider struct {
@@ -107,6 +108,105 @@ type imageLimitMetrics struct {
 	Waiting int `json:"waiting"`
 }
 
+// visionRunnerStats 是 /metrics 里单个视觉角色的运行器占用。
+type visionRunnerStats struct {
+	ActiveJobs        int `json:"active_jobs"`
+	QueuedJobs        int `json:"queued_jobs"`
+	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+	MaxWaiters        int `json:"max_waiters"`
+}
+
+// visionMetrics 是 /metrics 里的图片描述引擎统计。image_to_prompt 工具与聊天
+// 视觉兜底共用同一份计数器，因此计数只上报一次；两者的限流占用分别上报。
+// 只包含计数、上限与占用，不含图片内容、媒体 ID、缓存键或凭据。
+type visionMetrics struct {
+	Cache         map[string]int64   `json:"cache,omitempty"`
+	Coalesced     int64              `json:"coalesced"`
+	Jobs          int64              `json:"jobs_started"`
+	Errors        map[string]int64   `json:"errors,omitempty"`
+	DurationsMS   map[string]int64   `json:"durations_ms,omitempty"`
+	ImageToPrompt *visionRunnerStats `json:"image_to_prompt,omitempty"`
+	Fallback      *visionRunnerStats `json:"fallback,omitempty"`
+}
+
+// visionMetricsState collects the shared counters plus the per-role runner
+// occupancy. It is written once during startup and read by the metrics handler.
+type visionMetricsState struct {
+	counters *vision.Counters
+	roles    map[string]*vision.Service
+}
+
+func newVisionMetricsState() *visionMetricsState {
+	return &visionMetricsState{counters: vision.NewCounters(), roles: map[string]*vision.Service{}}
+}
+
+// countersValue returns the shared counters, creating them on demand so the
+// callers never pass a nil Metrics.
+func (s *visionMetricsState) countersValue() *vision.Counters {
+	if s == nil {
+		return nil
+	}
+	if s.counters == nil {
+		s.counters = vision.NewCounters()
+	}
+	return s.counters
+}
+
+func (s *visionMetricsState) set(role string, service *vision.Service) {
+	if s == nil || service == nil {
+		return
+	}
+	if s.roles == nil {
+		s.roles = map[string]*vision.Service{}
+	}
+	s.roles[role] = service
+}
+
+func (s *visionMetricsState) runnerStats(role string) *visionRunnerStats {
+	service := s.roles[role]
+	if service == nil {
+		return nil
+	}
+	stats := service.Stats()
+	return &visionRunnerStats{
+		ActiveJobs:        stats.ActiveJobs,
+		QueuedJobs:        stats.QueuedJobs,
+		MaxConcurrentJobs: stats.MaxConcurrentJobs,
+		MaxWaiters:        stats.MaxWaiters,
+	}
+}
+
+// snapshot renders the /metrics payload. It returns nil when no vision role is
+// configured, so an unused feature does not add noise to the endpoint.
+func (s *visionMetricsState) snapshot() *visionMetrics {
+	if s == nil {
+		return nil
+	}
+	imageToPrompt := s.runnerStats("image_to_prompt")
+	fallback := s.runnerStats("fallback")
+	if imageToPrompt == nil && fallback == nil {
+		return nil
+	}
+	metrics := &visionMetrics{
+		ImageToPrompt: imageToPrompt,
+		Fallback:      fallback,
+	}
+	if s.counters != nil {
+		counters := s.counters.Snapshot()
+		metrics.Cache = counters.Cache
+		metrics.Coalesced = counters.Coalesced
+		metrics.Jobs = counters.Jobs
+		metrics.Errors = counters.Errors
+		if len(counters.Durations) > 0 {
+			metrics.DurationsMS = make(map[string]int64, len(counters.Durations))
+			for stage, elapsed := range counters.Durations {
+				metrics.DurationsMS[stage] = elapsed.Milliseconds()
+			}
+		}
+	}
+	return metrics
+}
+
 type opsDiagnostics struct {
 	CollectedAt       time.Time               `json:"collected_at"`
 	Health            health.Snapshot         `json:"health"`
@@ -128,6 +228,7 @@ type opsMetrics struct {
 	Models        []health.ModelStatus    `json:"models,omitempty"`
 	RateLimit     rateLimitMetrics        `json:"rate_limit"`
 	ImageLimit    imageLimitMetrics       `json:"image_limit"`
+	Vision        *visionMetrics          `json:"vision,omitempty"`
 }
 
 func collectOpsDiagnostics(state *health.State, agt *agent.Agent) any {
@@ -166,7 +267,7 @@ func collectOpsDiagnostics(state *health.State, agt *agent.Agent) any {
 	}
 }
 
-func collectOpsMetrics(cfg *config.Config, state *health.State, agt *agent.Agent, imageLimiter interface{ Stats() (int, int) }) any {
+func collectOpsMetrics(cfg *config.Config, state *health.State, agt *agent.Agent, imageLimiter interface{ Stats() (int, int) }, visionStats func() *visionMetrics) any {
 	now := time.Now()
 	root := ""
 	if cfg != nil {
@@ -209,6 +310,9 @@ func collectOpsMetrics(cfg *config.Config, state *health.State, agt *agent.Agent
 	if imageLimiter != nil {
 		active, waiting := imageLimiter.Stats()
 		metrics.ImageLimit = imageLimitMetrics{Active: active, Waiting: waiting}
+	}
+	if visionStats != nil {
+		metrics.Vision = visionStats()
 	}
 	if !healthSnapshot.StartedAt.IsZero() {
 		metrics.UptimeSeconds = int64(now.Sub(healthSnapshot.StartedAt).Seconds())

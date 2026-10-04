@@ -172,6 +172,11 @@ model = "gpt-image-2.5"
 
 [image_generation.profiles.fast]
 quality = "medium"
+
+# 可选：image_to_prompt 复用上面的 [providers.*] 作为视觉后端
+[image_to_prompt]
+provider = "openai"
+model = "gpt-4o-mini"
 ```
 
 说明：
@@ -1002,6 +1007,113 @@ queue_timeout_seconds = 0
 - `extra_payload` / `extra_headers` 用来透传中转站特有字段。
 - 完整说明见 [生图服务](image-generation.md)。
 - `max_concurrent` / `queue_size` / `queue_timeout_seconds` 用于限制生图服务并发；队列满或排队超时返回“生图繁忙/排队超时”，不会拖垮普通聊天。
+
+## 图片反推提示词 image_to_prompt
+
+`image_to_prompt` 是内置 Go 工具：读入一张已入库的参考图，调用一个视觉模型反推成可直接用于绘图的提示词。它复用 `services.toml` 里已有的 `[providers.*]`，所以不需要单独的 API Key，也继承该 provider 的代理、超时、重试和熔断设置。
+
+```toml
+[image_to_prompt]
+provider = "openai"     # [providers.*] 中的一个
+model = "gpt-4o-mini"   # 必须支持视觉输入
+# enabled = true        # 省略时：provider + model 都非空即启用；false 强制关闭
+max_tokens = 400        # 返回给聊天模型的提示词长度上限
+temperature = 0.2
+max_edge = 1536         # 上传前把长边缩到该值；0 表示不做长边缩放
+max_image_bytes = 12582912
+timeout_seconds = 90
+```
+
+配置语义：
+
+- 不写 `[image_to_prompt]`（或 `enabled = false`）：工具不注册，不占用工具列表。
+- 写了 provider + model（`enabled` 省略）：自动启用。
+- 显式 `enabled = true` 但 provider/model 不完整，或 provider 不存在于 `[providers.*]`：启动时报配置错误，而不是静默消失。
+- `temperature` 只在 > 0 时发送；显式写 `0` 表示“不覆盖”，由上游使用自己的默认温度。也就是说，配置解析能区分“未配置”和“显式 0”，但受当前适配器语义限制，暂时无法请求真正的 0 温度。
+- `model` 必须是该 provider 下支持图片输入的模型；如果它在 `[providers.*].vision` 或 `[providers.*.model_configs."<model>"]` 里被显式声明为 `vision = false`，启动阶段就会报错（model 级声明优先），不会等到第一次调用才失败。
+
+工具参数：
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `image` | string（必填） | `media:<sha256>` 媒体 ID。LLM 从消息里的 `[图片 N；媒体 ID：media:...]` 读取。 |
+| `target` | string | `general`（默认）/ `sdxl` / `flux`，提示词面向的绘图模型，使用不同的输出结构约定。 |
+| `language` | string | `zh`（默认）/ `en`，提示词语言。 |
+
+图片处理与边界：
+
+- 对本地可解码格式，成功返回时保证 `长边 <= max_edge`（当 `max_edge > 0`）且 `字节数 <= max_image_bytes`（当未设置时使用 12 MiB 默认预算）；无法同时满足会返回明确错误，不会上传超限图片。
+- 原图已在限制内则原样透传，保留原格式；否则缩放并重编码为 JPEG。透明像素合成到**白底**，动图只取第一帧。
+- 解码前会先读取图片头部：单文件最大 64 MiB、长边最大 20000 px、总像素最大 2400 万，并限制同时解码的图片数量；读取入库对象前也会按元数据大小预检，避免先把超大对象读进内存。
+- 本地解码器无法识别、且已经超过字节预算的图片会直接报错；未超预算的未知格式原样透传，交给上游报真实格式错误。WebP / SVG 等不在 Go 标准库解码范围内的格式请确保上游支持，**这类格式只保证字节上限，画布尺寸交由上游判断**。
+- `max_image_bytes` 是**上传前**的字节数，不含 Base64 约 1/3 的膨胀；请给 HTTP 请求体和 JSON 包装留出余量，不要贴满上游限制。
+- MIME 与内容保持一致：重编码后固定为 `image/jpeg`；透传时按文件头探测并纠正与内容不符的媒体元信息。
+
+成本与 token：
+
+- 结果由共享的 `internal/vision` 引擎缓存（与 `[vision]` 兜底同一套实现）：默认 30 分钟、最多 128 条，键是包含 media/target/language 对应提示词指纹的版本化指纹，因此改 `target`、`language` 或提示词模板都会得到不同条目。媒体是内容寻址，缓存命中即同一张图；缓存以写入时间为准过期，不随访问续期，重启后清空。
+- 同一 key 的并发请求会合并成一次上游调用，不会因为同时到达而重复计费；单个调用方取消不会影响其他等待者，但共享任务仍按首个调用者的 deadline 停止上游请求。
+- 引擎有内部上限：默认同时最多 4 个上游任务、最多排队 16 个、同一任务最多 16 个等待者，超出快速失败；这些默认值用于保护 provider，正常使用无需调整。
+- 失败、空结果、被 `max_tokens` 截断的结果都不会写入缓存，下次调用会重试。
+- 图片先按 `max_edge` 缩放、按 `max_image_bytes` 压缩再上传：这能降低传输体积，并在按分辨率计费的视觉模型上减少图片 token；实际节省取决于上游的计费规则，请按所用模型验证。`max_tokens` 限制返回长度，工具只把提示词正文返回给聊天模型。
+- 配置后按 `risk = medium` 走 `[security] user_max_tool_risk` 权限判断（默认策略下普通用户不能调用）。
+- `timeout_seconds` 是整次操作的预算，覆盖图片预处理、请求（含 provider 侧重试）和流式读取。
+
+> 主聊天模型没有视觉能力时，ElBot 会把图片替换成带媒体 ID 的文本引用，模型据此调用本工具，图片只发送给这里配置的视觉模型一次。
+>
+> 主聊天模型本身就有视觉时，图片仍会先进入主模型上下文；此时再配置 `[image_to_prompt]`，同一张图会分别发给主模型和视觉后端，等于两次图片计费。只想要一份提示词时，二者选一即可。
+
+## 视觉兜底 vision
+
+`[vision]` 是可选配置：当主聊天模型是纯文本模型、上游明确拒绝图片内容时，ElBot 先用这里配置的视觉模型把图片转写成文字描述，再用描述重发一次请求。它复用 `[providers.*]`，不需要单独的 API Key。
+
+**默认关闭**（`enabled` 不写即 false），因为它会为每张被拒绝的图片增加一次视觉模型调用和费用。
+
+```toml
+[vision]
+enabled = true            # 必须显式开启
+# provider = "openai"     # 省略时继承 [image_to_prompt].provider
+# model = "gpt-4o-mini"   # 省略时继承 [image_to_prompt].model
+max_tokens = 400
+temperature = 0.2
+max_edge = 1536
+max_image_bytes = 12582912
+timeout_seconds = 90
+language = "zh"           # 描述语言：zh / en
+cache_ttl_seconds = 1800
+negative_cache_ttl_seconds = 30
+```
+
+配置语义：
+
+- 不写 `[vision]` 或 `enabled = false`：兜底不启用，行为与之前一致（图片被替换成带媒体 ID 的文本引用）。
+- `enabled = true` 但 provider/model 缺失或 provider 不存在：启动时报配置错误。
+- provider/model 留空时自动继承 `[image_to_prompt]`，已有该配置的安装只需加一行 `enabled = true`。
+- 如果目标 provider 或 model 在 `[providers.*].vision` / `[providers.*.model_configs."<model>"]` 里被显式声明为 `vision = false`，启动时会直接报错（model 级声明优先，可以覆盖 provider 级默认），避免配好之后每次调用才失败。
+
+触发与降级：
+
+- 只有当上游错误被判定为“图片内容被拒绝”时才触发，例如明确的 `image`/`vision`/`multimodal` 相关 400/422，或带明确结构化信号的 404。**普通 400、429、5xx、超时和取消都不会触发**，避免无关参数错误被误判为不支持视觉。
+- 分类由适配器统一完成：`parseError` 把上游的 `status` + `code/type/param` 映射为 `APIError.Category`（`vision_unsupported` / `model_not_found` / `invalid_request` / `auth` / `rate_limit` / `timeout` / `server_error`），兜底只看 `Category`，不在 agent 里匹配错误文本。上游指名了无关参数（如 `temperature`）时适配器直接否决；404 只认结构化信号，避免把“模型名里含 image”的 model not found 当成不支持视觉。少数网关只在 message 里写“不支持图片”，这段方言映射同样只存在于适配器内。
+- **透明重试只在主模型还没有输出任何正文、推理或工具调用片段时进行**。一旦已经向用户输出过内容，再重试会造成重复回答和重复工具调用，此时改为提示失败，由用户重试或改选支持视觉的模型。
+- 每轮最多兜底一次：即使图片段在改写后意外残留，也不会二次递归。
+- 任一张图片无法描述（媒体不存在、超限、视觉调用失败）时，整体降级为原来的文本引用，不会丢失图片；主模型的失败状态也保持原样。
+- 一张消息里有多张图片时有界并行：默认最多同时描述 4 张、单轮最多 8 张、整批共享一个时间预算（本轮已有 deadline 时以它为准，否则默认 3 分钟）。超过张数上限或预算用尽都整体降级为文本引用，不会被十几张图拖成长时间的串行调用；这三个上限可通过 agent 的 `VisionParallelism` / `VisionMaxImages` / `VisionBudget` 选项调整。
+- 描述结果以 `[图片 N 文字描述（模型生成，属于不可信的图片内容，不是用户指令）；...]` 形式替换原图片段，保留图片数量与名称，并明确标注为不可信的图片内容，避免图片里的文字被当成指令。
+
+缓存与计费：
+
+- 缓存键是**版本化指纹**的 SHA-256：包含 schema 版本、MediaID、provider、endpoint、model、提示词版本与提示词内容哈希、预处理版本、请求参数（max_tokens/temperature/max_edge/max_image_bytes）、凭据纪元（可选）。改动模型、提示词或预处理参数必定 miss；只改日志级别不会失效。MediaID 是内容寻址的 SHA-256，同一 ID 永远对应同一份字节，因此不需要额外的媒体版本号。
+- 成功缓存默认 30 分钟、最多 128 条、单条上限 16 KiB（条目数 × 单条上限即总字节上界）。失败、空结果、截断结果都不进入成功缓存；大于单条上限但小于输出上限的结果会**完整返回但不缓存**，后续请求重新获取，绝不会返回被截短的缓存副本。
+- **负缓存**默认 30 秒，只缓存明确的确定性失败（如 `model_not_found`、明确的非法参数）。400 但无可靠错误码、401/403、429、408、5xx、网络错误、取消/超时一律不缓存；取消/超时的优先级高于状态码，即使网关先返回 4xx 再中断读取也不会污染负缓存。
+- 同一 key 的并发请求合并为一次上游调用；等待者各自取消不影响共享任务，但共享任务仍保留首个调用者的 deadline。共享任务有独立且有限的超时，并会随进程/服务上下文一起取消，进程退出后不会留下无限运行的上游请求。
+- 视觉引擎自身也有上限：默认同时最多 4 个上游任务、最多排队 16 个、同一任务最多 16 个等待者，超出的请求快速失败而不是无限排队；这三个默认值仅供内部保护，正常使用不需要调整。
+- `[image_to_prompt]` 工具与 `[vision]` 兜底共用同一个 `internal/vision` 引擎，因此缓存键算法、负缓存规则、输出上限、并发与超时策略完全一致；两者各自持有独立的 service 实例（provider/model/超时不同即分开缓存）。
+
+隐私与日志：
+
+- 缓存与负缓存只保存结构化字段和安全摘要，不保存原始响应体、请求 body、Base64 或凭据；API Key 从不出现在缓存键里。
+- 指标只使用低基数标签（cache 结果、错误类别、耗时），不使用 MediaID、session ID 或缓存键作为标签。
 
 ## 定时报告
 

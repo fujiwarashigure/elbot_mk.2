@@ -5,7 +5,7 @@
 #   在解压后的 offline-<arch>/ 目录内执行：
 #     bash deploy.sh                 # 推荐：用预编译二进制 + Debian 运行时构建（功能完整）
 #     bash deploy.sh --load          # 直接 docker load 现成镜像 tar（完全离线，但无 shell）
-#     bash deploy.sh --load /path/to/elbot-0.6.6-linux-amd64.tar.gz
+#     bash deploy.sh --load /path/to/elbot-0.6.7-linux-amd64.tar.gz
 #
 # 前置：
 #   - 已安装 Docker 和 docker compose
@@ -40,7 +40,7 @@ cd "${BUNDLE_DIR}"
 # 版本号：优先读离线包内的 VERSION（prepare-offline.sh 会拷进来），
 # 避免这里再硬编码一份——升版本时不会再漏改。
 VERSION="$(tr -d '[:space:]' <"${BUNDLE_DIR}/VERSION" 2>/dev/null || true)"
-[ -n "${VERSION}" ] || VERSION="0.6.6"
+[ -n "${VERSION}" ] || VERSION="0.6.7"
 
 # 1. 架构检测
 case "$(uname -m)" in

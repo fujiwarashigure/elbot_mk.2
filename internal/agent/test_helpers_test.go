@@ -335,6 +335,29 @@ func waitRequestCount(t *testing.T, f *fakeLLM, want int) {
 	}
 }
 
+// waitNoExtraChatRequest fails when more than want chat (non-title) requests
+// exist, waiting up to window for a straggler to appear. A negative assertion
+// cannot be made fully deterministic, but polling for the *bad* condition is
+// the safe direction: a slow machine only gets more time to reveal the bug,
+// while unrelated background jobs such as session naming (title-only requests
+// started with context.Background()) can never fail the check.
+func waitNoExtraChatRequest(t *testing.T, f *fakeLLM, want int, window time.Duration) {
+	t.Helper()
+	notify := f.requestNotifyChan()
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	for {
+		if got := len(f.chatRequests()); got > want {
+			t.Fatalf("chat request count = %d, want %d", got, want)
+		}
+		select {
+		case <-notify:
+		case <-timer.C:
+			return
+		}
+	}
+}
+
 func newTestStore(t *testing.T) storage.Store {
 	t.Helper()
 	store, err := sqlite.New(context.Background(), ":memory:")

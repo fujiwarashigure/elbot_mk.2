@@ -32,13 +32,37 @@ type modelRuntimeState struct {
 	clientsMu      sync.RWMutex
 	allModels      []string
 	modelListCache map[string]modelListCacheEntry
-	modelListMu    sync.Mutex
+	// modelListInflight holds one in-flight listing per provider so a burst of
+	// model-list requests collapses into a single upstream call.
+	modelListInflight map[string]*modelListCall
+	modelListMu       sync.Mutex
 }
 
 type modelListCacheEntry struct {
+	models    []string
+	err       error
+	expiresAt time.Time
+	// lastGood is the most recent successful list. It is merged back in when a
+	// refresh fails so a transient provider outage degrades to a warning
+	// instead of blanking out the model menu.
+	lastGood []string
+}
+
+// modelListCall is one shared provider listing. done is closed after models and
+// err are written, so every waiter observes the final result.
+type modelListCall struct {
+	done   chan struct{}
 	models []string
 	err    error
 }
+
+// Model-list cache lifetimes. Successful lists rarely change, so they may be
+// cached for a while. Failures are often transient (network blip, rate limit),
+// so they only get a short negative window instead of being cached forever.
+const (
+	modelListSuccessTTL = 10 * time.Minute
+	modelListErrorTTL   = 30 * time.Second
+)
 
 type modelListOptions struct {
 	Fresh bool
@@ -46,14 +70,15 @@ type modelListOptions struct {
 
 func newModelRuntimeState(client llm.LLM, model, providerName string, provider config.ProviderConfig, providers map[string]config.ProviderConfig, modeModels map[string]config.ModelSelection, clients map[string]llm.LLM) modelRuntimeState {
 	return modelRuntimeState{
-		llmClient:      client,
-		model:          model,
-		providerName:   providerName,
-		provider:       provider,
-		providers:      providers,
-		modeModels:     cloneModeModels(modeModels),
-		clients:        clients,
-		modelListCache: map[string]modelListCacheEntry{},
+		llmClient:         client,
+		model:             model,
+		providerName:      providerName,
+		provider:          provider,
+		providers:         providers,
+		modeModels:        cloneModeModels(modeModels),
+		clients:           clients,
+		modelListCache:    map[string]modelListCacheEntry{},
+		modelListInflight: map[string]*modelListCall{},
 	}
 }
 
@@ -272,20 +297,92 @@ func (a *Agent) modelOptions(query string, opts modelListOptions) agentcommands.
 	return agentcommands.ModelListResult{Options: options, Errors: errors}
 }
 
+// modelListCacheTTL returns how long a provider's model list may be cached.
+// Failures are often transient, so they only get a short negative window.
+func modelListCacheTTL(err error) time.Duration {
+	if err != nil {
+		return modelListErrorTTL
+	}
+	return modelListSuccessTTL
+}
+
+func (e modelListCacheEntry) fresh(now time.Time) bool {
+	return now.Before(e.expiresAt)
+}
+
 func (a *Agent) cachedProviderModels(providerName string, fresh bool) ([]string, error) {
+	a.modelRuntime.modelListMu.Lock()
+	if a.modelRuntime.modelListInflight == nil {
+		a.modelRuntime.modelListInflight = map[string]*modelListCall{}
+	}
 	if !fresh {
-		a.modelRuntime.modelListMu.Lock()
-		entry, ok := a.modelRuntime.modelListCache[providerName]
-		a.modelRuntime.modelListMu.Unlock()
-		if ok {
-			return append([]string(nil), entry.models...), entry.err
+		if entry, ok := a.modelRuntime.modelListCache[providerName]; ok && entry.fresh(time.Now()) {
+			models, err := append([]string(nil), entry.models...), entry.err
+			a.modelRuntime.modelListMu.Unlock()
+			return models, err
 		}
 	}
+	// Coalesce concurrent refreshes: a burst of /models commands (or one
+	// explicit refresh per new session) must fire exactly one upstream call.
+	if call, ok := a.modelRuntime.modelListInflight[providerName]; ok {
+		a.modelRuntime.modelListMu.Unlock()
+		<-call.done
+		return append([]string(nil), call.models...), call.err
+	}
+	call := &modelListCall{done: make(chan struct{})}
+	a.modelRuntime.modelListInflight[providerName] = call
+	previous := a.modelRuntime.modelListCache[providerName]
+	a.modelRuntime.modelListMu.Unlock()
+
 	models, err := a.sortedProviderModels(providerName)
+	if err != nil {
+		// Retain last-known-good so an unreachable provider keeps showing the
+		// models it listed before, merged with anything configured locally.
+		models = mergeModelNames(models, previous.lastGood)
+	}
+	entry := modelListCacheEntry{
+		models:    append([]string(nil), models...),
+		err:       err,
+		expiresAt: time.Now().Add(modelListCacheTTL(err)),
+		lastGood:  previous.lastGood,
+	}
+	if err == nil {
+		entry.lastGood = append([]string(nil), models...)
+	}
+
 	a.modelRuntime.modelListMu.Lock()
-	a.modelRuntime.modelListCache[providerName] = modelListCacheEntry{models: append([]string(nil), models...), err: err}
+	a.modelRuntime.modelListCache[providerName] = entry
+	call.models, call.err = models, err
+	// Close before deleting: a caller arriving in this window still finds the
+	// finished call and reuses the result instead of starting a second fetch.
+	close(call.done)
+	delete(a.modelRuntime.modelListInflight, providerName)
 	a.modelRuntime.modelListMu.Unlock()
 	return models, err
+}
+
+// mergeModelNames returns the sorted union of the current and last-known-good
+// model names.
+func mergeModelNames(current, lastGood []string) []string {
+	if len(lastGood) == 0 {
+		return current
+	}
+	seen := make(map[string]struct{}, len(current)+len(lastGood))
+	merged := make([]string, 0, len(current)+len(lastGood))
+	for _, list := range [][]string{current, lastGood} {
+		for _, name := range list {
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			merged = append(merged, name)
+		}
+	}
+	sort.Strings(merged)
+	return merged
 }
 
 func (a *Agent) sortedProviderModels(providerName string) ([]string, error) {

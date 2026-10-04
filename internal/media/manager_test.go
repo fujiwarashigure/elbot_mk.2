@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,61 @@ import (
 	"elbot/internal/storage"
 	"elbot/internal/storage/sqlite"
 )
+
+func TestReadLimitedRejectsOversizedMedia(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := NewManager(store, t.TempDir(), &LocalBackend{Root: t.TempDir()})
+	item, err := manager.ImportBytes(ctx, []byte("0123456789abcdef"), Input{Name: "small.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := manager.ReadLimited(ctx, item.ID, 8); !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("ReadLimited over budget err = %v, want ErrMediaTooLarge", err)
+	}
+	data, _, err := manager.ReadLimited(ctx, item.ID, 1024)
+	if err != nil {
+		t.Fatalf("ReadLimited within budget: %v", err)
+	}
+	if string(data) != "0123456789abcdef" {
+		t.Fatalf("data = %q", data)
+	}
+
+	// Exactly at the limit must be accepted, not rejected by an off-by-one.
+	data, _, err = manager.ReadLimited(ctx, item.ID, 16)
+	if err != nil || len(data) != 16 {
+		t.Fatalf("ReadLimited at exact limit: len=%d err=%v", len(data), err)
+	}
+}
+
+func TestReadLimitedStreamGuardRejectsUnderreportedMetadata(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := NewManager(store, t.TempDir(), &LocalBackend{Root: t.TempDir()})
+	item, err := manager.ImportBytes(ctx, []byte("0123456789abcdef"), Input{Name: "small.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate stale metadata: the record claims the object is 1 byte while the
+	// backend still returns 16. The maxBytes+1 stream guard must still reject it.
+	item.Size = 1
+	if err := store.Media().Upsert(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.ReadLimited(ctx, item.ID, 8); !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("ReadLimited underreported metadata err = %v, want ErrMediaTooLarge", err)
+	}
+}
 
 func TestValidID(t *testing.T) {
 	valid := IDPrefix + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

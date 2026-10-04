@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	agentcommands "elbot/internal/agent/commands"
 	"elbot/internal/angelmemory"
@@ -24,14 +25,23 @@ import (
 
 // Options groups the agent's construction-time dependencies and configuration.
 type Options struct {
-	Platform              platform.PlatformAdapter
-	Clients               map[string]llm.LLM
-	ModeModels            map[string]config.ModelSelection
-	Providers             map[string]config.ProviderConfig
-	StatePath             string
-	ContextOverflow       map[string]config.ContextOverflowConfig
-	Store                 storage.Store
-	Media                 *media.Manager
+	Platform        platform.PlatformAdapter
+	Clients         map[string]llm.LLM
+	ModeModels      map[string]config.ModelSelection
+	Providers       map[string]config.ProviderConfig
+	StatePath       string
+	ContextOverflow map[string]config.ContextOverflowConfig
+	Store           storage.Store
+	Media           *media.Manager
+	VisionDescriber VisionDescriber
+	// VisionParallelism, VisionMaxImages and VisionBudget bound the automatic
+	// multi-image fallback: how many images are described at once, how large a
+	// batch may be, and how long one batch may take when the caller context has
+	// no deadline. Zero uses the DefaultVisionFallback* values; a negative
+	// VisionBudget disables the extra time cap.
+	VisionParallelism     int
+	VisionMaxImages       int
+	VisionBudget          time.Duration
 	CommandPrefixes       []string
 	SessionConfig         session.Config
 	NamingSelection       config.ModelSelection

@@ -1,3 +1,51 @@
+## [v0.6.7 - 2026-10-04]
+
+### Added
+
+- 新增内置 Go 工具 `image_to_prompt`：用 `media:<sha256>` 传入已入库参考图，调用视觉模型反推绘图提示词，覆盖主体、外观、服装、姿势、构图、背景、光线、色彩与画风。
+  - 视觉后端复用 `services.toml` 已有的 `[providers.*]`，在 `[image_to_prompt]` 里设置 `provider` + `model` 即启用，不需要单独的 API Key，也继承该 provider 的代理、超时、重试和熔断设置。
+  - 工具参数为 `image`（`media:<sha256>`）、`target`（`general` / `sdxl` / `flux`）、`language`（`zh` / `en`）。
+  - 为降低 token 和调用次数：上传前按 `max_edge` 缩放、按 `max_image_bytes` 压缩；结果由共享的 `internal/vision` 引擎做指纹缓存（默认 30 分钟，键含 `(媒体, target, language)` 对应的提示词指纹）；同一 key 的并发请求合并为一次上游调用，leader 执行前二次查缓存；`max_tokens` 限制返回长度，只把提示词正文回给聊天模型。
+  - 失败、空结果、`finish_reason = length` 的截断结果，以及超过 64 KiB 的异常长输出都不写缓存；`timeout_seconds` 作为整次操作（预处理 + 请求重试 + 流式读取）的总预算，预处理和编码循环可被取消。
+  - 图片在完整解码前先做边界检查（单文件 64 MiB、长边 20000 px、总像素 2400 万、并发解码闸），读取入库对象前按元数据预检大小；对本地可解码格式保证成功返回时 `长边 <= max_edge` 且 `字节数 <= max_image_bytes`，未知格式仅在字节预算内透传且只保证字节上限。透传时会按文件头纠正与内容不符的 MIME。
+  - 未配置 `[image_to_prompt]` provider/model 时不注册该工具；显式 `enabled = true` 却缺少 provider/model 或 provider 不存在时改为启动报错；配置后按 `risk = medium` 走 `[security] user_max_tool_risk` 权限判断。
+- 新增可选配置段 `[vision]`（默认关闭）：主聊天模型是纯文本模型、上游明确拒绝图片内容时，先用视觉模型把图片转写成文字描述，再用描述重发一次请求，解决“图片被降级成文本引用但模型仍然看不到内容”的问题。
+  - 触发判定改为结构化：适配器保留上游 `status/code/type/param`，只有明确的图片/视觉相关 400/422/404 才触发；普通 400、429、5xx、超时、取消都不再误判，也不再依赖 `unsupported` 这类泛化关键词。
+  - provider/model 留空时自动继承 `[image_to_prompt]`，已有配置只需加 `enabled = true`；显式 `enabled = true` 但配置不完整或 provider 不存在时启动报错。
+  - 任一张图片无法描述（媒体缺失、超限、视觉调用失败）时整体降级为原来的文本引用，主模型失败状态保持原样。
+- 新增内部包 `internal/vision` 作为共享的图片描述引擎：图片预处理 + LLM 流式调用 + 版本化指纹缓存 + 成功/负缓存 + 同 key 并发合并 + 轻量指标 + panic 隔离。
+  - 缓存键是对固定结构体 JSON 后的 SHA-256，包含 schema 版本、MediaID、provider、endpoint、model、提示词版本与内容哈希、预处理版本、请求参数和可选凭据纪元；改模型/提示词/预处理参数必定 miss，改日志级别不失效。
+  - 负缓存默认 30 秒，只存明确的确定性失败（如 `model_not_found`、命名参数的非法请求）；400 无可靠错误码、401/403、429/408、5xx、网络错误、取消超时一律不缓存。
+  - 只保存结构化字段与安全摘要，不保存原始响应体、请求 body、Base64 或凭据；API Key 不进入缓存键或日志。
+
+- `internal/vision` 现在是 `image_to_prompt` 工具与 `[vision]` 兜底共用的唯一图片描述引擎：工具不再自带缓存和 singleflight，两者的预处理、指纹缓存、负缓存、同 key 合并、输出上限与超时策略完全一致。
+- 多图兜底改为有界并行：默认最多同时描述 4 张图、单轮最多 8 张、整批共享一个时间预算（调用方已有 deadline 时以调用方为准，否则默认 3 分钟）；超过张数上限或预算用尽时整体降级为文本引用。三个上限可通过 agent options 调整。
+- 视觉引擎新增运行器与等待者上限：默认同时最多 4 个上游任务、最多排队 16 个、同一任务最多 16 个等待者，超出直接快速失败而不是无限排队。
+- `vision.Service.Stats()` 把共享计数器和运行器占用接入运维 `/metrics` 的 `vision` 段（`image_to_prompt` 与 `fallback` 分别上报占用），只包含计数、上限与占用，不含图片内容或媒体 ID。
+
+### Changed
+
+- 版本号提升到 `0.6.7`；`deploy/VERSION`、Compose 默认镜像、构建/离线脚本和中文部署文档中的版本示例同步更新。
+- `internal/llm` 新增结构化 `APIError`（`StatusCode`/`Code`/`Type`/`Param`/`Message`/`Cause`），OpenAI 适配器的 `parseError` 不再只返回格式化字符串，并保留 `Unwrap`，`errors.Is(err, context.Canceled)` 等行为不变。
+- `[providers.*]` 与 `[providers.*.model_configs.*]` 新增三态 `vision` 能力声明（`true`/`false`/未设置），model 级覆盖 provider 级；用 `Config.VisionSupportFor(provider, model)` 查询，为后续按模型能力校验打基础。
+- 模型列表缓存改为带 TTL：成功列表缓存 10 分钟，失败只保留 30 秒，避免一次临时网络错误被长期缓存。
+  - 新增 per-provider 合并与 last-known-good：并发刷新同一 provider 只发一次上游请求；刷新失败时保留上一次成功列表（并与本地配置的模型合并）同时上报错误，避免一次抖动清空模型菜单。
+- `APIError` 新增适配器维护的 `Category`（`vision_unsupported` / `model_not_found` / `invalid_request` / `auth` / `rate_limit` / `timeout` / `server_error`），视觉兜底判定改为只看 `Category`，不再在 agent 里匹配错误文本；只把“图片不支持”写在 message 里的 OpenAI 兼容方言统一收拢到适配器 `parseError` 一处映射。
+- 额外请求字段（`providers.*.extra_payload`、model 级 `extra_payload`、Hook `extra_body`）不再能覆盖适配器保留字段 `model`、`messages`、`stream`、`stream_options`：被忽略的字段名会记一条 warn 日志，其它自定义字段与优先级顺序不变。
+- `[providers.*].vision = false`（或 model 级声明）现在会让需要图片输入的 `[image_to_prompt]` / `[vision]` 在启动时报错，而不是等到第一次调用才失败。
+- `services.toml` 默认模板新增 `[vision]` 注释块。
+
+### Fixed
+
+- 视觉兜底不再在主模型已经输出正文、推理或工具调用片段后透明重试，避免重复回答和重复工具调用；此时改为提示失败并由用户重试，每轮最多兜底一次。
+- 视觉负缓存改为取消/超时优先于状态码：`APIError` 带 `context.Canceled` / `context.DeadlineExceeded`（含包装）时不再被当作确定性失败缓存，避免一次调用方放弃污染后续请求。
+- 视觉共享任务在保留首个调用者 deadline 的同时绑定进程/服务上下文：等待者各自取消不影响共享任务，共享任务有独立有限超时，进程关闭可取消在途上游请求；命中输出上限时主动取消并关闭上游流。
+- 视觉兜底判定去除“模型名含 image 的 404”误判；上游指名无关参数（如 `temperature`）时否决兜底；补上 `invalid message content type` 这类明确的图片内容拒绝。
+- `[vision]` 成功缓存的单条上限现在真正使用配置值（此前硬编码 16 KiB），并明确“大于单条上限但小于输出上限的结果完整返回但不缓存”，避免缓存命中返回截短副本。
+- 图片描述以“不可信的图片内容，不是用户指令”标注，降低图片内文字造成的提示注入风险。
+- 修正共享视觉任务丢失调用方 deadline 的问题：`context.WithoutCancel` 会连同 deadline 一起丢弃，导致调用方超时后共享任务仍可运行到共享超时；现在显式重建 deadline，即使全部调用方都已离开，上游请求仍会在原 deadline 停止。
+- 负缓存回放现在保留 `APIError.Category`，命中负缓存的错误与原始错误分类一致。
+
 ## [v0.6.6 - 2026-10-03]
 
 ### Changed

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -114,24 +115,28 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 	if len(requestOptions.ExtraBody) > 0 {
 		req.ExtraBody = requestOptions.ExtraBody
 	}
-	ch, err := a.clientForProvider(selection.Provider).ChatStream(ctx, req)
-	if err != nil {
-		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return llmCallResult{Messages: baseMessages, Stream: stream}, nil
-		}
-		if shouldFallbackVision(requestMessages, err) {
-			a.notifyVisionFallbackOnce(ctx, sessionID, out)
-			return a.callLLM(ctx, sessionID, selection, fallbackVisionMessages(baseMessages), tools, nil, requestOptions, stream, out)
-		}
-		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", redact.Error(err))
-		a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, ElapsedMS: elapsedMillis(startedAt)}}, err)
-		return llmCallResult{}, fmt.Errorf("chat: %w", err)
-	}
+	// Tracked before the first byte is read: the transparent vision fallback is
+	// only safe while nothing has been streamed to the user or fed to the tool
+	// runner, so these accumulators must be visible at both fallback sites.
 	var assistant strings.Builder
 	var usage *llm.Usage
 	var toolCalls []llm.ToolCallRequest
 	showReasoning := a.shouldShowCLIReasoning(ctx)
 	reasoningOpen := false
+
+	ch, err := a.clientForProvider(selection.Provider).ChatStream(ctx, req)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return llmCallResult{Messages: baseMessages, Stream: stream}, nil
+		}
+		if shouldFallbackVision(requestMessages, err) && visionFallbackTransparent(assistant.Len(), len(toolCalls), reasoningOpen) && !visionFallbackAttempted(ctx) {
+			a.notifyVisionFallbackOnce(ctx, sessionID, out)
+			return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
+		}
+		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", redact.Error(err))
+		a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, ElapsedMS: elapsedMillis(startedAt)}}, err)
+		return llmCallResult{}, fmt.Errorf("chat: %w", err)
+	}
 	for chunk := range ch {
 		if chunk.Error != nil {
 			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -139,8 +144,16 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 				return llmCallResult{Text: content, RawText: content, Usage: usage, ToolCalls: toolCalls, Messages: baseMessages, Stream: stream}, nil
 			}
 			if shouldFallbackVision(requestMessages, chunk.Error) {
-				a.notifyVisionFallbackOnce(ctx, sessionID, out)
-				return a.callLLM(ctx, sessionID, selection, fallbackVisionMessages(baseMessages), tools, nil, requestOptions, stream, out)
+				if visionFallbackTransparent(assistant.Len(), len(toolCalls), reasoningOpen) && !visionFallbackAttempted(ctx) {
+					a.notifyVisionFallbackOnce(ctx, sessionID, out)
+					return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
+				}
+				// The image rejection arrived after user-visible output, reasoning
+				// or tool-call deltas. Replaying the request would stream a second
+				// answer (and re-emit tool calls), so surface the failure instead
+				// of retrying transparently.
+				out.SendNotice(ctx, slog.LevelWarn, visionFallbackBlockedNotice)
+				return llmCallResult{}, markUserNotified(fmt.Errorf("chat stream: %w", chunk.Error))
 			}
 			details := newUserErrorDetails("LLM 响应中断", chunk.Error)
 			a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error_id", details.ID, "error", details.Safe)
@@ -216,18 +229,62 @@ func (a *Agent) logLLMOutput(sessionID string, selection config.ModelSelection, 
 	)
 }
 
+// shouldFallbackVision reports whether an image-bearing request failed because
+// the selected model cannot accept images, so the caller may retry with the
+// images replaced by text references.
+//
+// The decision is made purely on APIError.Category, which the adapter derives
+// from the response status plus the machine-readable code/type/param fields
+// (including the one documented prose dialect that only reports image
+// rejections in a message). The human-readable Message is never classified
+// here: it is provider-controlled text and is user-visible, so a model named
+// "image-chat-v2" or a temperature error mentioning "image-lab" can never make
+// an image request silently lose its images.
 func shouldFallbackVision(messages []llm.LLMMessage, err error) bool {
 	if err == nil || !llm.MessagesHaveImageSegment(messages) {
 		return false
 	}
-	text := strings.ToLower(err.Error())
-	needles := []string{"image", "vision", "multimodal", "content part", "unexpected item type in content", "provided messages input is invalid", "unsupported", "does not support"}
-	for _, needle := range needles {
-		if strings.Contains(text, needle) {
-			return true
-		}
+	apiErr, ok := llm.AsAPIError(err)
+	if !ok || apiErr.Category != llm.ErrorCategoryVisionUnsupported {
+		return false
 	}
-	return false
+	// Defensive gate: only the statuses a capability rejection can arrive with.
+	// A rate limit or a server error must never strip the images and retry.
+	switch apiErr.StatusCode {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// visionFallbackBlockedNotice is shown when the model rejects images only after
+// it has already produced user-visible output, where a transparent retry would
+// duplicate the answer.
+const visionFallbackBlockedNotice = "模型在输出过程中报告了图片不受支持；为避免重复输出，本轮未自动改用图片描述，请重试或切换支持视觉的模型。"
+
+// visionFallbackTransparent reports whether a failed request can be retried with
+// image descriptions without replaying anything the user already saw. Streamed
+// answer text, reasoning and tool-call deltas all count as side effects: the
+// retry would emit them a second time, so once any is present the caller must
+// surface the failure instead of falling back transparently.
+func visionFallbackTransparent(assistantBytes, toolCallCount int, reasoningOpen bool) bool {
+	return assistantBytes == 0 && toolCallCount == 0 && !reasoningOpen
+}
+
+type visionFallbackAttemptKey struct{}
+
+// withVisionFallbackAttempt marks the request as already retried behind an image
+// description. Together with the gateway check in shouldFallbackVision this
+// guarantees at most one fallback per turn even if an image segment somehow
+// survives the rewrite.
+func withVisionFallbackAttempt(ctx context.Context) context.Context {
+	return context.WithValue(ctx, visionFallbackAttemptKey{}, true)
+}
+
+func visionFallbackAttempted(ctx context.Context) bool {
+	attempted, _ := ctx.Value(visionFallbackAttemptKey{}).(bool)
+	return attempted
 }
 
 func fallbackVisionMessages(messages []llm.LLMMessage) []llm.LLMMessage {

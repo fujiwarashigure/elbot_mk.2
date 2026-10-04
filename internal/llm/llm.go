@@ -68,8 +68,10 @@ type ChatRequest struct {
 	Tools       []ToolSchema
 	Temperature float64
 	MaxTokens   int
-	// ExtraBody contains additional fields merged into the request JSON.
-	// It has the highest priority and can override any other field.
+	// ExtraBody contains additional provider-specific fields merged into the
+	// request JSON. It wins over the provider/model extra payload, but the
+	// reserved protocol fields (model, messages, stream, stream_options) are
+	// adapter-owned and cannot be replaced.
 	ExtraBody map[string]any
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -206,6 +207,35 @@ func (m *Manager) Read(ctx context.Context, id string) ([]byte, *storage.Media, 
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read media %q: %w", id, err)
+	}
+	return data, media, nil
+}
+
+// ErrMediaTooLarge reports that a stored object is bigger than the caller's
+// read budget. Test it with errors.Is.
+var ErrMediaTooLarge = errors.New("media exceeds the read limit")
+
+// ReadLimited behaves like Read but refuses to materialise more than maxBytes,
+// so an oversized object is rejected before it is loaded into memory. It checks
+// the stored metadata when present and still enforces the cap on the stream.
+func (m *Manager) ReadLimited(ctx context.Context, id string, maxBytes int64) ([]byte, *storage.Media, error) {
+	if maxBytes <= 0 {
+		return m.Read(ctx, id)
+	}
+	reader, media, err := m.Open(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer reader.Close()
+	if media != nil && media.Size > maxBytes {
+		return nil, nil, fmt.Errorf("%w: media %q is %d bytes, over the %d byte limit", ErrMediaTooLarge, id, media.Size, maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read media %q: %w", id, err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, nil, fmt.Errorf("%w: media %q exceeds the %d byte limit", ErrMediaTooLarge, id, maxBytes)
 	}
 	return data, media, nil
 }
