@@ -189,7 +189,7 @@ func TestImageToPromptInfoAndSchema(t *testing.T) {
 		t.Fatalf("name = %q", value.Name())
 	}
 	info := value.Info()
-	if info.Risk != tool.RiskMedium || !containsString(info.Tags, "image") || !containsString(info.Tags, "prompt") {
+	if info.Risk != tool.RiskLow || !containsString(info.Tags, "image") || !containsString(info.Tags, "prompt") {
 		t.Fatalf("info = %#v", info)
 	}
 	schema := value.Schema()

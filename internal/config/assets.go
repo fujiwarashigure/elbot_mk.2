@@ -244,7 +244,7 @@ single_message_max_ratio = 0.5
 # 压缩上下文时，每条历史用户原话保留的最大字符数，避免长消息撑爆摘要。
 user_original_max_runes = 4000
 # 长消息保护默认策略：reject / truncate / summarize。
-# 群管理员可用 /*overflow 覆盖当前群的 chat/work 模式。
+# 群管理员可用 /overflow 覆盖当前群的 chat/work 模式。
 overflow_mode = "reject"
 
 [soul]
@@ -349,7 +349,7 @@ min_count = 3
 session_list_page_size = 10
 
 [commands]
-prefixes = ["/*"]
+prefixes = ["/"]
 
 [tools]
 max_rounds_per_turn = 10

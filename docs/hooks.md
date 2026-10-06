@@ -30,7 +30,7 @@ name = "weather"
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `name` | 是 | 插件标识和默认目录名；Worker Hook 同时把它作为 worker ID。Worker ID 只能使用小写字母、数字、`-`、`_`；规则插件也建议遵守此格式。 |
-| `enabled` | 否 | 是否加载，默认 `true`。修改根配置后需要管理员执行全局 `/*hooks reload`。 |
+| `enabled` | 否 | 是否加载，默认 `true`。修改根配置后需要管理员执行全局 `/hooks reload`。 |
 | `path` | 否 | 相对 `plugins/` 的配置路径，默认 `<name>/hook.toml`；不能是绝对路径或逃出 `plugins/`。 |
 
 插件源码、`hook.toml` 和插件私有状态文件放在 `plugins/<id>/`。ElBot 额外创建 `plugins/_shared/` 供所有 Hook 共享文件；它不是插件目录，也不会被扫描。
@@ -65,7 +65,7 @@ text = "你好呀"
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `name` | 否 | 规则显示名；建议显式填写。 |
-| `description` | 否 | `/*hooks` 列表和详情使用的说明。 |
+| `description` | 否 | `/hooks` 列表和详情使用的说明。 |
 | `on` | 是 | Hook 点，见下表。 |
 | `priority` | 否 | 数字越小越先执行；默认 `1000`，`0` 也按默认值处理。相同 priority 按加载顺序稳定执行：根规则、`[[plugins]]` 声明顺序、各插件内规则顺序。 |
 | `enabled` | 否 | 是否加载，默认 `true`。 |
@@ -311,7 +311,7 @@ JSON 与 TOML target 都使用上述 snake_case 字段；省略时沿用当前�
 
 进程 Hook 使用 `hook.v2` JSON Lines。stdin 和 stdout 每行一个 JSON 帧；stdout 只能写协议，日志写 stderr。Host request ID 使用 `host:*`，Hook request ID 使用 `plugin:*`，response 必须复用 request ID。
 
-Host 先发送 `system.init`，成功后发送 `event.handle`。一次性 exec Hook 处理一次事件后退出；请求被 `/*stop`、超时或上游 context 取消时，Host 会结束该次 exec 的完整进程树。Worker Hook 可处理多次事件，并接收 `system.shutdown`；当前调用取消时会收到 `event.cancel`，Worker 进程本身保持运行。
+Host 先发送 `system.init`，成功后发送 `event.handle`。一次性 exec Hook 处理一次事件后退出；请求被 `/stop`、超时或上游 context 取消时，Host 会结束该次 exec 的完整进程树。Worker Hook 可处理多次事件，并接收 `system.shutdown`；当前调用取消时会收到 `event.cancel`，Worker 进程本身保持运行。
 
 ### 完整交互示例
 
@@ -442,13 +442,13 @@ Host 从 stdin 返回相同 `id`；`result` 的具体结构由平台 API 决定�
 
 key 去除首尾空白后必须非空，最长 256 字节。建议使用 `users/<platform>/<id>`、`cache/<name>` 等前缀避免冲突，但前缀不是权限边界。value 必须是合法 JSON，压缩后单值最大 1 MiB；共享区最多 10,000 条，key 与 value 合计最大 32 MiB。
 
-达到上限时先删除过期项，再按最近使用时间淘汰最冷数据；`ttl_seconds = 0` 也可能被淘汰。CAS 按压缩后的 JSON 原子比较；省略 `expected` 表示仅当 key 不存在时写入，显式 `expected: null` 只匹配 JSON `null`。共享状态跨 Hook 重启和 `/*hooks reload` 保留，ElBot 重启后清空；需要持久化时写入插件目录或 `_shared/`。
+达到上限时先删除过期项，再按最近使用时间淘汰最冷数据；`ttl_seconds = 0` 也可能被淘汰。CAS 按压缩后的 JSON 原子比较；省略 `expected` 表示仅当 key 不存在时写入，显式 `expected: null` 只匹配 JSON `null`。共享状态跨 Hook 重启和 `/hooks reload` 保留，ElBot 重启后清空；需要持久化时写入插件目录或 `_shared/`。
 
 ### 进程环境
 
 一次性 exec、Persistent Worker 和 Transient Worker 都继承 ElBot 进程环境，并按 Hook 公共 `plugins/.env` 与插件目录 `.env` 分层覆盖；配置根 `.env` 不会注入 Hook。完整的优先级、`PATH` 规则和生效时机见[环境变量与进程环境继承](configuration.md#环境变量与进程环境继承)。
 
-Hook 不加载 `.bashrc`、`.profile`、mise/asdf 等交互式 Shell 初始化。修改 Hook 环境文件后执行 `/*hooks reload` 即可应用，并会按新环境重建 Worker。
+Hook 不加载 `.bashrc`、`.profile`、mise/asdf 等交互式 Shell 初始化。修改 Hook 环境文件后执行 `/hooks reload` 即可应用，并会按新环境重建 Worker。
 
 ### 一次性 exec Hook
 
@@ -474,7 +474,7 @@ timeout_seconds = 30
 
 ## Worker Hook
 
-Worker Hook 由插件自己的 `hook.toml` 声明。Persistent Worker 在 ElBot 启动或 `/*hooks reload` 后启动；Transient Worker 在 trigger rule 命中时启动。省略 `[plugin.runtime]` 或 `mode` 等价于 `mode = "once"`，不创建 Worker。
+Worker Hook 由插件自己的 `hook.toml` 声明。Persistent Worker 在 ElBot 启动或 `/hooks reload` 后启动；Transient Worker 在 trigger rule 命中时启动。省略 `[plugin.runtime]` 或 `mode` 等价于 `mode = "once"`，不创建 Worker。
 
 ```toml
 [plugin]
@@ -522,7 +522,7 @@ stop_propagation = true
 | 字段 | 说明 |
 | --- | --- |
 | `name` | 自述名称；建议与根 `[[plugins]].name` 一致。不一致时以根 ID 为准并记录警告。 |
-| `description` | `/*hooks`、`system.init` 与状态列表使用的简介。 |
+| `description` | `/hooks`、`system.init` 与状态列表使用的简介。 |
 | `blocked_platform` | 完全不分发指定平台的事件，例如 `telegram`。 |
 | `blocked_group` | 完全不分发指定群的事件，格式 `<platform>:<平台原始群 ID>`。 |
 | `blocked_id` | 完全不分发指定用户事件，格式 `<platform>:<平台原始用户 ID>`。 |
@@ -575,7 +575,7 @@ Worker 状态为 `starting`、`ready`、`running`、`degraded`、`stopping`、`s
 - continuation 返回 `completed` 或省略 `status` 后，Host 立即释放租约；对于 transient worker，同时关闭该进程。再次返回 `waiting` 则以新 ID、过期时间续期。
 - 阻断策略命中、worker 退出、停止或重载会清理该插件租约。
 
-用户发送精确的 `/*cancel` 时，Host 取消该路由当前执行或 waiting 会话，并关闭 Transient Worker；Persistent Worker 只接收取消通知并保留进程和内存。
+用户发送精确的 `/cancel` 时，Host 取消该路由当前执行或 waiting 会话，并关闭 Transient Worker；Persistent Worker 只接收取消通知并保留进程和内存。
 
 ```json
 {"type":"event","method":"event.cancel","params":{"conversation_id":"weather-42"}}
@@ -619,7 +619,7 @@ Host 会先完整读取并校验候选配置。失败时返回 `ok=false`，旧�
 {"type":"response","id":"plugin:reload-1","ok":true,"result":{"scheduled":true}}
 ```
 
-实际替换等当前 `event.handle` 结束后发生：仅替换调用插件的规则和 worker，清理该插件 waiting 路由与工具上下文，不重启其他插件。调用者身份由进程确定，不能重载别的插件；`starting`、`stopping`、`stopped` 时不能请求重载。根 `plugins/hooks.toml` 的插件引用、`enabled`、`path` 以及插件增删仍需管理员执行全局 `/*hooks reload`。
+实际替换等当前 `event.handle` 结束后发生：仅替换调用插件的规则和 worker，清理该插件 waiting 路由与工具上下文，不重启其他插件。调用者身份由进程确定，不能重载别的插件；`starting`、`stopping`、`stopped` 时不能请求重载。根 `plugins/hooks.toml` 的插件引用、`enabled`、`path` 以及插件增删仍需管理员执行全局 `/hooks reload`。
 
 ## Event 与模板字段
 

@@ -2277,7 +2277,7 @@ func (c *Config) applyAppDefaults() {
 		}
 	}
 	if len(c.Commands.Prefixes) == 0 {
-		c.Commands.Prefixes = []string{"/*"}
+		c.Commands.Prefixes = []string{"/"}
 	}
 	if c.Tools.MaxRoundsPerTurn <= 0 {
 		c.Tools.MaxRoundsPerTurn = 2

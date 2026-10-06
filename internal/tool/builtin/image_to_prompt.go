@@ -47,7 +47,7 @@ func (ImageToPromptTool) Name() string { return ImageToPromptName }
 func imageToPromptBuilder() *tool.Builder {
 	return tool.NewBuilder(ImageToPromptName).
 		Description("把参考图片反推成可直接用于绘图的提示词，覆盖主体、外观、服装、姿势、构图、背景、光线、色彩与画风。只在用户要求反推图片提示词、分析参考图或生成绘图 prompt 时调用；不猜测人物身份，也不补充图片里不存在的细节。").
-		Risk(tool.RiskMedium).
+		Risk(tool.RiskLow).
 		Tags("image", "prompt")
 }
 

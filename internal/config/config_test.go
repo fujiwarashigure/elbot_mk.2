@@ -691,7 +691,7 @@ model = "deepseek-chat"
 	if !cfg.CharacterLibrary.IsEnabled() || cfg.CharacterLibrary.Root != filepath.Join(configDir, "characters") {
 		t.Fatalf("character library defaults = %#v", cfg.CharacterLibrary)
 	}
-	if !reflect.DeepEqual(cfg.Commands.Prefixes, []string{"/*"}) {
+	if !reflect.DeepEqual(cfg.Commands.Prefixes, []string{"/"}) {
 		t.Fatalf("Command prefixes = %#v", cfg.Commands.Prefixes)
 	}
 	if cfg.Tools.MaxRoundsPerTurn != 2 {

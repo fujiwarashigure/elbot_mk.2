@@ -10,7 +10,7 @@ func (a *Agent) commandPrefix() string {
 			return prefix
 		}
 	}
-	return "/*"
+	return "/"
 }
 
 // commandPrefixes 返回当前配置的全部命令前缀，用于识别带 @机器人后缀的命令。

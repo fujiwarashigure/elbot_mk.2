@@ -24,6 +24,8 @@
 ### Changed
 
 - 清理 v0.6.8 里“额度账本不含 token/货币与每用户/全局预算”的阶段性旧描述，改为与四维 token/费用账本一致的能力说明。
+- 命令前缀默认值由 `/*` 改为 `/`：`internal/command` 的 `defaultCommandPrefix`、`internal/agent` 与 `internal/platform` 的兜底前缀、`internal/config` 的运行时默认值和内置 `app.toml` 模板，以及 `deploy/data/config/elbot/app.toml` 全部切到 `/`；仓库内 `docs/*.md` 的命令示例也同步替换为 `/`（只保留 `notes/*.md`、`/plugins/*` 这类真正的通配符写法）。已有部署若在 `app.toml` 显式保留 `prefixes = ["/*"]` 则行为不变，配置里出现了什么前缀就仍按什么前缀解析。`docs.en/`、`README.md`、`README.zh-CN.md` 以及本文件的历史条目未同步替换。
+- `image_to_prompt`、`image_generate`、`angel_remember` 三个内置工具的风险等级由 `medium` 降为 `low`，在默认 `[security] user_max_tool_risk = "low"` 下普通用户即可调用，不再需要整体放宽工具风险上限。`image_generate` 仍额外受 `[image_generation] superadmin_only` 约束，只有该开关为 `false` 时才真正对普通用户开放；两个生图相关工具和长期记忆写入都建议同时配置群级额度（`image-quota` / `user-image-quota` / `vision-quota` / `user-vision-quota`）。
 
 ## [v0.6.8 - 2026-10-04]
 

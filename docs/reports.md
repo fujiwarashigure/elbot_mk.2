@@ -159,4 +159,4 @@ ElBot 定时报告
 3. **价格准确性**：单价以你的官方/中转账单为准，ElBot 只做乘法；缓存命中 token 会按 `cache_input_per_million` 计价（未配置则按输入价）。
 4. **磁盘指标**：数据目录默认是 SQLite 所在目录（含 `logs/`、`media/`、`sandbox/` 等）；文件系统使用量需要 Linux（`statfs`），其他平台只报数据目录大小。
 5. **服务器时区**：高峰判定按北京时间；部署脚本已设置 `TZ=Asia/Shanghai`，如果自己改过时区，记得保持 Asia/Shanghai，否则高低峰会算错。
-6. **手动补发**：可以直接调用维护任务同名的 cron（`maintenance.daily_report`）或用 `/*cron` 触发一次，例如临时创建一个只跑一次的任务。
+6. **手动补发**：可以让机器人调用 `cron` 工具触发同名维护任务（`maintenance.daily_report`），或临时创建一个只跑一次的任务。注意 `cron` 是超级管理员专用的**内置工具**而不是 slash 命令：需要先切到 `work` 模式，并让模型发现该工具（也可用 `@tool:cron` 预载）。

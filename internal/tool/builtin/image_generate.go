@@ -95,7 +95,7 @@ func (ImageGenerateTool) Name() string { return ImageGenerateName }
 func (t ImageGenerateTool) Info() tool.Info {
 	builder := tool.NewBuilder(ImageGenerateName).
 		Description("调用生图服务（OpenAI 兼容 images/generations，默认 GPT Image 2.5）生成图片。最终提示词 = 全局预设 + 所有已索引角色的图片预设 + 提示词优化后的场景描述；消息里用 @char:<id> 启用多个角色、或调用时传 character_ids，会自动把多个角色放进同一张图。mode=auto（默认）会从 prompt 自动识别多个角色名/别名、按需拉当前群聊上下文、并在 prompt 太短或含糊时用低成本模型做语义改写；内置提示词库会自动补充用途比例、画风锚点和负面词。除非显式传 count>1，否则一次调用只生成一张包含全部索引角色的图。").
-		Risk(tool.RiskMedium).
+		Risk(tool.RiskLow).
 		Tags("image", "character").
 		DependsOn(CharacterReadName, "send_file", PromptLibrarySearchName, "search_chat_history")
 	if t.cfg.SuperadminOnly {

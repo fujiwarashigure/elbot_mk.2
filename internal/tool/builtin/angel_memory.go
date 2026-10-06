@@ -168,7 +168,7 @@ func memoryTraceSuffix(memory angelmemory.Memory) string {
 func angelRememberBuilder() *tool.Builder {
 	return tool.NewBuilder(angelRememberToolName).
 		Description("记录一条当前平台/会话范围内的长期记忆。用户明确表达重要偏好、事实或约定时使用。").
-		Risk(tool.RiskMedium).
+		Risk(tool.RiskLow).
 		Tags("memory").
 		String("content", "要记住的内容，建议第三人称、一条一件事。", tool.Required()).
 		String("tags", "可选标签，用逗号或空格分隔。")

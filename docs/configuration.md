@@ -128,7 +128,7 @@ systemd 用户服务没有显式设置 PATH 时，ElBot 使用服务管理器提
 
 ### 生效时机
 
-配置根 `.env` 或 systemd 环境在重启 ElBot 后生效。`plugins/.env` 和插件 `.env` 在启动及 `/*hooks reload` 时重新读取，reload 会按新环境重建 Worker；文件不存在时视为空配置。
+配置根 `.env` 或 systemd 环境在重启 ElBot 后生效。`plugins/.env` 和插件 `.env` 在启动及 `/hooks reload` 时重新读取，reload 会按新环境重建 Worker；文件不存在时视为空配置。
 
 
 ## 共享服务配置 services.toml
@@ -521,14 +521,14 @@ model = "deepseek-chat"
 - `work` 模式启用工具发现和工具调用。
 - `chat` 模式不注入工具，适合闲聊和低成本对话。
 - `elwisp1`、`elwisp2`、`elwisp3` 是 Elnis LLM 事件可选模型槽位；Elvena 请求可通过 `model_slot` 指定，未配置时回退到 `work`。
-- 运行时使用 `/*model` 切换模型后，状态会写回 `state.toml`。
+- 运行时使用 `/model` 切换模型后，状态会写回 `state.toml`。
 
 ### 外部修改 `state.toml` 的热加载
 
 `state.toml` 会被 ElBot 运行时回写，同时也支持手工编辑后热加载，不需要重启：
 
 - 进程每 15 秒检查一次 `state.toml` 的修改时间；文件比进程最后加载/写回的版本更新时，会立即读取并生效，并记录 `runtime_state_reloaded` 审计事件，同时给超级管理员发送一条通知（每次外部修改只通知一次，只有实际生效的变更才会通知）；
-- 需要立刻生效时使用 `/*state reload`；`/*state` 可查看文件路径、已加载时间和是否存在未生效的外部修改；
+- 需要立刻生效时使用 `/state reload`；`/state` 可查看文件路径、已加载时间和是否存在未生效的外部修改；
 - 热加载覆盖 `mode_models`、`compact_model`、`naming_model`、`context_overflow`、`group_policy`、`group_knowledge`、`group_services`、`group_runtime`；
 - 每次内部写回之前都会先合并外部修改，因此“刚手工改完就触发内部写回”不会丢掉这次修改；
 - `[budget]` 额度账本由运行中的进程独占：热加载不会用文件内容覆盖内存中的账本（避免丢掉在途预占），账本只在进程启动时从文件恢复。手工编辑 `[budget]` 不会在运行中生效，且会在下一次写回时被内存值替换；
@@ -639,11 +639,11 @@ overflow_mode = "reject"
 ```
 
 - 开启后，Session 上下文接近窗口上限时会触发压缩。
-- 也可以通过 `/*compact` 手动压缩当前 Session。
+- 也可以通过 `/compact` 手动压缩当前 Session。
 - 压缩成功后会切换到独立的新 Session，不修改原 Session 的历史。
 - 发送前会估算 system prompt、历史、当前用户消息和工具 schema 的总 token。超过 `max_prompt_ratio` 或单条消息超过 `single_message_max_ratio` 时触发长消息保护。
 - `reject` 默认不调用模型，直接在群里返回报警；`truncate` 保留能放下的一段并继续；`summarize` 使用 compact 模型（未配置时回退当前模式模型）自动摘要后继续。
-- 群管理员可用 `/*overflow --chat <策略>`、`/*overflow --work <策略>` 或 `/*overflow --all <策略>` 覆盖当前群设置，`/*overflow reset ...` 恢复全局默认。该覆盖写入 `state.toml` 的 `context_overflow` 表。
+- 群管理员可用 `/overflow --chat <策略>`、`/overflow --work <策略>` 或 `/overflow --all <策略>` 覆盖当前群设置，`/overflow reset ...` 恢复全局默认。该覆盖写入 `state.toml` 的 `context_overflow` 表。
 
 模型窗口在 `services.toml`（旧部署为 `providers.toml`）的 `model_configs` 中配置：
 
@@ -661,10 +661,10 @@ default_context_window = 256000
 
 ```toml
 [commands]
-prefixes = ["/*"]
+prefixes = ["/"]
 ```
 
-默认使用 `/`。如果要支持其他命令前缀，可以在这里添加。
+默认使用 `/`。如果要支持其他命令前缀，可以在这里添加（历史版本默认是“斜杠 + 星号”）。
 
 ## 工具与安全
 
@@ -735,7 +735,7 @@ MUST:
 - 配置 tag 会追加到内置 tag，不覆盖内置 tag。
 - 只有 `@tool:<tag>` 或 `@t:<tag>` 成功命中至少一个工具后，当前 Session 才会激活该 tag 的 prompt。
 - 直接 `@tool:<tool-name>` 或 `@t:<tool-name>` 只预载指定工具，不激活 tag prompt。
-- 激活的 tag 会写入 Session metadata，`/*resume` 后仍生效。
+- 激活的 tag 会写入 Session metadata，`/resume` 后仍生效。
 - prompt 文本从 `tool_tags.toml` 动态读取；文件变更后影响后续请求，行为类似 `SOUL.md`。
 - 重复预载已经存在的工具时不会重复添加，平台会提示 `已存在工具：<name>`。
 - 建议把 `prompt` 写成具体工具使用策略，不要写“当前 tag 是 xxx”这类模型不需要知道的配置机制。
@@ -921,12 +921,12 @@ report_days = 1
 
 ## 群级策略
 
-群级策略由服务端按 `平台 + 群 scope` 判断，不依赖角色提示词，也不允许通过命令参数指定别的群。策略写入 `state.toml` 的 `group_policy` 表；可用 `/*grouppolicy` 查看和修改，详见 `docs/commands.md`。
+群级策略由服务端按 `平台 + 群 scope` 判断，不依赖角色提示词，也不允许通过命令参数指定别的群。策略写入 `state.toml` 的 `group_policy` 表；可用 `/grouppolicy` 查看和修改，详见 `docs/commands.md`。
 
 - 每群可独立设置唤醒词、响应模式、默认会话模式、默认模型与模型目录、工具白名单、生图/视觉额度、静默时段和功能开关、会话线程与连续消息合并窗口、本地知识库回答开关、提醒/投票/报名开关。
 - 响应模式 `mention` 为默认：命令、唤醒词、@ 机器人或回复机器人消息会触发；`all` 响应所有普通群消息；`keyword` 只认唤醒词；`reply` 只认回复；`off` 关闭普通响应。转发内容不会进入唤醒/命令匹配视图；直接消息里的 `@` 和唤醒词才会触发。
-- 群聊默认每人独立 Session（`thread-mode per-user`）。`/*grouppolicy thread-mode group` 后，本群所有成员共享一个 Session，普通消息按 turn 串行处理；每条用户消息会携带服务端生成的发言成员标记（如 `[发言成员：张三(id:1001)]`），避免不同成员的输入互相覆盖；这些标记只是上下文归属提示，不是权限边界，工具与额度仍按实际发送者 Actor 判断。开启共享线程不会迁移旧 per-user Session，下一条消息会开始一个新的共享 Session；共享会话的切换/修改命令仅限当前群群主、群管理员或机器人超级管理员，普通成员仍可发消息。
-- `/*grouppolicy merge-window <0-10000>` 设置连续消息合并窗口（毫秒，0 表示关闭）。窗口内同一成员的连续消息会在同一个 turn 内合并发送，减少重复调用；不同成员的消息仍会按到达顺序串行，不会合并成同一个权限主体；每个 Session 的待处理队列有硬上限，超过时本地拒绝并发送提示，避免刷屏耗尽内存。
+- 群聊默认每人独立 Session（`thread-mode per-user`）。`/grouppolicy thread-mode group` 后，本群所有成员共享一个 Session，普通消息按 turn 串行处理；每条用户消息会携带服务端生成的发言成员标记（如 `[发言成员：张三(id:1001)]`），避免不同成员的输入互相覆盖；这些标记只是上下文归属提示，不是权限边界，工具与额度仍按实际发送者 Actor 判断。开启共享线程不会迁移旧 per-user Session，下一条消息会开始一个新的共享 Session；共享会话的切换/修改命令仅限当前群群主、群管理员或机器人超级管理员，普通成员仍可发消息。
+- `/grouppolicy merge-window <0-10000>` 设置连续消息合并窗口（毫秒，0 表示关闭）。窗口内同一成员的连续消息会在同一个 turn 内合并发送，减少重复调用；不同成员的消息仍会按到达顺序串行，不会合并成同一个权限主体；每个 Session 的待处理队列有硬上限，超过时本地拒绝并发送提示，避免刷屏耗尽内存。
 - 群管理员只能改当前群的普通策略；`allowed-models`、`learning-moderation`、`learning-moderation-actions` 只能由超级管理员配置。群管理员不能修改其他群、provider/密钥或全局 Shell 权限。
 - 机器人自身被禁言、被踢或主动离群时，服务端按当前群维护运行状态并写入 `state.toml` 的 `group_runtime`（`active` / `muted` / `removed` / `unavailable`，缺省视为 `active`）。`muted` / `removed` 期间：拒绝该群新的模型调用、取消该群在途请求、丢弃发往该群的定时任务/提醒/后台通知，避免“模型继续计费但结果发不出去”；每次状态变化只向超管发送一次聚合通知，重复事件不重复通知。解除禁言或重新入群后恢复为 `active`，暂停期间的通知不会集中补发。
 - 模型目录 `allowed-models` 为空时，群默认模型只能从已配置的模型别名/profile 中选择；显式填入 `provider/model` 或 `*` 才会放开对应范围。模型别名解析后仍会对最终 `provider/model` 再做一次目录校验。
@@ -1012,7 +1012,7 @@ max_context_runes = 1200
 ```
 
 - 使用本地 SQLite `angel_memory.db`；
-- 提供 `angel_remember` / `angel_recall` 工具；`angel_recall` 结果会显示记忆 ID 和来源；
+- 提供 `angel_remember` / `angel_recall` 工具（两者风险均为 `low`，默认 `user_max_tool_risk` 下普通用户可用）；`angel_recall` 结果会显示记忆 ID 和来源；
 - 每条记忆记录来源类型、来源用户、平台消息 ID 和 Session ID；`/memory list|show`、`/forget list` 可查看，`/memory delete`、`/forget` 可按 scope 和权限删除；
 - `forget_on_recall = true` 时，平台消息撤回事件会按 `平台 + scope + 消息 ID` 删除由该消息派生的长期记忆；设为 `false` 只取消该消息对应的在途处理，不删除记忆；
 - 召回会先做关键词 / 中文 2-4 字 n-gram 匹配与相关度排序；没有命中时，自动注入会谨慎回退到少量高强度记忆；
@@ -1030,7 +1030,7 @@ max_context_runes = 1200
 
 - 只能删除**来源成员为当前发言人**、且属于**当前平台/会话 scope** 的记忆；别人的记忆、其他会话的记忆、以及旧版没有记录来源成员的记忆都会直接拒绝；
 - 单次调用只删除一条，`id` 必须来自 `angel_recall` 的输出（支持唯一前缀）；
-- 风险等级为 `high`，会进入工具确认流程，用户可以用 `/*detail` 查看待删除内容、`/*confirm` 确认、`/*reject` 拒绝；
+- 风险等级为 `high`，会进入工具确认流程，用户可以用 `/detail` 查看待删除内容、`/confirm` 确认、`/reject` 拒绝；
 - 除平台确认外，工具自身还要求 `confirm=true`：第一次调用只返回待删除内容，不会删除；带 `confirm=true` 再次调用才执行；
 - 同一范围内每分钟最多删除 3 条，超过会被拒绝，避免模型循环删除；
 - `angel_forget` 是隐藏工具，通过 `angel_recall` 的依赖关系注入模型；管理员要批量删除请继续使用 `/memory delete` 与 `/forget`。
@@ -1129,7 +1129,7 @@ optimize_rewrite_min_runes = 40
 auto_character = true
 auto_context = true
 context_default_limit = 6
-superadmin_only = true
+superadmin_only = true       # true=仅超管；false=工具风险降为 low，普通用户也能调用（建议配合群级生图额度）
 save_to_character = true
 send_by_default = false
 supports_reference = false
@@ -1194,7 +1194,7 @@ timeout_seconds = 90
 - 引擎有内部上限：默认同时最多 4 个上游任务、最多排队 16 个、同一任务最多 16 个等待者，超出快速失败；这些默认值用于保护 provider，正常使用无需调整。
 - 失败、空结果、被 `max_tokens` 截断的结果都不会写入缓存，下次调用会重试。
 - 图片先按 `max_edge` 缩放、按 `max_image_bytes` 压缩再上传：这能降低传输体积，并在按分辨率计费的视觉模型上减少图片 token；实际节省取决于上游的计费规则，请按所用模型验证。`max_tokens` 限制返回长度，工具只把提示词正文返回给聊天模型。
-- 配置后按 `risk = medium` 走 `[security] user_max_tool_risk` 权限判断（默认策略下普通用户不能调用）。
+- 配置后工具风险是 `low`，按 `[security] user_max_tool_risk` 判断权限；默认 `user_max_tool_risk = "low"` 时普通用户即可调用。线上建议配合群级 `vision-quota` / `user-vision-quota` 限制额度。
 - `timeout_seconds` 是整次操作的预算，覆盖图片预处理、请求（含 provider 侧重试）和流式读取。
 
 > 主聊天模型没有视觉能力时，ElBot 会把图片替换成带媒体 ID 的文本引用，模型据此调用本工具，图片只发送给这里配置的视觉模型一次。
@@ -1475,7 +1475,7 @@ stream_edit_interval_milliseconds = 250
 - `stream_edit_interval_milliseconds` 控制流式刷新节流间隔，默认 250ms，避免触发平台限频。
 - 启动连接成功后，ElBot 会把内置 slash 命令同步到 Telegram bot 命令菜单；只同步主命令名，不同步 alias。
 - 群聊/超级群组中，命令前缀、触发关键词、`@bot_username` 或回复 bot 消息都会触发处理。私聊默认处理。
-- 高风险工具确认消息会附带 Telegram inline keyboard，点击按钮会转换为 `/*confirm`、`/*reject` 等现有确认命令。
+- 高风险工具确认消息会附带 Telegram inline keyboard，点击按钮会转换为 `/confirm`、`/reject` 等现有确认命令。
 - `security.superadmins.telegram` 填 Telegram 用户 ID 或可直接发送的私聊 chat ID，用于超级管理员权限与通知投递。
 
 

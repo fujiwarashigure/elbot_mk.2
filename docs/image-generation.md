@@ -325,7 +325,7 @@ context_default_limit = 6
 ## 权限与费用
 
 - `superadmin_only = true`（默认）时，只有 `[security.superadmins]` 里的用户能调用；
-- 设为 `false` 后工具风险是 `medium`，普通用户还需要 `security.user_max_tool_risk >= "medium"` 才能调用；
+- 设为 `false` 后工具风险是 `low`，默认 `[security] user_max_tool_risk = "low"` 下普通用户即可调用；建议配合群级 `image-quota` / `user-image-quota` 一起使用；
 - 建议配合中转站侧的额度和限速一起使用；单次调用失败会以工具结果形式返回，不会影响 Session。
 
 ## 排错

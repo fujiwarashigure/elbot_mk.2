@@ -32,7 +32,7 @@ func PrimaryCommandPrefix(prefixes []string) string {
 			return prefix
 		}
 	}
-	return "/*"
+	return "/"
 }
 
 // StripTriggerKeyword removes only the matched keyword prefix from text.

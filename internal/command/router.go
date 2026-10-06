@@ -10,7 +10,7 @@ import (
 )
 
 // defaultCommandPrefix 是未显式配置命令前缀时的默认值。
-const defaultCommandPrefix = "/*"
+const defaultCommandPrefix = "/"
 
 type Router struct {
 	prefixes      []string
