@@ -35,6 +35,29 @@ func TestSendNoticeSkipsGroupToolPreview(t *testing.T) {
 	}
 }
 
+// 群聊跳过只针对工具进度预览：普通通知照发，否则会把用户可见的内容也丢掉。
+func TestSendNoticeKeepsGroupPlainNotice(t *testing.T) {
+	var action string
+	transport := newTestTransport(t, func(req request) response {
+		action = req.Action
+		return response{Status: "ok", Data: []byte(`{"message_id":77}`), Echo: req.Echo}
+	})
+	adapter := New(Config{Enabled: true, URL: transport.URL}, nil, nil, nil)
+	adapter.transport = transport
+	ctx := context.WithValue(context.Background(), targetKey{}, target{MessageType: "group", GroupID: 9})
+
+	receipt, err := adapter.SendNotice(ctx, delivery.Notice{Outputs: []delivery.Output{delivery.Text("普通通知")}})
+	if err != nil {
+		t.Fatalf("SendNotice: %v", err)
+	}
+	if len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "77" {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	if action != "send_group_msg" {
+		t.Fatalf("action = %q", action)
+	}
+}
+
 func TestSendNoticeKeepsPrivateToolPreview(t *testing.T) {
 	var action string
 	transport := newTestTransport(t, func(req request) response {

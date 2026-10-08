@@ -91,7 +91,7 @@ func (a *Adapter) SendChat(ctx context.Context, outputs []delivery.Output) (deli
 func (a *Adapter) SendNotice(ctx context.Context, notice delivery.Notice) (delivery.Receipt, error) {
 	target := notice.Target
 	outputs := notice.Outputs
-	if target.Empty() && isGroupToolPreviewNotice(ctx, outputs) {
+	if delivery.ShouldDropGroupToolPreview(target, outputs, isGroupContext(ctx)) {
 		return delivery.Receipt{}, nil
 	}
 	if target.Empty() {
@@ -147,10 +147,9 @@ func (a *Adapter) targets(target delivery.Target) ([]sendTarget, error) {
 	return nil, fmt.Errorf("qqofficial target missing private_user_id, group_id or scope_id")
 }
 
-func isGroupToolPreviewNotice(ctx context.Context, outputs []delivery.Output) bool {
-	if !delivery.IsToolPreviewNotice(outputs) {
-		return false
-	}
+// isGroupContext 报告当前发送上下文是不是群聊。群聊跳过规则本身在交付层
+// （`delivery.ShouldDropGroupToolPreview`），这里只回答"是不是群聊"。
+func isGroupContext(ctx context.Context) bool {
 	target, ok := ctx.Value(targetKey{}).(sendTarget)
 	return ok && target.Kind == targetGroup
 }

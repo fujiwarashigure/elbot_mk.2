@@ -367,7 +367,7 @@ func (a *Adapter) SendNotice(ctx context.Context, notice delivery.Notice) (deliv
 	}
 	outTarget := notice.Target
 	outputs := notice.Outputs
-	if outTarget.Empty() && isGroupToolPreviewNotice(ctx, outputs) {
+	if delivery.ShouldDropGroupToolPreview(outTarget, outputs, isGroupContext(ctx)) {
 		return delivery.Receipt{}, nil
 	}
 	if outTarget.Empty() {
@@ -419,10 +419,10 @@ func textOutputs(outputs []delivery.Output) (string, bool) {
 	}
 	return text.String(), true
 }
-func isGroupToolPreviewNotice(ctx context.Context, outputs []delivery.Output) bool {
-	if !delivery.IsToolPreviewNotice(outputs) {
-		return false
-	}
+
+// isGroupContext 报告当前发送上下文是不是群聊。群聊跳过规则本身在交付层
+// （`delivery.ShouldDropGroupToolPreview`），这里只回答"是不是群聊"。
+func isGroupContext(ctx context.Context) bool {
 	t, ok := ctx.Value(targetKey{}).(target)
 	return ok && t.MessageType == "group"
 }

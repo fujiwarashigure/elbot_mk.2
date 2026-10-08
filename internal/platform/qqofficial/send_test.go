@@ -139,6 +139,53 @@ func TestSendNoticeSkipsGroupToolPreview(t *testing.T) {
 	}
 }
 
+// 群聊跳过只针对工具进度预览：普通通知照发，否则会把用户可见的内容也丢掉。
+func TestSendNoticeKeepsGroupPlainNotice(t *testing.T) {
+	var body messageToCreate
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"id":"sent-plain"}`))
+	}))
+	defer server.Close()
+
+	adapter := newQQOfficialSendTestAdapter(server)
+	ctx := context.WithValue(context.Background(), targetKey{}, sendTarget{Kind: targetGroup, OpenID: "group-1"})
+	receipt, err := adapter.SendNotice(ctx, delivery.Notice{Outputs: []delivery.Output{delivery.Text("普通通知")}})
+	if err != nil {
+		t.Fatalf("SendNotice: %v", err)
+	}
+	if len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "sent-plain" {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	if body.Content != "普通通知" {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+// 私聊里工具进度预览照发：这条规则只针对群聊。
+func TestSendNoticeKeepsPrivateToolPreview(t *testing.T) {
+	var body messageToCreate
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"id":"sent-c2c"}`))
+	}))
+	defer server.Close()
+
+	adapter := newQQOfficialSendTestAdapter(server)
+	ctx := context.WithValue(context.Background(), targetKey{}, sendTarget{Kind: targetC2C, OpenID: "user-1"})
+	receipt, err := adapter.SendNotice(ctx, delivery.Notice{Outputs: []delivery.Output{delivery.Text("[tool] 正在调用 shell：{}")}})
+	if err != nil {
+		t.Fatalf("SendNotice: %v", err)
+	}
+	if len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "sent-c2c" {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+}
+
 func TestTargetAPIPathSupportsC2CAndGroup(t *testing.T) {
 	tests := []struct {
 		target sendTarget

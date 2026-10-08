@@ -106,6 +106,17 @@ func IsToolPreviewNotice(outputs []Output) bool {
 	return len(outputs) == 1 && outputs[0].IsToolPreview()
 }
 
+// ShouldDropGroupToolPreview 是"群聊里不投递工具调用进度预览"这条平台跳过规则的唯一入口。
+// 规则由三个条件组成：通知没有显式目标（发给当前会话）、当前上下文是群聊、且这条通知就是
+// 工具调用进度预览——群聊里的进度预览是噪声，丢弃时也不算失败。
+//
+// 唯一按平台变化的部分是"当前上下文是不是群聊"：各适配器的上下文键类型不同（OneBot 用
+// 消息类型，QQ 官方用 sendTarget.Kind），因此由调用方传入，其余判定不再各写一份。
+// Telegram 与本地 CLI 不跳过预览：前者没有这条规则，后者的预览是本地终端输出。
+func ShouldDropGroupToolPreview(target Target, outputs []Output, groupContext bool) bool {
+	return target.Empty() && groupContext && IsToolPreviewNotice(outputs)
+}
+
 func WithDeliveryTiming(out Output, timing string) Output {
 	timing = strings.TrimSpace(timing)
 	if timing == "" || timing == DeliveryImmediate {

@@ -143,12 +143,22 @@
 | `internal/hook/builtin/register.go` | 出站历史跳过预览改用同一个前缀常量 |
 | `internal/delivery/tool_preview_test.go`（新） | 覆盖前缀识别、非预览拒绝（普通回答、`[tools]`、空正文、非文本 Kind、只有前缀、正文里提到 `[tool]`）与"必须恰好一条文本输出" |
 
-**剩余步骤（需用户给边界）**：
+**剩余步骤（已按用户给定的边界做完第二轮，见下）**：
 
-- "通知被禁用时不投递"的负向测试已有：`internal/agent/group_runtime_test.go` 的 `TestSelfMutePausesGroupCallsOutputAndPersists` 断言被静音群里显式群通知被丢弃、只有状态变更通知发出一次。若要更细的"某个通知目标被禁用"矩阵，需要先明确禁用维度（群运行状态 / 通知目标开关 / 平台能力）。
-- 其余平台级跳过规则（工具预览之外的）需要逐个确认是否语义相同再合并；不同语义的不能为了"集中"而强行统一。上游 `internal/notification/*` 是一整套通知目标裁决模块，若要按上游形态重做，需要用户先定范围。
+- "通知被禁用时不投递"的负向测试已有：`internal/agent/group_runtime_test.go` 的 `TestSelfMutePausesGroupCallsOutputAndPersists` 断言被静音群里显式群通知被丢弃、只有状态变更通知发出一次。没有再做"某个通知目标被禁用"矩阵——禁用维度（群运行状态 / 通知目标开关 / 平台能力）里的目标开关与平台能力目前各自只有一处实现，做成矩阵只是把同一判定抄成表，不增加保护。
+- 其余平台级跳过规则已逐个盘点（第二轮），结果见下面的表。
 
-**验收**：通知目标的裁决逻辑只有一处入口（`Agent.SendNotice`，已确认）；cron / Elnis / Hook 三条投递路径都走它（已确认）；补"通知被禁用时不投递"的负向测试（已有群运行状态一例，可按用户给定维度扩展）。
+**第二轮：平台级跳过规则盘点与合并（提交见 §6 记录）**：
+
+| 规则 | 出现位置 | 语义 | 处置 |
+| --- | --- | --- | --- |
+| 群聊里不投递工具调用进度预览 | `qq-onebot`、`qqofficial` | **完全相同**：通知无显式目标 + 当前上下文是群聊 + 该通知就是预览（单条文本 + `"[tool] "` 前缀）⇒ 静默丢弃、不算失败 | **已合并**：规则整体收敛为 `delivery.ShouldDropGroupToolPreview(target, outputs, groupContext)`，两个适配器只保留 `isGroupContext`（各自的上下文键类型不同：OneBot 看 `target.MessageType`，QQ 官方看 `sendTarget.Kind`） |
+| 空白文本不发 | `qq-onebot`、`qqofficial`、`telegram` 各自的 `sendText` / `sendContextText` | 语义相同（`strings.TrimSpace(text) == ""` ⇒ 空回执），但只有一行、无共享状态 | **不合并**：抽成公共函数不增加任何保护，只是把 `TrimSpace` 换个名字；三处已用同一写法 |
+| 主动消息被禁用时报错 | `qqofficial`（`Proactive && !allowProactive()`） | 平台配置特有 | **保持平台内**：只有 QQ 官方有"主动消息"概念 |
+| 本地 CLI / headless 不过滤 | `cli`、`headless` | CLI 的预览就是终端输出；headless 无投递 | **不改** |
+| Telegram 不过滤群聊预览 | `telegram` | **与 QQ 两处不同**：Telegram 从未有这条规则（QQ 侧来自 `8129dd8 "qqonebot will not send notify in group"`） | **未统一**：无法从代码断定是"漏移植"还是"Telegram 群聊就是要看进度"，按"不同语义不强行统一"保留原行为，**留给用户决策**（若确认要一致，加一行 `delivery.ShouldDropGroupToolPreview(...)` + 目标是否群聊的判断即可） |
+
+**验收**：通知目标的裁决逻辑只有一处入口（`Agent.SendNotice`，已确认）；cron / Elnis / Hook 三条投递路径都走它（已确认）；平台级跳过规则中"语义相同"的那条已只有一份实现，且边界（群聊普通通知照发、私聊预览照发、显式目标预览照发、多输出不算预览）都有测试固定。
 
 ## 5. [ ] P2 换基路线 B：原生 Responses 协议（20–35 人日，**需先决策**）
 
