@@ -184,4 +184,6 @@
 
 ## 7. 待盘点（增量）
 
-- [ ] 上游是否有新的 `### Added` / `### Fixed` 需要挑拣：`git log --oneline HEAD..upstream/main` + 上游 `CHANGELOG.md` 的 Unreleased 段。
+- [x] 上游是否有新的 `### Added` / `### Fixed` 需要挑拣：`git log --oneline HEAD..upstream/main` + 上游 `CHANGELOG.md` 的 Unreleased 段。
+  - **本轮盘点结果（无需挑拣）**：本地 `upstream/main` 仍是 `8457fdd`（"update dev docs"），未移动；`git ls-remote https://github.com/Elflare/elbot.git main` 返回同一个 `8457fdd`，与上一轮盘点一致。截至本次盘点，上游没有新的提交可供挑拣，`HEAD..upstream/main` 为空。
+  - **注意**：本仓库**没有配置 `upstream` remote**（只有 `origin`）。`refs/remotes/upstream/main` 是之前手工 fetch 留下的 ref；下一次增量盘点需要先 `git fetch https://github.com/Elflare/elbot.git main:refs/remotes/upstream/main`，否则会拿到过期结论。
