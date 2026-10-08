@@ -21,6 +21,7 @@ import (
 	hookbuiltin "elbot/internal/hook/builtin"
 	hookcontrol "elbot/internal/hook/control"
 	hookruntime "elbot/internal/hook/runtime"
+	"elbot/internal/logging"
 	"elbot/internal/media"
 	"elbot/internal/memory/resident"
 	"elbot/internal/ops/diskguard"
@@ -543,9 +544,15 @@ func buildAgent(
 	return agt, nil
 }
 
+// auditFunc 是 app 层所有审计来源的统一入口（命名失败、cron、Elwisp、hook、平台连接）。
+// 与 Agent 侧一样补 module=app：来源标识是日志契约的一部分，`/audit --module` 类的筛选
+// 依赖它，不能让 app 记录成为唯一没有来源的一类。
 func auditFunc(logs LogManager) func(string, ...any) {
 	return func(event string, attrs ...any) {
-		logs.Audit().Log(context.Background(), slog.LevelInfo, "audit event", append([]any{"event", event}, attrs...)...)
+		head := make([]any, 0, len(attrs)+4)
+		head = append(head, "event", event, "module", logging.ModuleApp)
+		head = append(head, attrs...)
+		logs.Audit().Log(context.Background(), slog.LevelInfo, "audit event", head...)
 	}
 }
 

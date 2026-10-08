@@ -77,7 +77,7 @@
 
 ---
 
-## 2. [~] P1#1 日志与信号整改（5–8 人日）
+## 2. [x] P1#1 日志与信号整改（fork 最小版 A 已完成）— 提交 `2fca418` / `04e255a` / `fb17b9f` / `1c31637` / `b6f0d7a`
 
 **范围已与用户确认（取 fork 最小版 A）**：只做"最小契约 + 修事实丢失缺陷"，**不改日志文件格式、不改 `LogEntry.Fields` 查询契约**；上游的九字段 `LogRecord`、JSONL 落盘、`internal/events` / `internal/signal` 全量迁移列入"不做/待决策"，不在本项范围内。
 
@@ -90,14 +90,21 @@
 | `internal/logging/contract.go`（新） | fork 版来源标识 + 操作结果契约：`ModuleApp`…`ModuleTool` 共 13 个已登记来源、`ModuleHook` 等常量、`Result{Succeeded,Failed,Canceled,Rejected,Skipped}`、`LogModules()` / `ValidLogModule()` / `ValidLogResult()`；文件头写明与上游九字段契约的边界（正文长度、JSON 正文、JSONL 落盘本轮不实施） |
 | `internal/tool/availability.go`（新） | 工具"为什么没被采用"的互斥机器可读原因与唯一判定入口：`ToolAvailabilityReason` / `ToolAccessReason` / `RegistryToolAvailabilityReason`，原因常量 `tool_not_found` / `tool_context_unavailable` / `tool_hidden` / `tool_requires_superadmin` / `tool_risk_above_allowed_level` / `tool_no_schema` |
 | `internal/agent/cron.go`、`tool_directive.go` | `background_preload_skipped` / `tool_preload_skipped` / `skill_wrapper_preload_skipped` 不再输出 `not_found_or_not_allowed`，改为新原因 + `result`（策略/角色拒绝 `rejected`，其余 `skipped`）；`canPreloadToolRoot` / `canPreloadSkill` 改为委托给原因函数，`@skill:` 根与包装工具分成 `preloadSkillRootReason` / `preloadSkillWrapperReason`（包装工具**不**按 Hidden 拒绝——隐藏是包装工具常态） |
-| `internal/agent/logging.go` | 所有 Agent 审计记录带 `module=agent`；新增 `normalizeAuditAttrs` 把属性里的 `error` 统一转成脱敏字符串 |
+| `internal/agent/logging.go` | 所有 Agent 审计记录带 `module=agent`；新增 `normalizeAuditAttrs` 把属性里的 `error` 统一转成脱敏字符串；`auditError` 统一补 `result=failed`（调用方显式给出时不覆盖） |
+| `internal/app/runtime.go` | app 层审计统一入口 `auditFunc` 补 `module=app`——此前 app 记录是唯一没有来源标识的一类（命名失败、cron、Elwisp、hook 接线都经它） |
 | `internal/agent/toolrun_adapter.go`、`command_runtime.go` | `permission_denied` 带 `result=rejected` |
 | `internal/hook/runtime/tool_bridge.go`、`rules/action.go`、`rules/exec.go` | `hook.tool_call` → `hook_tool_call`、`hook.platform_call` → `hook_platform_call`；`hook_platform_call` 改为按真实调用结果记录（成功/失败带 `error` 与 `result`）；错误对象统一字符串化 |
-| 测试（新） | `internal/logging/contract_test.go`、`internal/tool/availability_test.go`（含"新原因入口与 `CanAccessTool`+`InfoAvailableInContext` 判定等价"的固定测试）、`internal/agent/logging_test.go`（`module` 来源、无 logger 时 noop、错误属性转换） |
+| 测试（新） | `internal/logging/contract_test.go`、`internal/logging/contract_source_test.go`（源码级 result 契约校验）、`internal/tool/availability_test.go`（含"新原因入口与 `CanAccessTool`+`InfoAvailableInContext` 判定等价"的固定测试）、`internal/agent/logging_test.go`（`module` 来源、无 logger 时 noop、错误属性转换）、`internal/app/audit_test.go`（`auditFunc` 带 `module=app` 且不挤掉调用方属性） |
 
-**剩余步骤**：按包分批把其余审计事件纳入契约（补 `result`；`module` 已由 Agent 审计入口统一写入，Hook 侧由各调用点显式传入）。已完成两批：第一批 23 个文件、可自证结果的调用点；第二批逐处判断上下文相关的事件（撤回/用户取消记 `canceled`、群运行状态记 `succeeded`、随之取消记 `canceled`、部分发送与预算 uncertain 记 `failed`）。`internal/agent` 与 Hook 侧现有 80 处契约取值，并新增源码级契约校验（`internal/logging/contract_source_test.go`，扫描所有非测试 `.go` 里写死的 `result` 值，覆盖 69 处）；其余把结果交给函数判定（`tool_call`、`risk_confirmation_result`、`preloadSkipResult`）的无法静态校验，由单元测试覆盖。上游式的九字段契约是否要做（含 JSONL 与 Reader 重写）需要用户另行决策，本项不擅自扩大。
+**来源标识覆盖度（收官核对）**：全仓库 175 处审计入口调用——`internal/agent` 152 处经 `auditLog` 统一补 `module=agent`，`internal/app` 2 处经 `auditFunc` 统一补 `module=app`，`internal/hook` 21 处显式传 `module=hook`。**没有任何审计记录缺少来源标识。**
 
-**验收**：`/log`、`/audit` 的筛选参数在新来源下仍可用；每批迁移后跑受影响包测试 + `internal/app`。
+**操作结果覆盖度**：`internal/agent` 与 Hook 侧共 80 处契约取值，源码级校验覆盖其中写死的 69 处；其余 11 处把结果交给函数判定（`tool_call` 按 `success` 映射、`risk_confirmation_result` 按动作区分、预载跳过复用 `preloadSkipResult`），由各自单元测试覆盖。
+
+**信号侧现状（本次核对）**：fork 用 `hook.PointPlatformConnected`（`platform.connected`）+ `platform.ConnectNotifier` 回调承载"平台已连接"这一进程级事实，`internal/app/platforms.go` 的 `registerPlatformHooks` 注册回调、`registerCronPlatformHook` 与 Agent 的 `NotifyPlatformConnected` 各自订阅（cron 补投递 missed-once、hook 通知），与上游"全局信号 + 各自订阅"的语义一致，只是载体不同（hook 点而非 `internal/signal`）。**无需迁移 `internal/signal`**（fork 没有这个包）。
+
+**验收**：`/log`、`/audit` 的筛选参数在新来源下仍可用（`--hook` 继续按 `module=hook` 过滤，事件名只在 `platform_recall_*` 之外保持不变；`hook.tool_call` → `hook_tool_call` 是本次唯一的事件名变更，已在 CHANGELOG 记录）；每批迁移后跑受影响包测试 + `internal/app`。
+
+**未做且需用户决策**：上游九字段 `LogRecord`（含 JSONL 落盘与 Reader 兼读新旧格式）。它超出已确认的最小版 A 范围，会改日志文件格式并连带重写 `/log`、`/audit`、`/usage`、`/elwisp` 与维护报告的解析端。
 
 ## 3. [~] P1#2 模型/会话服务化（5–8 人日）
 
