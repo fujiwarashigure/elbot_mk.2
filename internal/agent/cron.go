@@ -143,17 +143,25 @@ func (a *Agent) ensureBackgroundSession(ctx context.Context, bgSession *storage.
 	if bgSession == nil {
 		return nil, storage.ErrNotFound
 	}
-	metadata := mergeBackgroundSessionMetadata(bgSession.Metadata, req)
-	mode := normalizeBackgroundSessionMode(req.SessionMode)
-	if bgSession.Mode == mode && bgSession.Metadata == metadata {
-		return bgSession, nil
-	}
-	bgSession.Mode = mode
-	bgSession.Metadata = metadata
-	bgSession.UpdatedAt = storage.Now()
-	if err := a.store.Sessions().Update(ctx, bgSession); err != nil {
+	// Merge background metadata inside one transaction: the row also carries
+	// activity, workspace and naming fields that must survive.
+	updated, err := a.store.Sessions().Mutate(ctx, bgSession.ID, func(current *storage.Session) error {
+		metadata := mergeBackgroundSessionMetadata(current.Metadata, req)
+		mode := normalizeBackgroundSessionMode(req.SessionMode)
+		if current.Mode == mode && current.Metadata == metadata {
+			return nil
+		}
+		current.Mode = mode
+		current.Metadata = metadata
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
+	bgSession.Mode = updated.Mode
+	bgSession.Metadata = updated.Metadata
+	bgSession.UpdatedAt = updated.UpdatedAt
 	return bgSession, nil
 }
 

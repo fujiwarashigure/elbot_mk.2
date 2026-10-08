@@ -61,11 +61,7 @@ INSERT INTO sessions (
 }
 
 func (r *SessionRepository) Get(ctx context.Context, id string) (*storage.Session, error) {
-	row := r.db.QueryRowContext(ctx, `
-SELECT id, parent_session_id, fork_from_message_id, owner_id, platform, platform_scope_id,
-       mode, title, status, metadata, created_at, updated_at, archived_at, pinned_at
-FROM sessions
-WHERE id = ?`, id)
+	row := r.db.QueryRowContext(ctx, sessionSelectByID, id)
 
 	session, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -81,11 +77,65 @@ func (r *SessionRepository) Update(ctx context.Context, session *storage.Session
 	if session.UpdatedAt.IsZero() {
 		session.UpdatedAt = storage.Now()
 	}
-	res, err := r.db.ExecContext(ctx, `
+	res, err := r.db.ExecContext(ctx, sessionUpdateStatement,
+		append(sessionUpdateArgs(session), session.ID)...)
+	if err != nil {
+		return fmt.Errorf("update session: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return storage.ErrNotFound
+	}
+	return nil
+}
+
+// Mutate reads, updates and writes one session inside a single transaction, so a
+// concurrent writer cannot drop the fields it did not touch.
+func (r *SessionRepository) Mutate(ctx context.Context, id string, update func(*storage.Session) error) (*storage.Session, error) {
+	if update == nil {
+		return nil, fmt.Errorf("session mutation is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin session mutation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	session, err := scanSession(tx.QueryRowContext(ctx, sessionSelectByID, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, storage.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load session for mutation: %w", err)
+	}
+	if err := update(session); err != nil {
+		return nil, err
+	}
+	if session.UpdatedAt.IsZero() {
+		session.UpdatedAt = storage.Now()
+	}
+	if _, err := tx.ExecContext(ctx, sessionUpdateStatement, append(sessionUpdateArgs(session), session.ID)...); err != nil {
+		return nil, fmt.Errorf("update session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit session mutation: %w", err)
+	}
+	return session, nil
+}
+
+const sessionSelectByID = `
+SELECT id, parent_session_id, fork_from_message_id, owner_id, platform, platform_scope_id,
+       mode, title, status, metadata, created_at, updated_at, archived_at, pinned_at
+FROM sessions
+WHERE id = ?`
+
+const sessionUpdateStatement = `
 UPDATE sessions
 SET parent_session_id = ?, fork_from_message_id = ?, owner_id = ?, platform = ?, platform_scope_id = ?,
     mode = ?, title = ?, status = ?, metadata = ?, created_at = ?, updated_at = ?, archived_at = ?, pinned_at = ?
-WHERE id = ?`,
+WHERE id = ?`
+
+func sessionUpdateArgs(session *storage.Session) []any {
+	return []any{
 		nullString(session.ParentSessionID),
 		nullString(session.ForkFromMessageID),
 		session.OwnerID,
@@ -99,15 +149,7 @@ WHERE id = ?`,
 		storage.FormatTime(session.UpdatedAt),
 		nullTime(session.ArchivedAt),
 		nullTime(session.PinnedAt),
-		session.ID,
-	)
-	if err != nil {
-		return fmt.Errorf("update session: %w", err)
 	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return storage.ErrNotFound
-	}
-	return nil
 }
 
 func (r *SessionRepository) List(ctx context.Context, req storage.ListSessionsRequest) ([]storage.SessionSummary, error) {

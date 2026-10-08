@@ -21,24 +21,16 @@ func (a *Agent) consumeContextCompactSeed(ctx context.Context, session *storage.
 	if a.store == nil || session == nil {
 		return
 	}
-	latest, err := a.store.Sessions().Get(ctx, session.ID)
+	err := a.mutateSessionMetadata(ctx, session, func(metadata *sessionMetadata) bool {
+		if metadata.ContextCompact == nil || !metadata.ContextCompact.Pending {
+			return false
+		}
+		metadata.ContextCompact.Pending = false
+		return true
+	})
 	if err != nil {
 		a.logContextCompactSeedError(ctx, session.ID, err)
-		return
 	}
-	metadata := decodeSessionMetadata(latest.Metadata)
-	if metadata.ContextCompact == nil || !metadata.ContextCompact.Pending {
-		session.Metadata = latest.Metadata
-		return
-	}
-	metadata.ContextCompact.Pending = false
-	latest.Metadata = encodeSessionMetadataInto(latest.Metadata, metadata)
-	latest.UpdatedAt = storage.Now()
-	if err := a.store.Sessions().Update(ctx, latest); err != nil {
-		a.logContextCompactSeedError(ctx, session.ID, err)
-		return
-	}
-	session.Metadata = latest.Metadata
 }
 
 func (a *Agent) logContextCompactSeedError(ctx context.Context, sessionID string, err error) {

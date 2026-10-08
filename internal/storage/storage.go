@@ -382,6 +382,11 @@ type SessionRepository interface {
 	Create(ctx context.Context, session *Session) error
 	Get(ctx context.Context, id string) (*Session, error)
 	Update(ctx context.Context, session *Session) error
+	// Mutate applies update to the stored row inside one transaction and returns
+	// the stored session afterwards. Concurrent writers (activity, workspace,
+	// tool cache, naming) read-modify-write the same row, so a whole-row Update
+	// from a stale snapshot silently drops their fields.
+	Mutate(ctx context.Context, id string, update func(*Session) error) (*Session, error)
 	List(ctx context.Context, req ListSessionsRequest) ([]SessionSummary, error)
 	Delete(ctx context.Context, id string) error
 	DeleteExpired(ctx context.Context, cutoff time.Time) (int, error)

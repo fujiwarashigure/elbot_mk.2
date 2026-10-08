@@ -37,12 +37,15 @@ func (s *Service) ActivateMode(ctx context.Context, scope Scope, req ActivateMod
 			return ActivateModeResult{}, ErrChatModeRequiresEmptySession
 		}
 	}
-	session.Mode = req.Mode
-	session.UpdatedAt = storage.Now()
-	if err := s.store.Sessions().Update(ctx, session); err != nil {
+	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		current.Mode = req.Mode
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
+	if err != nil {
 		return ActivateModeResult{}, err
 	}
-	return ActivateModeResult{Session: session}, nil
+	return ActivateModeResult{Session: updated}, nil
 }
 
 func validateMode(mode string) error {

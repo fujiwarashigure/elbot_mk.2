@@ -107,15 +107,18 @@ func (s *Service) DefaultMode() string {
 }
 
 func (s *Service) Resume(ctx context.Context, scope Scope, sessionID string) (*storage.Session, error) {
-	session, err := s.store.Sessions().Get(ctx, sessionID)
+	existing, err := s.store.Sessions().Get(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	if !s.canAccess(scope, session) {
+	if !s.canAccess(scope, existing) {
 		return nil, fmt.Errorf("session %s is not in current platform scope", sessionID)
 	}
-	session.UpdatedAt = storage.Now()
-	if err := s.store.Sessions().Update(ctx, session); err != nil {
+	session, err := s.store.Sessions().Mutate(ctx, sessionID, func(current *storage.Session) error {
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	s.setCurrent(scope, session.ID)
@@ -133,12 +136,18 @@ func (s *Service) Current(ctx context.Context, scope Scope) (*storage.Session, e
 }
 
 func (s *Service) Touch(ctx context.Context, session *storage.Session) error {
-	latest, err := s.store.Sessions().Get(ctx, session.ID)
+	if session == nil || session.ID == "" {
+		return storage.ErrNotFound
+	}
+	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	latest.UpdatedAt = storage.Now()
-	return s.store.Sessions().Update(ctx, latest)
+	session.UpdatedAt = updated.UpdatedAt
+	return nil
 }
 
 func (s *Service) ResetCurrent(scope Scope) {

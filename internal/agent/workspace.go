@@ -52,20 +52,13 @@ func (s sessionWorkspaceStore) MarkWorkspaceAgentNoticeDir(ctx context.Context, 
 	if dir == "" {
 		return nil
 	}
-	if s.agent == nil || s.agent.store == nil || s.session == nil || s.session.ID == "" {
-		return nil
-	}
-	latest, err := s.agent.store.Sessions().Get(ctx, s.session.ID)
-	if err != nil {
-		return err
-	}
-	metadata := decodeSessionMetadata(latest.Metadata)
-	if slices.Contains(metadata.WorkspaceAgentNoticeDirs, dir) {
-		s.session.Metadata = latest.Metadata
-		return nil
-	}
-	metadata.WorkspaceAgentNoticeDirs = append(metadata.WorkspaceAgentNoticeDirs, dir)
-	return s.save(ctx, latest, metadata)
+	return s.mutateMetadata(ctx, func(metadata *sessionMetadata) bool {
+		if slices.Contains(metadata.WorkspaceAgentNoticeDirs, dir) {
+			return false
+		}
+		metadata.WorkspaceAgentNoticeDirs = append(metadata.WorkspaceAgentNoticeDirs, dir)
+		return true
+	})
 }
 
 func (s sessionWorkspaceStore) SetWorkspaceDirWithAgentNotice(ctx context.Context, dir string, markNotice bool) error {
@@ -81,38 +74,40 @@ func (s sessionWorkspaceStore) ClearWorkspaceDirWithAgentNotice(ctx context.Cont
 }
 
 func (s sessionWorkspaceStore) saveWorkspaceDirWithAgentNotice(ctx context.Context, workspaceDir, noticeDir string, markNotice bool) error {
+	return s.mutateMetadata(ctx, func(metadata *sessionMetadata) bool {
+		changed := metadata.WorkspaceDir != workspaceDir
+		metadata.WorkspaceDir = workspaceDir
+		if markNotice && noticeDir != "" && !slices.Contains(metadata.WorkspaceAgentNoticeDirs, noticeDir) {
+			metadata.WorkspaceAgentNoticeDirs = append(metadata.WorkspaceAgentNoticeDirs, noticeDir)
+			changed = true
+		}
+		return changed
+	})
+}
+
+// mutateMetadata applies one metadata change inside a single transaction. The
+// callback receives the freshly loaded metadata, so fields a concurrent writer
+// (activity, tool cache, naming) changed in the meantime are never dropped.
+func (s sessionWorkspaceStore) mutateMetadata(ctx context.Context, mutate func(metadata *sessionMetadata) bool) error {
 	if s.agent == nil || s.agent.store == nil || s.session == nil || s.session.ID == "" {
 		return nil
 	}
-	latest, err := s.agent.store.Sessions().Get(ctx, s.session.ID)
+	updated, err := s.agent.store.Sessions().Mutate(ctx, s.session.ID, func(current *storage.Session) error {
+		metadata := decodeSessionMetadata(current.Metadata)
+		if !mutate(&metadata) {
+			return nil
+		}
+		encoded := encodeSessionMetadataInto(current.Metadata, metadata)
+		if encoded == current.Metadata {
+			return nil
+		}
+		current.Metadata = encoded
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	metadata := decodeSessionMetadata(latest.Metadata)
-	changed := metadata.WorkspaceDir != workspaceDir
-	metadata.WorkspaceDir = workspaceDir
-	if markNotice && noticeDir != "" && !slices.Contains(metadata.WorkspaceAgentNoticeDirs, noticeDir) {
-		metadata.WorkspaceAgentNoticeDirs = append(metadata.WorkspaceAgentNoticeDirs, noticeDir)
-		changed = true
-	}
-	if !changed {
-		s.session.Metadata = latest.Metadata
-		return nil
-	}
-	return s.save(ctx, latest, metadata)
-}
-
-func (s sessionWorkspaceStore) save(ctx context.Context, latest *storage.Session, metadata sessionMetadata) error {
-	encoded := encodeSessionMetadataInto(latest.Metadata, metadata)
-	if encoded == latest.Metadata {
-		s.session.Metadata = latest.Metadata
-		return nil
-	}
-	latest.Metadata = encoded
-	latest.UpdatedAt = storage.Now()
-	if err := s.agent.store.Sessions().Update(ctx, latest); err != nil {
-		return err
-	}
-	s.session.Metadata = encoded
+	s.session.Metadata = updated.Metadata
 	return nil
 }

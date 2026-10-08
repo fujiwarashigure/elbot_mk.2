@@ -196,7 +196,7 @@ rg -n "Phase|Request|Cancel|pending|confirm|runtime status|sending" internal/req
 - `internal/tool/builtin/file_tools_ast.go`：`read_file` 的 Go/Shell AST 名称搜索与结果渲染。
 - `internal/agent/tools.go`：Agent 工具运行态和命令依赖适配。
 - `internal/agent/toolrun_*.go`：Agent 到 ToolRun 的桥接。
-- `internal/agent/tool_cache.go`：Session 级工具 schema 缓存。
+- `internal/agent/tool_cache.go`：Session 级工具 schema 缓存；工具发现与 `@tool:` / `@skill:` 预载的写入都经 `mutateSessionMetadata` 在事务内合并进最新 metadata。
 - `internal/agent/tool_directive.go`：`@tool:` / `@skill:` 预处理。
 - `internal/agent/tool_tag_config.go`：工具 tag 配置。
 - `internal/security/`：工具权限和风险策略。
@@ -330,13 +330,13 @@ rg -n "PlatformAdapter|SendChat|MessageSegment|Actor|Scope|remote|websocket|long
 
 先看：
 
-- `internal/session/service.go`、`types.go`：Session 服务主体和领域请求/结果类型。
+- `internal/session/service.go`、`types.go`：Session 服务主体和领域请求/结果类型；字段写入统一走 `storage.SessionRepository.Mutate`（事务内读-改-写），`Resume` / `Touch` 的 `UpdatedAt` 也在事务内设置。
 - `internal/session/shared.go`：群共享线程的 Session 所有者、`Scope.Shared` key、元数据标记与访问判定。
 - `internal/session/mode.go`：模式激活和 work 历史限制。
-- `internal/session/lifecycle.go`、`query.go`、`fork.go`、`expiration.go`：生命周期、查询、Fork 和闲置过期策略。
-- `internal/session/naming.go`：异步 Session 命名。
-- `internal/agent/session_metadata.go`：Session metadata 编解码。
-- `internal/agent/workspace.go`：Agent workspace 持久化适配。
+- `internal/session/lifecycle.go`、`query.go`、`fork.go`、`expiration.go`：生命周期、查询、Fork 和闲置过期策略；重命名/归档/置顶与闲置过期都在事务内基于最新行重新判定（手动改名标记、空闲判定）。
+- `internal/session/naming.go`：异步 Session 命名；迟到的命名写入在事务内检查 `title_renamed`，不覆盖手动改名。
+- `internal/agent/session_metadata.go`：Session metadata 编解码；`encodeSessionMetadataInto` 基于原始 JSON 只改写已知字段，保留未知键。
+- `internal/agent/workspace.go`：Agent workspace 持久化适配；`workspace_dir` 与通知目录经 `mutateMetadata` 在事务内合并。
 - `internal/tool/workspace.go`：工具 workspace context 和路径解析。
 
 常用搜索：
@@ -389,9 +389,9 @@ rg -n "ChatCompletion|Stream|SSE|reasoning|usage|ToolCall|MessageSegment|Models"
 
 先看：
 
-- `internal/storage/storage.go`：领域模型和 repository interfaces；Message 使用 `content` 作为纯文本快速路径，`segments` 保存可选多模态正文；可选 `ChatHistoryRangeRepository` 提供批量历史，`OutboundMessageRepository` 保存实际发送的 assistant 消息。
+- `internal/storage/storage.go`：领域模型和 repository interfaces；Message 使用 `content` 作为纯文本快速路径，`segments` 保存可选多模态正文；可选 `ChatHistoryRangeRepository` 提供批量历史，`OutboundMessageRepository` 保存实际发送的 assistant 消息。`SessionRepository.Mutate` 在单个事务里读-改-写同一行并返回最新 Session，是会话字段的唯一并发安全写入口；`Update` 只用于测试夹具。
 - `internal/storage/id.go`、`internal/storage/time.go`：通用 ID/时间 helper。
-- `internal/storage/sqlite/`：SQLite store、migration 和 repository 实现；`chat_history_repository.go` 内含 `outbound_messages` 表。
+- `internal/storage/sqlite/`：SQLite store、migration 和 repository 实现；`chat_history_repository.go` 内含 `outbound_messages` 表；`session_repository.go` 的 `Mutate` 用 `sessionSelectByID` / `sessionUpdateStatement` / `sessionUpdateArgs` 与 `Get` / `Update` 共享同一份行读写语句。
 
 常用搜索：
 

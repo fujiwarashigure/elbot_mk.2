@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"elbot/internal/storage"
@@ -46,17 +47,28 @@ func (s *Service) MaybeScheduleNaming(ctx context.Context, sessionID string) {
 
 func (s *Service) titleRenamed(ctx context.Context, sessionID string) bool {
 	session, err := s.store.Sessions().Get(ctx, sessionID)
-	if err != nil || strings.TrimSpace(session.Metadata) == "" {
+	if err != nil {
+		return false
+	}
+	return titleRenamedInMetadata(session.Metadata)
+}
+
+// titleRenamedInMetadata reports whether the stored metadata marks the title as
+// manually chosen, which always outranks an automatic one.
+func titleRenamedInMetadata(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
 		return false
 	}
 	var metadata struct {
 		TitleRenamed bool `json:"title_renamed"`
 	}
-	if err := json.Unmarshal([]byte(session.Metadata), &metadata); err != nil {
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
 		return false
 	}
 	return metadata.TitleRenamed
 }
+
+var errTitleRenamed = errors.New("session title was renamed manually")
 
 func (s *Service) generateTitle(ctx context.Context, sessionID string, messages []storage.Message) {
 	session, err := s.store.Sessions().Get(ctx, sessionID)
@@ -79,10 +91,27 @@ func (s *Service) generateTitle(ctx context.Context, sessionID string, messages 
 
 	session.Title = title
 	session.UpdatedAt = storage.Now()
-	if err := s.store.Sessions().Update(ctx, session); err != nil {
+	// Write the generated title inside one transaction and re-check the manual
+	// rename guard there: a rename that landed while the model was running must
+	// win over this late auto title.
+	updated, err := s.store.Sessions().Mutate(ctx, sessionID, func(current *storage.Session) error {
+		if titleRenamedInMetadata(current.Metadata) {
+			return errTitleRenamed
+		}
+		current.Title = title
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
+	if errors.Is(err, errTitleRenamed) {
+		s.markNamingDone(sessionID)
+		return
+	}
+	if err != nil {
 		s.handleNamingFailure(ctx, session, messages, "update title", err, "storage_update", result.RawTitle, title)
 		return
 	}
+	session.Title = updated.Title
+	session.UpdatedAt = updated.UpdatedAt
 	s.markNamingDone(sessionID)
 	s.notifyNamingCompleted(ctx, NamingCompletedEvent{SessionID: sessionID, Title: title, TriggeredAt: storage.Now(), MessageCount: len(messages)})
 }
@@ -147,10 +176,21 @@ func (s *Service) handleNamingFailure(ctx context.Context, session *storage.Sess
 	}
 
 	if event.FallbackTitle != "" {
-		session.Title = event.FallbackTitle
-		session.UpdatedAt = storage.Now()
-		if updateErr := s.store.Sessions().Update(ctx, session); updateErr != nil {
+		updated, updateErr := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+			if titleRenamedInMetadata(current.Metadata) {
+				return errTitleRenamed
+			}
+			current.Title = event.FallbackTitle
+			current.UpdatedAt = storage.Now()
+			return nil
+		})
+		switch {
+		case errors.Is(updateErr, errTitleRenamed):
+		case updateErr != nil:
 			s.notifyNamingFailed(ctx, NamingFailedEvent{SessionID: session.ID, Title: session.Title, Reason: "fallback title", Err: updateErr, TriggeredAt: storage.Now(), MessageCount: len(messages)})
+		default:
+			session.Title = updated.Title
+			session.UpdatedAt = updated.UpdatedAt
 		}
 	}
 }

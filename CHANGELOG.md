@@ -25,6 +25,8 @@
 
 ### Fixed
 
+- 修复同一 Session 的并发写入互相丢字段：此前工具发现/预载、`workspace_dir`、上下文用量、压缩种子、后台会话 metadata、重命名/归档/置顶、恢复与心跳、模式激活、空闲过期和自动命名各自把手上读到的一份 Session 快照整行写回，两个写入重叠时后写的一方会把对方刚改的字段（例如预载工具时覆盖掉刚设置的 `workspace_dir`，或心跳覆盖掉工具缓存）一起回滚。`storage.SessionRepository` 新增 `Mutate(ctx, id, update)`：在单个 SQLite 事务里读取当前行、执行回调、写回并返回最新行；上述写路径全部改为在事务内基于最新行合并自己的字段，`mutateSessionMetadata` / `mutateMetadata` 只改动已知 metadata 键、保留未知键。
+- 修复两处依赖过期快照的竞态：空闲过期现在在事务内重新判定 Session 是否仍然闲置，迟到的自动命名在事务内重新检查 `title_renamed`，不再覆盖刚完成的手动改名；后台会话创建也不再整行回写，metadata 合并与模式设置在同一事务内完成。
 - 修复后台任务的工具白名单可被绕过：此前 `toolrun.Resolve` 在缓存未命中时回落到全局 registry，后台任务按名字仍能解析并执行未预载的工具（包括本应禁止的 `discover_tool`）；现在后台上下文不再回落，`discover_tool` / `workspace` 一律不可用，`Schemas` 也按同一白名单过滤，外部声明的 `tool_cache` 在写入后台会话前先过滤。
 - 修复工具缓存重建时丢失 `ForegroundOnly` 标记：从会话 metadata 的 `discovered_tools` 重建 `toolrun.CachedTool` 时现在带上 `ForegroundOnly`，前台专用工具不会再进入后台会话。
 - 修复模型重试只在用户通知里可见的问题：重试现在同时写一条运行日志（`event=model_retry`，含 provider、次数、延迟与脱敏错误），服务模式或通知目标被屏蔽时也能在 `/log` 里看到。

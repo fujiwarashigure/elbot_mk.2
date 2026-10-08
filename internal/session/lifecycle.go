@@ -19,17 +19,20 @@ func (s *Service) Rename(ctx context.Context, scope Scope, sessionID, title stri
 	if err != nil {
 		return nil, err
 	}
-	metadata, err := renameMetadata(session.Metadata)
+	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		metadata, err := renameMetadata(current.Metadata)
+		if err != nil {
+			return err
+		}
+		current.Title = title
+		current.Metadata = metadata
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	session.Title = title
-	session.Metadata = metadata
-	session.UpdatedAt = storage.Now()
-	if err := s.store.Sessions().Update(ctx, session); err != nil {
-		return nil, err
-	}
-	return session, nil
+	return updated, nil
 }
 
 func renameMetadata(raw string) (string, error) {
@@ -53,15 +56,19 @@ func (s *Service) Archive(ctx context.Context, scope Scope, sessionID string) (*
 	if err != nil {
 		return nil, err
 	}
-	if session.ArchivedAt == nil {
-		now := storage.Now()
-		session.ArchivedAt = &now
-		session.UpdatedAt = now
-		if err := s.store.Sessions().Update(ctx, session); err != nil {
-			return nil, err
+	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		if current.ArchivedAt != nil {
+			return nil
 		}
+		now := storage.Now()
+		current.ArchivedAt = &now
+		current.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return session, nil
+	return updated, nil
 }
 
 func (s *Service) Unarchive(ctx context.Context, scope Scope, sessionID string) (*storage.Session, error) {
@@ -69,15 +76,19 @@ func (s *Service) Unarchive(ctx context.Context, scope Scope, sessionID string) 
 	if err != nil {
 		return nil, err
 	}
-	if session.ArchivedAt != nil {
-		session.ArchivedAt = nil
-		session.UpdatedAt = storage.Now()
-		if err := s.store.Sessions().Update(ctx, session); err != nil {
-			return nil, err
+	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		if current.ArchivedAt == nil {
+			return nil
 		}
+		current.ArchivedAt = nil
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	s.setCurrent(scope, session.ID)
-	return session, nil
+	return updated, nil
 }
 
 func (s *Service) Pin(ctx context.Context, scope Scope, sessionID string) (*storage.Session, error) {
@@ -85,15 +96,19 @@ func (s *Service) Pin(ctx context.Context, scope Scope, sessionID string) (*stor
 	if err != nil {
 		return nil, err
 	}
-	if session.PinnedAt == nil {
-		now := storage.Now()
-		session.PinnedAt = &now
-		session.UpdatedAt = now
-		if err := s.store.Sessions().Update(ctx, session); err != nil {
-			return nil, err
+	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		if current.PinnedAt != nil {
+			return nil
 		}
+		now := storage.Now()
+		current.PinnedAt = &now
+		current.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return session, nil
+	return updated, nil
 }
 
 func (s *Service) Unpin(ctx context.Context, scope Scope, sessionID string) (*storage.Session, error) {
@@ -101,14 +116,18 @@ func (s *Service) Unpin(ctx context.Context, scope Scope, sessionID string) (*st
 	if err != nil {
 		return nil, err
 	}
-	if session.PinnedAt != nil {
-		session.PinnedAt = nil
-		session.UpdatedAt = storage.Now()
-		if err := s.store.Sessions().Update(ctx, session); err != nil {
-			return nil, err
+	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		if current.PinnedAt == nil {
+			return nil
 		}
+		current.PinnedAt = nil
+		current.UpdatedAt = storage.Now()
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return session, nil
+	return updated, nil
 }
 
 func (s *Service) Delete(ctx context.Context, scope Scope, sessionID string) error {

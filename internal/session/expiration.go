@@ -49,9 +49,17 @@ func (s *Service) ExpireIdleCurrent(ctx context.Context, req ExpireIdleRequest) 
 	if !session.UpdatedAt.Before(now.Add(-time.Duration(ttlMinutes) * time.Minute)) {
 		return ExpireIdleResult{}, nil
 	}
-	session.UpdatedAt = now
-	if err := s.store.Sessions().Update(ctx, session); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+	_, err = s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		// Re-check inside the transaction: another writer may have touched the
+		// session between the read above and this write.
+		if !current.UpdatedAt.Before(now.Add(-time.Duration(ttlMinutes) * time.Minute)) {
+			return errSessionNotIdle
+		}
+		current.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errSessionNotIdle) || errors.Is(err, storage.ErrNotFound) {
 			return ExpireIdleResult{}, nil
 		}
 		return ExpireIdleResult{}, err
@@ -59,6 +67,8 @@ func (s *Service) ExpireIdleCurrent(ctx context.Context, req ExpireIdleRequest) 
 	s.clearCurrentIf(req.Scope, session.ID)
 	return ExpireIdleResult{Expired: true, SessionID: session.ID, TTLMinutes: ttlMinutes}, nil
 }
+
+var errSessionNotIdle = errors.New("session is not idle")
 
 // TTLMinutes returns the configured idle limit for the scope and role.
 func (c IdleExpirationConfig) TTLMinutes(scope Scope, isSuperadmin bool) int {
