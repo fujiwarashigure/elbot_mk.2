@@ -2,6 +2,7 @@
 
 ### Added
 
+- 新增文件回滚：`edit_file` 每次成功写入前在进程内保留该文件上一版内容（每个文件只保留最近一次，按 Session 隔离，上限 1024 条 / 256 MiB，超出淘汰最旧），新增仅超级管理员可用的 `/rollback [编号]` 与内置工具 `rollback_file`（发现 `read_file` / `edit_file` 时自动展开，可用 `@tool:rollback_file` 预载）。回滚会校验文件自编辑后未被改动，Shell 或外部程序的修改一律拒绝覆盖并提示未回滚；新建文件被回滚时直接删除；记录在切换 Session、重启进程或容量淘汰后失效。
 - 新增 `view_image` 内置工具：把图片本身交给模型，而不是只给地址。`source` 传媒体 ID、HTTP(S) URL 或本地路径（本地路径仅超级管理员，读取敏感文件走高风险确认），或用 `message_id`（可带 `#`）+ `media_index` 取当前聊天历史里的图片，省略 `media_index` 时取每条消息的首张图片；单次最多 5 次未入库媒体下载尝试，失败只返回文本提示，不回显上游错误。
 - 工具新增按模型能力可用：`tool.Info.VisionRequired` + 请求上下文里的 `tool.Capabilities`。声明 `vision = false` 的 Provider 或模型（`[providers.*].vision` / `model_configs.<model>.vision`）在当前 work Session 中不会发现、预载或执行 `view_image`；未声明能力（`VisionUnknown`）时保持原有行为。`view_image` 是第一个使用该机制的工具。
 - OneBot 入站消息新增平台级去重：按 `平台 + 机器人 self_id + scope + message_id` 记录 `processing` / `completed` / `failed`，TTL 内重连重放不会再次唤醒模型或重复计费；去重状态独立于 `history` 开关，并有 `inbound_dedup_max_entries` 硬上限。

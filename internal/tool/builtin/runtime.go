@@ -21,6 +21,7 @@ import (
 	"elbot/internal/tool"
 	"elbot/internal/tool/runtimeinfo"
 	"elbot/internal/tool/skill"
+	"elbot/internal/utils/fileops"
 )
 
 type Runtime struct {
@@ -62,6 +63,9 @@ type RuntimeOptions struct {
 	ImagePromptService      ImagePromptService
 	ProcessEnv              processenv.Environment
 	ChildProcessEnv         processenv.Environment
+	// FileBackups keeps the pre-edit content of edited files for /rollback and
+	// rollback_file. Nil disables both.
+	FileBackups *fileops.RollbackStore
 }
 
 func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
@@ -191,6 +195,7 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 		SelfLearning:               selfLearningService,
 		LongMemoryDir:              filepath.Join(opts.ConfigDir, "long_memory"),
 		FileManager:                fileManager,
+		FileBackups:                opts.FileBackups,
 		ProcessEnv:                 opts.ProcessEnv,
 		ChildProcessEnv:            childProcessEnv,
 	}); err != nil {

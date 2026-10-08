@@ -39,6 +39,24 @@ func BackgroundContext(ctx context.Context) bool {
 	return ok && (sandbox.Background || strings.TrimSpace(string(sandbox.BackgroundKind)) != "")
 }
 
+type sessionIDContextKey struct{}
+
+// WithSessionID annotates the request context with the Session that owns the
+// current tool calls. Tools keeping process-local state (file backups) use it to
+// scope their records.
+func WithSessionID(ctx context.Context, sessionID string) context.Context {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionIDContextKey{}, sessionID)
+}
+
+func SessionIDFromContext(ctx context.Context) string {
+	sessionID, _ := ctx.Value(sessionIDContextKey{}).(string)
+	return sessionID
+}
+
 func InfoAvailableInContext(ctx context.Context, info Info) bool {
 	if info.ForegroundOnly && BackgroundContext(ctx) {
 		return false

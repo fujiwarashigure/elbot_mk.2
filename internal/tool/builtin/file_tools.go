@@ -29,6 +29,9 @@ type ReadFileTool struct {
 
 type EditFileTool struct {
 	FileGuard *FileGuard
+	// Backups keeps the content that existed before the latest edit of each
+	// file, so /rollback and rollback_file can undo it. Nil disables backups.
+	Backups *fileops.RollbackStore
 }
 
 type readFileArgs struct {
@@ -131,7 +134,7 @@ func readFileBuilder() *tool.Builder {
 		Risk(tool.RiskLow).
 		SuperadminOnly().
 		Tags("files", "agent").
-		DependsOn("workspace").
+		DependsOn("workspace", RollbackFileName).
 		String("path", "文件或目录路径；read 模式仅支持文件，搜索模式可递归搜索目录。", tool.Required()).
 		String("encoding", "文本编码，默认 auto。").
 		String("mode", "模式：read（默认，可不填）、grep、ast、ast_function；ast/ast_function 仅支持 Go 和 Shell。", tool.Enum("read", "grep", "ast", "ast_function")).
@@ -306,7 +309,7 @@ func editFileBuilder() *tool.Builder {
 	return tool.NewBuilder("edit_file").
 		Description("批量编辑文本文件；使用 edits 一次提交多个修改；成功后返回 unified diff。任一 edit 失败则不写文件。").
 		Risk(tool.RiskHigh).
-		DependsOn("workspace").
+		DependsOn("workspace", RollbackFileName).
 		Tags("files", "agent").
 		String("path", "要编辑的文件路径,基于当前 workspace 解析；也可传绝对路径。", tool.Required()).
 		String("encoding", "文本编码，默认 auto；非 UTF-8 文件应显式传入 gb18030、gbk、big5、shift_jis 等。").
@@ -524,12 +527,30 @@ func (t EditFileTool) Call(ctx context.Context, req tool.CallRequest) (*tool.Res
 	if err := t.FileGuard.CheckWrite(resolved.Path); err != nil {
 		return nil, err
 	}
+	before, beforeMode, existed := captureEditBackup(resolved.Path, args.Encoding)
 	result, err := fileops.EditFileWithOptions(resolved.Path, args.Encoding, args.ExpectedRevision, args.Create, false, args.ContextLines, args.Edits, fileToolEditOptions())
 	if err != nil {
 		return nil, err
 	}
+	if t.Backups != nil && !result.DryRun {
+		t.Backups.Record(tool.SessionIDFromContext(ctx), result.Path, before, beforeMode, existed, result.RevisionBefore, result.RevisionAfter)
+	}
 	content := fmt.Sprintf("dry_run: %t\nedited: %s\ncreated: %t\nencoding: %s\nrevision_before: %s\nrevision_after: %s\ndiff:\n%s", result.DryRun, result.Path, result.Created, result.Encoding, result.RevisionBefore, result.RevisionAfter, result.Diff)
 	return &tool.Result{Content: content, Warnings: resolved.Warnings}, nil
+}
+
+// captureEditBackup reads the content a successful edit is about to replace.
+// Best effort: an unreadable file (too large, binary) simply has no backup.
+func captureEditBackup(path, encoding string) ([]byte, os.FileMode, bool) {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return nil, 0, false
+	}
+	file, err := fileops.ReadFileWithLimit(path, encoding, fileToolMaxBytes)
+	if err != nil {
+		return nil, 0, false
+	}
+	return file.Bytes, info.Mode().Perm(), true
 }
 
 func previewEditFile(ctx context.Context, args editFileArgs, fileGuard *FileGuard) (fileops.EditResult, error) {

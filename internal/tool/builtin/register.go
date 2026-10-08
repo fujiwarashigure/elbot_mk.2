@@ -16,6 +16,7 @@ import (
 	"elbot/internal/tool"
 	"elbot/internal/tool/runtimeinfo"
 	"elbot/internal/tool/skill"
+	"elbot/internal/utils/fileops"
 )
 
 type RegisterOptions struct {
@@ -39,8 +40,11 @@ type RegisterOptions struct {
 	SelfLearning               *selflearning.Service
 	LongMemoryDir              string
 	FileManager                *FileManager
-	ProcessEnv                 processenv.Environment
-	ChildProcessEnv            processenv.Environment
+	// FileBackups keeps the pre-edit content of edited files for /rollback and
+	// rollback_file. Nil disables both.
+	FileBackups     *fileops.RollbackStore
+	ProcessEnv      processenv.Environment
+	ChildProcessEnv processenv.Environment
 }
 
 func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
@@ -180,7 +184,12 @@ func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
 	if err := registry.Register(NewReadFileTool(fileGuard)); err != nil {
 		return err
 	}
-	if err := registry.Register(NewEditFileTool(fileGuard)); err != nil {
+	editTool := NewEditFileTool(fileGuard)
+	editTool.Backups = opts.FileBackups
+	if err := registry.Register(editTool); err != nil {
+		return err
+	}
+	if err := registry.Register(NewRollbackFileTool(opts.FileBackups, fileGuard)); err != nil {
 		return err
 	}
 	shellEnv := opts.ChildProcessEnv

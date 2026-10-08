@@ -33,6 +33,7 @@ import (
 	"elbot/internal/storage"
 	"elbot/internal/tool"
 	"elbot/internal/turn"
+	"elbot/internal/utils/fileops"
 )
 
 // Agent is the minimal agent core that handles messages and commands.
@@ -107,6 +108,7 @@ type Agent struct {
 	angelMemoryForgetOnRecall bool
 	selfLearning              *selflearning.Service
 	characters                *character.Store
+	fileBackups               *fileops.RollbackStore
 	modelProfiles             map[string]config.ModelSelection
 	modelAliases              map[string]string
 	toolProfiles              map[string][]string
@@ -352,6 +354,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		angelMemoryForgetOnRecall: opts.AngelMemoryConfig.ForgetOnRecallEnabled(),
 		selfLearning:              opts.SelfLearning,
 		characters:                opts.CharacterStore,
+		fileBackups:               opts.FileBackups,
 		modelProfiles:             opts.ModelProfiles,
 		modelAliases:              opts.ModelAliases,
 		toolProfiles:              opts.ToolProfiles,
@@ -452,6 +455,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		RuntimeState:       a,
 		RuntimeStatus:      a.runtimeStatusForSession,
 		CancelSessionInbox: a.cancelInboxSession,
+		FileBackups:        a.fileBackups,
 	}); err != nil {
 		return nil, err
 	}

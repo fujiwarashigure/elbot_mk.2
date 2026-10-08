@@ -30,6 +30,7 @@ import (
 	"elbot/internal/storage"
 	"elbot/internal/tool/builtin"
 	"elbot/internal/tool/runtimeinfo"
+	"elbot/internal/utils/fileops"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 )
@@ -94,6 +95,9 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	}
 	imageRewriter := buildImagePromptRewriter(cfg, req.Models)
 	visionMetrics := newVisionMetricsState()
+	// File edit backups live for the process lifetime and are scoped per
+	// Session; see fileops.RollbackStore.
+	fileBackups := fileops.NewRollbackStore()
 	imageToPrompt, err := buildImagePromptService(ctx, cfg, req.Models, visionMetrics.countersValue())
 	if err != nil {
 		return nil, err
@@ -107,6 +111,8 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	}
 	toolRuntime, err := builtin.NewRuntime(builtin.RuntimeOptions{
 		ConfigDir: filepath.Dir(cfg.ConfigPath),
+		// One process-local store backs both edit_file backups and /rollback.
+		FileBackups: fileBackups,
 		RuntimeInfo: runtimeinfo.Info{
 			ConfigPath:   cfg.ConfigPath,
 			SandboxRoot:  cfg.Sandbox.Root,
@@ -224,7 +230,7 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	hookService := buildHookService(foundation, req.Platforms, toolRuntime, cronService, hooks, hookRuntime, hookProcessEnv, notifyHookIssue, sendNotice)
 	req.Profiler.Mark("hook register")
 
-	agt, err = buildAgent(ctx, foundation, req.Models, req.Platforms, toolRuntime, securityPolicy, hooks, hookRuntime, hookService, visionMetrics)
+	agt, err = buildAgent(ctx, foundation, req.Models, req.Platforms, toolRuntime, securityPolicy, hooks, hookRuntime, hookService, visionMetrics, fileBackups)
 	if err != nil {
 		if closeErr := hookRuntime.Close(context.Background()); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("cleanup hook runtime after agent build: %w", closeErr))
@@ -393,6 +399,7 @@ func buildAgent(
 	hookRuntime *hookruntime.Manager,
 	hookService *hookcontrol.Service,
 	visionMetrics *visionMetricsState,
+	fileBackups *fileops.RollbackStore,
 ) (*agent.Agent, error) {
 	cfg := foundation.Config
 	modelProfiles := map[string]config.ModelSelection{}
@@ -502,6 +509,7 @@ func buildAgent(
 		OutputManager:          delivery.NewManager(nil, foundation.Logger),
 		Logs:                   foundation.Logs,
 		ToolRegistry:           toolRuntime.Registry,
+		FileBackups:            fileBackups,
 		Skills:                 toolRuntime.SkillManager,
 		SecurityPolicy:         securityPolicy,
 		ContextConfig:          cfg.Context,

@@ -21,6 +21,7 @@ import (
 	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
+	"elbot/internal/utils/fileops"
 )
 
 // Options groups the agent's construction-time dependencies and configuration.
@@ -53,31 +54,34 @@ type Options struct {
 	// ASRSelection is its provider/model pair, authorized against the group
 	// model catalog before any paid call. ASRParallelism and ASRMaxSegments
 	// bound one inbound message; ASRMaxAudioBytes bounds one recording read.
-	AudioTranscriber      AudioTranscriber
-	ASRSelection          config.ModelSelection
-	ASRParallelism        int
-	ASRMaxSegments        int
-	ASRMaxAudioBytes      int64
-	CommandPrefixes       []string
-	SessionConfig         session.Config
-	NamingSelection       config.ModelSelection
-	NamingNotifier        session.NamingNotifier
-	SoulPath              string
-	ResidentMemoryStore   *resident.Store
-	AngelMemory           *angelmemory.Service
-	AngelMemoryConfig     config.AngelMemoryConfig
-	SelfLearning          *selflearning.Service
-	CharacterStore        *character.Store
-	LLMRequestConfig      config.LLMRequestConfig
-	Ops                   config.OpsConfig
-	BudgetLimits          config.BudgetLimitsConfig
-	Pricing               config.DailyReportConfig
-	HookService           agentcommands.HookService
-	HookManager           hook.Manager
-	HookRuntime           HookRouter
-	OutputManager         delivery.Manager
-	Logs                  LogManager
-	ToolRegistry          *tool.Registry
+	AudioTranscriber    AudioTranscriber
+	ASRSelection        config.ModelSelection
+	ASRParallelism      int
+	ASRMaxSegments      int
+	ASRMaxAudioBytes    int64
+	CommandPrefixes     []string
+	SessionConfig       session.Config
+	NamingSelection     config.ModelSelection
+	NamingNotifier      session.NamingNotifier
+	SoulPath            string
+	ResidentMemoryStore *resident.Store
+	AngelMemory         *angelmemory.Service
+	AngelMemoryConfig   config.AngelMemoryConfig
+	SelfLearning        *selflearning.Service
+	CharacterStore      *character.Store
+	LLMRequestConfig    config.LLMRequestConfig
+	Ops                 config.OpsConfig
+	BudgetLimits        config.BudgetLimitsConfig
+	Pricing             config.DailyReportConfig
+	HookService         agentcommands.HookService
+	HookManager         hook.Manager
+	HookRuntime         HookRouter
+	OutputManager       delivery.Manager
+	Logs                LogManager
+	ToolRegistry        *tool.Registry
+	// FileBackups keeps the pre-edit content of files ElBot edited, so
+	// /rollback can undo them within the current Session.
+	FileBackups           *fileops.RollbackStore
 	Skills                SkillLifecycle
 	ToolProvider          ToolSchemaProvider
 	SecurityPolicy        *security.Policy

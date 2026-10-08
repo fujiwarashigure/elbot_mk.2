@@ -82,6 +82,7 @@ func (d agentToolRunDeps) PrepareToolContext(ctx context.Context, session *stora
 		msg.SessionID = strings.TrimSpace(session.ID)
 		ctx = platform.WithMessageContext(ctx, msg)
 	}
+	ctx = tool.WithSessionID(ctx, session.ID)
 	ctx = tool.WithShownRuleCardFormats(ctx, decodeSessionMetadata(session.Metadata).ShownRuleCardFormats)
 	if allow := d.agent.groupToolAllowlist(ctx); allow != nil {
 		ctx = tool.WithDiscoverFilter(ctx, func(_ context.Context, info tool.Info) bool {

@@ -95,6 +95,7 @@ rg -n "ELBOT_OPS_TOKEN|WATCHDOG_OPS_TOKEN|restore-verify|fallback_mode|doctor|up
 - `internal/agent/inbound_media.go`：实际消费前的平台 resolver 与 Media Center 桥接、大小校验和不可用降级。
 - `internal/tool/builtin/chat_history.go`：当前聊天历史查询与媒体位置/下载状态展示，查询不下载；`get_media.go`：显式选定媒体位置获取，仅返回文本 ID，单次最多 5 次未入库媒体获取尝试；`view_image.go`：把图片本身交给模型（`source` 的媒体 ID / HTTP(S) URL / 本地路径，或 `message_id` + `media_index` 取历史图片），声明 `tool.Info.VisionRequired`，本地路径限超级管理员。
 - `internal/tool/capability.go`：请求级工具能力（当前只有 `Vision`），随 context 传播；`InfoAvailableInContext` 据此隐藏 `VisionRequired` 工具，agent 在 `runChat` / `handleSessionInput` / 后台预载入口用 `withToolCapabilities` 按当前 work 模型的 `vision` 声明注入。
+- `internal/utils/fileops/rollback.go`：进程内、按 Session 的编辑前内容备份（每文件仅保留最近一次，1024 条 / 256 MiB 上限，超出淘汰最旧），`Restore` 用 `RevisionAfter` 校验文件自编辑后未被改动，Shell 或外部程序的修改一律拒绝覆盖；`internal/tool/builtin/file_rollback.go` 与 `internal/agent/commands/rollback.go` 分别是仅超管的 `rollback_file` 工具与 `/rollback [编号]` 命令，`edit_file` 通过 `editTool.Backups` 写入记录，Session 身份由 `agentToolRunDeps.PrepareToolContext` 注入的 `tool.WithSessionID` 传递。
 - `internal/media/platform.go`：共享平台导入、历史媒体位置关联与本地 ID 查询；`manager.go`、`image.go`：统一媒体入库和持久化前图片压缩；`resolver.go`：LLM 媒体解析与传输选择；`history.go`：跨库历史 owner 分页对账。
 - `internal/storage/sqlite/media_history.go`：主库历史媒体关联与引用事务，区别于机器人发送输出索引。
 - `internal/agent/reference.go`：只读提供当前 Session ID，供平台引用续聊/fork 判定。
