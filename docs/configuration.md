@@ -1256,6 +1256,24 @@ negative_cache_ttl_seconds = 30
 - 缓存与负缓存只保存结构化字段和安全摘要，不保存原始响应体、请求 body、Base64 或凭据；API Key 从不出现在缓存键里。
 - 指标只使用低基数标签（cache 结果、错误类别、耗时），不使用 MediaID、session ID 或缓存键作为标签。
 
+## 查看图片 view_image
+
+`view_image` 是内置 Go 工具：让模型直接看到图片本身，而不是只看到地址或一段文字描述。它不需要额外配置，随 Media Center 与聊天历史一起注册。
+
+```json
+{"source": "media:<sha256>"}                    // 已入库媒体
+{"source": "https://example.com/a.png"}          // HTTP(S) URL，按需下载入库
+{"source": "/path/to/a.png"}                     // 本地路径，仅超级管理员
+{"message_id": ["#12"], "media_index": [[1]]}    // 当前聊天历史里的图片
+```
+
+说明：
+
+- `source` 与 `message_id` 二选一；`media_index` 与 `message_id` 逐项对应，序号从 1 开始且只能选图片，省略时取每条消息的首张图片。
+- 本地路径仅超级管理员可用，读取可能包含凭据的敏感文件会进入高风险确认；HTTP(S) URL 与本地文件都按媒体导入规则入库（受媒体大小与下载超时限制）。
+- 单次调用最多 5 次未入库媒体的下载尝试，失败只返回文本提示，不回显上游错误、凭据或本地路径。
+- 可用条件：当前 work Session 使用的模型声明 `vision = false` 时（`[providers.<name>].vision` 或 `[providers.<name>.model_configs."<model>"].vision`），该工具不会被发现、预载或执行；未声明时按原有行为可用。chat 模式本来就不使用工具。
+
 ## 语音转写 asr
 
 `[asr]` 是可选配置：收到会被唤醒的语音/录音消息时，ElBot 先把音频转成文字，再用转写文本继续聊天、工具和上下文流程。它复用 `[providers.*]`，调用 OpenAI 兼容的 `POST {base_url}/audio/transcriptions`。

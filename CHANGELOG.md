@@ -2,6 +2,8 @@
 
 ### Added
 
+- 新增 `view_image` 内置工具：把图片本身交给模型，而不是只给地址。`source` 传媒体 ID、HTTP(S) URL 或本地路径（本地路径仅超级管理员，读取敏感文件走高风险确认），或用 `message_id`（可带 `#`）+ `media_index` 取当前聊天历史里的图片，省略 `media_index` 时取每条消息的首张图片；单次最多 5 次未入库媒体下载尝试，失败只返回文本提示，不回显上游错误。
+- 工具新增按模型能力可用：`tool.Info.VisionRequired` + 请求上下文里的 `tool.Capabilities`。声明 `vision = false` 的 Provider 或模型（`[providers.*].vision` / `model_configs.<model>.vision`）在当前 work Session 中不会发现、预载或执行 `view_image`；未声明能力（`VisionUnknown`）时保持原有行为。`view_image` 是第一个使用该机制的工具。
 - OneBot 入站消息新增平台级去重：按 `平台 + 机器人 self_id + scope + message_id` 记录 `processing` / `completed` / `failed`，TTL 内重连重放不会再次唤醒模型或重复计费；去重状态独立于 `history` 开关，并有 `inbound_dedup_max_entries` 硬上限。
 - OneBot 新增有界预处理通道：`@` 解析、引用拉取和合并转发展开在 `preprocess_workers` / `preprocess_queue_size` 限定的 worker 池中执行，队列满时普通消息本地拒绝而不是创建无界 goroutine；撤回、成员和管理事件走独立的高优先级 worker / 队列，满时在读循环内联处理，不被普通聊天流量堵塞。
 - 新增可选聊天硬预算模式 `[budget_limits].chat_hard_limit`：在现有 token/费用账本上增加“调用前原子预占、返回 usage 后结算释放差额”的路径。并发请求不能同时穿透剩余额度；上游缺失 usage 时按预占量保守记账并写入 `budget.uncertain`；启用费用硬限制但模型缺价格时明确拒绝；取消/超时/重启后的未结算预占保持保守占用，不自动退款。

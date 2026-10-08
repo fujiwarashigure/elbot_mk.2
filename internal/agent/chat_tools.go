@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"elbot/internal/config"
 	"elbot/internal/llm"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
@@ -265,6 +266,27 @@ func previewArguments(args string) string {
 // when a hook injects them.
 func sessionToolsEnabled(session *storage.Session) bool {
 	return session != nil && session.Mode == storage.SessionModeWork
+}
+
+// withToolCapabilities annotates the request context with what the model that
+// serves this session can accept. Only an explicit vision = false declaration
+// hides image tools; VisionUnknown keeps the historic behaviour.
+func (a *Agent) withToolCapabilities(ctx context.Context, session *storage.Session) context.Context {
+	if session == nil {
+		return ctx
+	}
+	selected := a.modelForMode(session.Mode)
+	return a.withModelCapabilities(ctx, selected.Provider, selected.Model)
+}
+
+// withModelCapabilities is withToolCapabilities for one explicit provider/model.
+func (a *Agent) withModelCapabilities(ctx context.Context, providerName, model string) context.Context {
+	provider, ok := a.modelRuntime.providers[providerName]
+	if !ok {
+		return ctx
+	}
+	vision := provider.VisionSupport(model) != config.VisionUnsupported
+	return tool.WithCapabilities(ctx, tool.Capabilities{Vision: vision})
 }
 
 func (a *Agent) toolsForSession(ctx context.Context, session *storage.Session) ([]llm.ToolSchema, error) {

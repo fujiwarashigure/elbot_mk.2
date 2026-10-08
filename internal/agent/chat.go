@@ -96,6 +96,7 @@ func (a *Agent) handleTurnContextDone(ctx context.Context, sessionID string, err
 }
 
 func (a *Agent) runChat(ctx context.Context, session *storage.Session, text string, out turnOutput, selection config.ModelSelection, completedPending *turn.Input) error {
+	ctx = a.withToolCapabilities(ctx, session)
 	inbound := a.turnInputForMessage(ctx, text)
 	userSegments := a.materializeMedia(ctx, inboundSegments(ctx, text))
 	userSegments = a.attachSpeakerMarker(ctx, inbound, userSegments)
@@ -177,6 +178,9 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	if err := a.authorizeExecutionModelSelection(ctx, selection); err != nil {
 		return err
 	}
+	// The turn hook may have switched the model, so the tool capabilities must
+	// follow the model that will actually be called.
+	ctx = a.withModelCapabilities(ctx, selection.Provider, selection.Model)
 	// Chat sessions ignore tool schemas, including the ones a turn hook forces in.
 	if sessionToolsEnabled(session) {
 		tools = turnEvent.LLM.Tools

@@ -45,6 +45,9 @@ type Info struct {
 	OwnerScoped bool
 	// ForegroundOnly marks tools that are only available in foreground sessions.
 	ForegroundOnly bool
+	// VisionRequired marks tools that need a model accepting image input. They
+	// are hidden and rejected while the request context declares no vision.
+	VisionRequired bool
 	// Tags are user-facing grouping labels for completion and manual preloading.
 	// They are not a security boundary and are not exposed through discover_tool.
 	Tags      []string

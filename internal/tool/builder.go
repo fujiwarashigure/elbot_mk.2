@@ -11,6 +11,7 @@ type Builder struct {
 	hidden         bool
 	ownerScoped    bool
 	foregroundOnly bool
+	visionRequired bool
 	tags           []string
 	dependsOn      []string
 	properties     map[string]any
@@ -69,6 +70,13 @@ func (b *Builder) ForegroundOnly() *Builder {
 	return b
 }
 
+// VisionRequired hides the tool while the model serving the request cannot
+// accept image input.
+func (b *Builder) VisionRequired() *Builder {
+	b.visionRequired = true
+	return b
+}
+
 func (b *Builder) DependsOn(names ...string) *Builder {
 	b.dependsOn = append(b.dependsOn, normalizeNames(names)...)
 	return b
@@ -121,7 +129,7 @@ func (b *Builder) ObjectArray(name, description string, properties map[string]an
 }
 
 func (b *Builder) BuildInfo() Info {
-	return Info{Name: b.name, Description: b.description, Source: b.source, Risk: normalizeRisk(b.risk, RiskLow), SuperadminOnly: b.superadminOnly, Hidden: b.hidden, OwnerScoped: b.ownerScoped, ForegroundOnly: b.foregroundOnly, Tags: normalizeTags(b.tags), DependsOn: normalizeNames(b.dependsOn)}
+	return Info{Name: b.name, Description: b.description, Source: b.source, Risk: normalizeRisk(b.risk, RiskLow), SuperadminOnly: b.superadminOnly, Hidden: b.hidden, OwnerScoped: b.ownerScoped, ForegroundOnly: b.foregroundOnly, VisionRequired: b.visionRequired, Tags: normalizeTags(b.tags), DependsOn: normalizeNames(b.dependsOn)}
 }
 
 func (b *Builder) BuildSchema() llm.ToolSchema {

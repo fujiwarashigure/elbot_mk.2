@@ -126,6 +126,7 @@ func (a *Agent) continueCommandInput(ctx context.Context, continuation command.C
 }
 
 func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session, text string) error {
+	ctx = a.withToolCapabilities(ctx, session)
 	// Compaction admission comes before the input hook and directive handling:
 	// a message that will be refused must not preload tools or rewrite the
 	// session tool cache.

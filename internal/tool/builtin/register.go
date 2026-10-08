@@ -111,6 +111,9 @@ func RegisterAll(registry *tool.Registry, opts RegisterOptions) error {
 		if err := registry.Register(NewGetMediaTool(opts.ChatHistory, search.center)); err != nil {
 			return err
 		}
+		if err := registry.Register(NewViewImageTool(opts.ChatHistory, search.center)); err != nil {
+			return err
+		}
 		if err := registry.Register(search); err != nil {
 			return err
 		}

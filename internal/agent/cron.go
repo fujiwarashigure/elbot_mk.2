@@ -237,6 +237,7 @@ func (a *Agent) preloadBackgroundResources(ctx context.Context, session *storage
 	if session == nil || session.Mode != storage.SessionModeWork || a.toolRuntime.registry == nil {
 		return result
 	}
+	ctx = a.withToolCapabilities(ctx, session)
 	policy := a.securityPolicy
 	if policy == nil {
 		policy = security.DefaultPolicy()

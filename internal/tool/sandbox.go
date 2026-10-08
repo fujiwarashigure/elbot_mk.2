@@ -43,6 +43,9 @@ func InfoAvailableInContext(ctx context.Context, info Info) bool {
 	if info.ForegroundOnly && BackgroundContext(ctx) {
 		return false
 	}
+	if info.VisionRequired && !VisionAvailable(ctx) {
+		return false
+	}
 	return true
 }
 
