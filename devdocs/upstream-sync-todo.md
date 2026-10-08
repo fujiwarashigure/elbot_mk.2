@@ -113,11 +113,29 @@
 - **注意**：fork 没有上游的 `session.Binding`；本项是"忠实移植上游后台接管"（P1#4 的完整版）的前置，若将来要把接管语义对齐上游，先做本项。
 - **验收**：并发切换模型/新建会话不再出现半写 `state.toml`（写盘原子性已有，并发写回已串行化并手工复现验证：修前 8 个并发写入者只剩 1 个分片，修后稳定保留全部分片；该缺陷无法做成确定性单元测试，因为要暴露它需要在锁内部插桩）；运行中会话切模型/切模式给出明确拒绝而非静默生效（已有行为，测试覆盖）；相关包测试 + `internal/app` 全绿。
 
-## 4. [ ] P1#6 通知规则集中化（2–3 人日）
+## 4. [~] P1#6 通知规则集中化（2–3 人日）
 
 - **上游来源**：`internal/notification/*`。
 - **前置**：P1#1 日志与信号整改（通知规则建立在统一来源/事件契约之上）。
-- **验收**：通知目标的裁决逻辑只有一处入口；cron / Elnis / Hook 三条投递路径都走它；补"通知被禁用时不投递"的负向测试。
+
+**盘点结论（本次实测）**：三条投递路径（cron、Elnis、hook）**已经**汇聚到同一个裁决入口 —— `internal/app/runtime.go` 的 `sendNotice` 闭包 → `Agent.SendNotice`（先过 `turnOutputAllowed` 与 `noticeTargetBlocked`，再经 `delivery.Manager` 路由到平台适配器），cron 的 `buildCronService`、Elnis 的 `Send`、hook service 全部接的是这个闭包。真正分散的是**平台适配器各自的跳过规则**，其中"工具调用进度预览"这条规则在 OneBot、QQ 官方、hook 出站记录三处各写一遍。
+
+**已完成（本轮）**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `internal/delivery/delivery.go` | 新增唯一的预览判定入口：`ToolPreviewPrefix`、`Output.IsToolPreview()`（要求完整前缀 `"[tool] "`，只有 `[tool]` 没有正文不算）、`IsToolPreviewNotice()`（单条文本输出 + 预览前缀） |
+| `internal/platform/qq-onebot/adapter.go`、`internal/platform/qqofficial/adapter.go` | `isGroupToolPreviewNotice` 改为调用 `delivery.IsToolPreviewNotice`，各自只保留"目标是不是群聊"的判断 |
+| `internal/agent/turn_output.go` | `formatToolPreview` 用 `delivery.ToolPreviewPrefix` 写前缀 |
+| `internal/hook/builtin/register.go` | 出站历史跳过预览改用同一个前缀常量 |
+| `internal/delivery/tool_preview_test.go`（新） | 覆盖前缀识别、非预览拒绝（普通回答、`[tools]`、空正文、非文本 Kind、只有前缀、正文里提到 `[tool]`）与"必须恰好一条文本输出" |
+
+**剩余步骤（需用户给边界）**：
+
+- "通知被禁用时不投递"的负向测试已有：`internal/agent/group_runtime_test.go` 的 `TestSelfMutePausesGroupCallsOutputAndPersists` 断言被静音群里显式群通知被丢弃、只有状态变更通知发出一次。若要更细的"某个通知目标被禁用"矩阵，需要先明确禁用维度（群运行状态 / 通知目标开关 / 平台能力）。
+- 其余平台级跳过规则（工具预览之外的）需要逐个确认是否语义相同再合并；不同语义的不能为了"集中"而强行统一。上游 `internal/notification/*` 是一整套通知目标裁决模块，若要按上游形态重做，需要用户先定范围。
+
+**验收**：通知目标的裁决逻辑只有一处入口（`Agent.SendNotice`，已确认）；cron / Elnis / Hook 三条投递路径都走它（已确认）；补"通知被禁用时不投递"的负向测试（已有群运行状态一例，可按用户给定维度扩展）。
 
 ## 5. [ ] P2 换基路线 B：原生 Responses 协议（20–35 人日，**需先决策**）
 

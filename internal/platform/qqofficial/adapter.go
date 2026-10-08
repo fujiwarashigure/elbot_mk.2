@@ -148,7 +148,7 @@ func (a *Adapter) targets(target delivery.Target) ([]sendTarget, error) {
 }
 
 func isGroupToolPreviewNotice(ctx context.Context, outputs []delivery.Output) bool {
-	if len(outputs) != 1 || outputs[0].Kind != delivery.KindText || !strings.HasPrefix(strings.TrimSpace(outputs[0].Text), "[tool]") {
+	if !delivery.IsToolPreviewNotice(outputs) {
 		return false
 	}
 	target, ok := ctx.Value(targetKey{}).(sendTarget)

@@ -286,15 +286,15 @@ rg -n "Event|Handler|Control|plugins/hooks.toml|exec|hook.v2|runtime|SharedState
 
 先看：
 
-- `internal/delivery/`：平台无关输出意图和发送管理。
+- `internal/delivery/`：平台无关输出意图和发送管理。`ToolPreviewPrefix` / `Output.IsToolPreview` / `IsToolPreviewNotice` 是"这条通知是不是工具调用进度预览"的唯一判定入口：Agent 写前缀（`formatToolPreview`）、OneBot 与 QQ 官方用它过滤群聊预览、hook 出站记录用它跳过预览；各平台只保留"目标是不是群聊"这一层自身规则。
 - `internal/agent/turn_output.go`：Agent turn 输出适配。
-- `internal/agent/output.go`：Agent 的 Hook/工具输出意图和平台 sender 接入。
+- `internal/agent/output.go`：Agent 的 Hook/工具输出意图和平台 sender 接入；`Agent.SendNotice` 是全部通知投递（含 cron / Elnis / hook 经 `app` 注入的 `sendNotice` 闭包）的统一裁决点，先过 `turnOutputAllowed` 与 `noticeTargetBlocked` 再下发。
 - `internal/platform/platform.go`：平台发送抽象。
 
 常用搜索：
 
 ```bash
-rg -n "Output|SendChat|SendNotice|Stream|Reasoning|emoticon|receipt" internal/delivery internal/agent internal/platform
+rg -n "Output|SendChat|SendNotice|Stream|Reasoning|emoticon|receipt|ToolPreview" internal/delivery internal/agent internal/platform
 ```
 
 <!-- locator:platform -->

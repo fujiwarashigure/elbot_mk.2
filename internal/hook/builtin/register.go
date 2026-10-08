@@ -84,7 +84,9 @@ func recordOutboundMessage(repo storage.OutboundMessageRepository) func(context.
 			return event, nil
 		}
 		text := strings.TrimSpace(llm.SegmentsTextOnly(event.Message.Segments))
-		if text == "" || strings.HasPrefix(text, "[tool] ") {
+		// 工具调用进度预览不是用户可见回答，不写入出站历史。前缀规则集中在交付层，
+		// 避免与平台的群聊过滤规则各写一份。
+		if text == "" || strings.HasPrefix(text, delivery.ToolPreviewPrefix) {
 			return event, nil
 		}
 		platform := strings.TrimSpace(event.Platform.Name)

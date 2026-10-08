@@ -420,7 +420,7 @@ func textOutputs(outputs []delivery.Output) (string, bool) {
 	return text.String(), true
 }
 func isGroupToolPreviewNotice(ctx context.Context, outputs []delivery.Output) bool {
-	if len(outputs) != 1 || outputs[0].Kind != delivery.KindText || !strings.HasPrefix(strings.TrimSpace(outputs[0].Text), "[tool]") {
+	if !delivery.IsToolPreviewNotice(outputs) {
 		return false
 	}
 	t, ok := ctx.Value(targetKey{}).(target)

@@ -87,6 +87,25 @@ type Output struct {
 	Meta                     map[string]any
 }
 
+// ToolPreviewPrefix 是工具调用进度预览的固定前缀。Agent 在组织预览正文时写入它
+// （`formatToolPreview`），平台适配器与历史写入用它识别"这条通知不是用户可见回答"。
+// 这条规则此前在 OneBot、QQ 官方、hook 出站记录三处各写一遍，改一处会漏掉其余两处，
+// 因此把前缀与判定集中在交付层，只留"是否群聊目标"由各平台自己决定。
+const ToolPreviewPrefix = "[tool] "
+
+// IsToolPreview 报告这条输出是否是工具调用进度预览。判定使用完整前缀（含分隔空格），
+// 因此只有前缀、没有正文的 "[tool]" 不算预览；Agent 的 formatToolPreview 一定写出
+// "前缀 + 正文"。适配器负责各自"整条通知只有一条文本输出"的检查。
+func (out Output) IsToolPreview() bool {
+	return out.Kind == KindText && strings.HasPrefix(strings.TrimSpace(out.Text), ToolPreviewPrefix)
+}
+
+// IsToolPreviewNotice 报告这条通知是否是"单条工具调用进度预览"。平台的群聊过滤规则
+// 都用这个形状判断（一条文本输出 + 工具预览前缀），因此把它收敛到交付层。
+func IsToolPreviewNotice(outputs []Output) bool {
+	return len(outputs) == 1 && outputs[0].IsToolPreview()
+}
+
 func WithDeliveryTiming(out Output, timing string) Output {
 	timing = strings.TrimSpace(timing)
 	if timing == "" || timing == DeliveryImmediate {

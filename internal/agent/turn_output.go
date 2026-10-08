@@ -128,7 +128,7 @@ func (a *Agent) sendPreview(ctx context.Context, text string) {
 func formatToolPreview(text string) string {
 	lines := strings.Split(strings.TrimSpace(text), "\n")
 	for i, line := range lines {
-		lines[i] = "[tool] " + strings.TrimSpace(line)
+		lines[i] = delivery.ToolPreviewPrefix + strings.TrimSpace(line)
 	}
 	return strings.Join(lines, "\n")
 }
