@@ -680,10 +680,19 @@ func changedRuntimeStateSections(before, after map[string]string) []string {
 	return changed
 }
 
+// saveRuntimeState 把运行态写回 state.toml。
+//
+// stateWriteMu 覆盖"先合并外部修改、再取快照、最后落盘"的**全过程**：state.toml 是单个
+// 文件，"读最新 → 合并 → 替换"如果被并发执行拆开，两次保存会各自用自己读到的旧文件覆盖
+// 对方刚写入的内容（mtime 门在同一时间戳精度内看不出差别），表现为随机丢字段。生产代码
+// 有 22 处调用点（预算账本、群策略、群知识、群服务、上下文溢出、模型切换，分布在 8 个
+// 文件），全部走这一个入口，因此串行化放在这里就够了。
 func (a *Agent) saveRuntimeState() error {
 	if a.statePath == "" {
 		return nil
 	}
+	a.stateWriteMu.Lock()
+	defer a.stateWriteMu.Unlock()
 	// Merge an external edit before writing back, otherwise this process would
 	// overwrite a change an operator just made to state.toml. Lost updates are
 	// not recoverable afterwards, so the merge must happen before the snapshot.

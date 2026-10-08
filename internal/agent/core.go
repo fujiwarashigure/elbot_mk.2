@@ -38,12 +38,15 @@ import (
 
 // Agent is the minimal agent core that handles messages and commands.
 type Agent struct {
-	platform                  platform.PlatformAdapter
-	platformSenders           map[string]delivery.MessageSender
-	modelRuntime              modelRuntimeState
-	statePath                 string
-	stateModTime              time.Time
-	stateMu                   sync.Mutex
+	platform        platform.PlatformAdapter
+	platformSenders map[string]delivery.MessageSender
+	modelRuntime    modelRuntimeState
+	statePath       string
+	stateModTime    time.Time
+	stateMu         sync.Mutex
+	// stateWriteMu 串行化 state.toml 的整个"合并→快照→落盘"过程；stateMu 只保护
+	// stateModTime 这一个字段，不能替代它。
+	stateWriteMu              sync.Mutex
 	stateWatchMu              sync.Mutex
 	stateWatchStarted         bool
 	contextOverflowMu         sync.RWMutex
