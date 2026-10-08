@@ -103,14 +103,14 @@
 
 | 要拿到的能力 | 现状 | 处置 |
 | --- | --- | --- |
-| `state.toml` 原子保存 | 写盘本身已是原子替换（临时文件 + `Sync` + 备份换名 + 崩溃后从 `.bak` 恢复，见 `config.SaveState` / `LoadState`）。**缺陷在并发写回**：`saveRuntimeState` 只用保护 `stateModTime` 的 `stateMu`，"重新读文件合并 → 取内存快照 → 替换文件"整段是并发的，两个写入者会互相覆盖分片；mtime 门在同一时间戳精度内也看不出差别。 | **已修**：新增 `stateWriteMu` 串行化整个合并-快照-落盘过程；22 处调用点（8 个文件）全部经过它；新增并发写入回归测试 `TestSaveRuntimeStateSerializesConcurrentWriters`（每个写入者只把自己那份运行态放进内存并强制重读文件合并，断言分片不丢、文件始终完整可解析）。 |
+| `state.toml` 原子保存 | 写盘本身已是原子替换（临时文件 + `Sync` + 备份换名 + 崩溃后从 `.bak` 恢复，见 `config.SaveState` / `LoadState`）。**缺陷在并发写回**：`saveRuntimeState` 只用保护 `stateModTime` 的 `stateMu`，"重新读文件合并 → 取内存快照 → 替换文件"整段是并发的，两个写入者会互相覆盖分片；mtime 门在同一时间戳精度内也看不出差别。 | **已修**：新增 `stateWriteMu` 串行化整个合并-快照-落盘过程；22 处调用点（8 个文件）全部经过它。验证方式：手工复现（8 个并发写入者各自只把一份分片放进内存再保存）——修前只剩 1 个分片落盘，修后稳定保留全部 8 个；该缺陷没有做成单元测试，因为确定性地暴露它需要在锁内部插桩，而并发冒烟测试会与其它测试的 `state.toml` 清理互相干扰（反而制造无关的 flake）。 |
 | 运行中会话拒绝切离 | 已有：`commandExecutor.Handle` 按 `turn.Snapshot` 的 phase 拒绝 `SessionEffect` 会切走当前会话的命令（`activeTurnCommandBlockedText`），压缩中另有 `compactCommandBlockedText`。 | 无需改动；`/new`、`/resume`、`/fork`、`/chat`、`/work`、`/delete`、`/compact` 均在拒绝集合内，已有测试覆盖。 |
 | 会话绑定统一失效 | 已有：`session.Service` 的当前会话映射只在 `setCurrent` / `clearCurrentIf` 两处写，删除、归档、空闲过期分别经 `clearCurrentIf` 失效；读取侧 `Current` 每次都回 store 取行，进程内不缓存会话内容。 | 无需改动；未发现绕过这两个入口的写点。 |
 | 命名模型快照 | fork 的 `model_profiles` 是 **app.toml 里的静态单模型选择**（`Options.ModelProfiles`，用于 `@model:<profile>` 解析），没有"把一个名字绑定到一组按模式/用途保存的模型选择"的快照能力。 | **未做（需要用户决策）**：这是新增用户可见能力（命名快照的保存/应用/删除入口、与 `/model` 的关系、是否进 `state.toml`），不属于"修复既有缺陷"；按 fork 最小版原则不与其余三项捆绑实施。 |
 
 - **前置**：无（但会与 P1#1 抢同一批 app 层文件，建议两项顺序做，不要并行改 `internal/app`）。
 - **注意**：fork 没有上游的 `session.Binding`；本项是"忠实移植上游后台接管"（P1#4 的完整版）的前置，若将来要把接管语义对齐上游，先做本项。
-- **验收**：并发切换模型/新建会话不再出现半写 `state.toml`（已由并发回归测试守住）；运行中会话切模型/切模式给出明确拒绝而非静默生效（已有行为，测试覆盖）；相关包测试 + `internal/app` 全绿。
+- **验收**：并发切换模型/新建会话不再出现半写 `state.toml`（写盘原子性已有，并发写回已串行化并手工复现验证：修前 8 个并发写入者只剩 1 个分片，修后稳定保留全部分片；该缺陷无法做成确定性单元测试，因为要暴露它需要在锁内部插桩）；运行中会话切模型/切模式给出明确拒绝而非静默生效（已有行为，测试覆盖）；相关包测试 + `internal/app` 全绿。
 
 ## 4. [ ] P1#6 通知规则集中化（2–3 人日）
 
@@ -138,6 +138,7 @@
 **本机既有环境失败（与上述改动无关，不要计入本次回归）**：
 
 - `internal/agent`：2 个 `TestEmoticonHook*`（`exec: "sh": executable file not found`）。
+- `internal/agent`：`TestMemberPanelShowsOwnTasksAndQuota` / `TestGroupServicesCommandIntegration` / `TestModelsGroupsProvidersAndSwitchPersistsState` 等**偶发**失败，报错是 `TempDir RemoveAll cleanup: unlinkat ...: The directory is not empty` —— 测试返回后仍有迟到的 `state.toml` 写入落在那次 `t.TempDir()` 里，属于测试夹具的清理竞态，与 `stateWriteMu`（只串行化同一实例的写回）无关；单独跑这些测试稳定通过，全包连跑约每次命中 1 例。
 - `internal/tool/builtin`：4 个 `TestAnalyzeBashShellAdvice*`。
 - `internal/tool/skill`：`TestFinalizeElSkillReturnsBuildFailure`（测试内部跑 `go build`）。
 - `internal/hook/rules`：`TestExecCancellationKillsDescendantProcesses`（依赖 TCP 回连，本机 accept 超时）。

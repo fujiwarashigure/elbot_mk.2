@@ -20,7 +20,9 @@ func (a *Agent) HandlePlatformEvent(ctx context.Context, event platform.Platform
 	eventCtx := platformContextForEvent(ctx, event)
 	scope := a.scope(eventCtx)
 	eventType := strings.ToLower(strings.TrimSpace(event.Type))
-	a.audit("platform_event", "platform", event.Platform, "kind", string(event.Kind), "type", eventType, "scope", scope.PlatformScopeID, "actor", scope.ActorID)
+	// 平台生命周期事件在这里被确定性接收（不调用模型）；事件本身没有"失败"语义，
+	// 接收事实记 succeeded，后续处理若另有结果由各自的审计事件承担。
+	a.audit("platform_event", "platform", event.Platform, "kind", string(event.Kind), "type", eventType, "scope", scope.PlatformScopeID, "actor", scope.ActorID, "result", logging.ResultSucceeded)
 
 	// Bot self mute/leave/unmute is a local runtime state, not a user work
 	// cancellation. Consume it before the member-level notices below.
