@@ -618,7 +618,7 @@ func (a *Agent) settleChatBudget(ctx context.Context, reservation *chatBudgetRes
 	if release {
 		a.audit("chat_budget_released", "model", reservation.model, "call_id", reservation.callID, "result", logging.ResultSucceeded)
 	} else if uncertain {
-		a.audit("chat_budget_uncertain", "model", reservation.model, "call_id", reservation.callID, "charged_tokens", actualTokens, "charged_cost_micros", actualCost)
+		a.audit("chat_budget_uncertain", "model", reservation.model, "call_id", reservation.callID, "charged_tokens", actualTokens, "charged_cost_micros", actualCost, "result", logging.ResultFailed)
 	} else {
 		a.audit("chat_budget_settled", "model", reservation.model, "call_id", reservation.callID, "tokens", actualTokens, "cost_micros", actualCost, "result", logging.ResultSucceeded)
 	}

@@ -499,7 +499,7 @@ func (a *Agent) auditPartialPlatformSend(sessionID, operation string, receipt de
 	if a == nil || err == nil || len(receipt.PlatformMessageIDs) == 0 {
 		return
 	}
-	a.audit("platform_send_partial", "session_id", sessionID, "operation", operation, "platform_message_count", len(receipt.PlatformMessageIDs), "error", err.Error())
+	a.audit("platform_send_partial", "session_id", sessionID, "operation", operation, "platform_message_count", len(receipt.PlatformMessageIDs), "error", err.Error(), "result", logging.ResultFailed)
 }
 
 func hasStorageUserMessage(messages []storage.Message) bool {

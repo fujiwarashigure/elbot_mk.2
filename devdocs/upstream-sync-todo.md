@@ -90,7 +90,7 @@
 | `internal/hook/runtime/tool_bridge.go`、`rules/action.go`、`rules/exec.go` | `hook.tool_call` → `hook_tool_call`、`hook.platform_call` → `hook_platform_call`；`hook_platform_call` 改为按真实调用结果记录（成功/失败带 `error` 与 `result`）；错误对象统一字符串化 |
 | 测试（新） | `internal/logging/contract_test.go`、`internal/tool/availability_test.go`（含"新原因入口与 `CanAccessTool`+`InfoAvailableInContext` 判定等价"的固定测试）、`internal/agent/logging_test.go`（`module` 来源、无 logger 时 noop、错误属性转换） |
 
-**剩余步骤**：按包分批把其余审计事件纳入契约（补 `result`；`module` 已由 Agent 审计入口统一写入，Hook 侧由各调用点显式传入）。本批已改动 23 个文件、`internal/agent` 现有 69 处契约取值，并新增源码级契约校验（`internal/logging/contract_source_test.go`，扫描所有非测试 `.go` 里写死的 `result` 值）；仍有 11 处结果交给函数判定（`tool_call`、`risk_confirmation_result`、`preloadSkipResult`），无法静态校验，由单元测试覆盖。仍待处理的事件（`group_runtime_state`、`platform_event`、`platform_recall_cancel*`、`platform_user_cancel`、`angel_memory_forget_recalled/_failed`、`group_runtime_cancel`、`chat_budget_uncertain`、`platform_send_partial` 等）结果依赖调用点上下文，需要逐处判断而不是套固定值。上游式的九字段契约是否要做（含 JSONL 与 Reader 重写）需要用户另行决策，本项不擅自扩大。
+**剩余步骤**：按包分批把其余审计事件纳入契约（补 `result`；`module` 已由 Agent 审计入口统一写入，Hook 侧由各调用点显式传入）。已完成两批：第一批 23 个文件、可自证结果的调用点；第二批逐处判断上下文相关的事件（撤回/用户取消记 `canceled`、群运行状态记 `succeeded`、随之取消记 `canceled`、部分发送与预算 uncertain 记 `failed`）。`internal/agent` 与 Hook 侧现有 80 处契约取值，并新增源码级契约校验（`internal/logging/contract_source_test.go`，扫描所有非测试 `.go` 里写死的 `result` 值，覆盖 69 处）；其余把结果交给函数判定（`tool_call`、`risk_confirmation_result`、`preloadSkipResult`）的无法静态校验，由单元测试覆盖。上游式的九字段契约是否要做（含 JSONL 与 Reader 重写）需要用户另行决策，本项不擅自扩大。
 
 **验收**：`/log`、`/audit` 的筛选参数在新来源下仍可用；每批迁移后跑受影响包测试 + `internal/app`。
 

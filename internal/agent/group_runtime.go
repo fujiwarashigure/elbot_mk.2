@@ -9,6 +9,7 @@ import (
 
 	"elbot/internal/config"
 	"elbot/internal/delivery"
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 	"elbot/internal/session"
 )
@@ -163,7 +164,7 @@ func (a *Agent) applyGroupRuntimeState(scope session.Scope, state, reason string
 	if err := a.saveRuntimeState(); err != nil && a.logger != nil {
 		a.logger.Warn("persist group runtime state failed", "scope", contextOverflowKey(scope), "state", state, "error", err.Error())
 	}
-	a.audit("group_runtime_state", "platform", scope.Platform, "scope", scope.PlatformScopeID, "state", state, "reason", strings.TrimSpace(reason))
+	a.audit("group_runtime_state", "platform", scope.Platform, "scope", scope.PlatformScopeID, "state", state, "reason", strings.TrimSpace(reason), "result", logging.ResultSucceeded)
 	return true
 }
 
@@ -177,7 +178,7 @@ func (a *Agent) cancelScopeWork(scope session.Scope, state, reason string) {
 	}
 	count := a.requests.CancelScope(scopeKey)
 	count += a.cancelInboxScope(scopeKey)
-	a.audit("group_runtime_cancel", "platform", scope.Platform, "scope", scope.PlatformScopeID, "state", state, "reason", strings.TrimSpace(reason), "count", count)
+	a.audit("group_runtime_cancel", "platform", scope.Platform, "scope", scope.PlatformScopeID, "state", state, "reason", strings.TrimSpace(reason), "count", count, "result", logging.ResultCanceled)
 }
 
 func (a *Agent) notifyGroupRuntimeChange(scope session.Scope, state, reason string) {

@@ -29,7 +29,7 @@ func (a *Agent) sendOutputs(ctx context.Context, outputs []delivery.Output) erro
 	receipt, err := manager.SendNoticesWithReceipt(ctx, outputs)
 	if err != nil {
 		if count := len(receipt.PlatformMessageIDs); count > 0 {
-			a.audit("platform_send_partial", "operation", "send_outputs", "platform_message_count", count, "error", err.Error())
+			a.audit("platform_send_partial", "operation", "send_outputs", "platform_message_count", count, "error", err.Error(), "result", logging.ResultFailed)
 			if a.logger != nil {
 				a.logger.WarnContext(ctx, "output send failed with partial receipt", "error", err.Error(), "platform_message_count", count)
 			}

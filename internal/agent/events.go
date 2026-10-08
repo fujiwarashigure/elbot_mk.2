@@ -136,7 +136,7 @@ func (a *Agent) registerMessageWork(ctx context.Context, sessionID, requestID st
 		if a.requests != nil {
 			a.requests.Cancel(requestID)
 		}
-		a.audit("platform_recall_cancel_late", "platform", msg.Platform, "scope", msg.ScopeID, "message_id", msg.PlatformMessageID, "request_id", requestID)
+		a.audit("platform_recall_cancel_late", "platform", msg.Platform, "scope", msg.ScopeID, "message_id", msg.PlatformMessageID, "request_id", requestID, "result", logging.ResultCanceled)
 		return true
 	}
 	return false
@@ -159,7 +159,7 @@ func (a *Agent) unregisterMessageWork(requestID string) {
 func (a *Agent) cancelMessageWork(ctx context.Context, event platform.PlatformEvent) {
 	key := messageWorkKey(event.Platform, event.ScopeID, event.MessageID)
 	if a.cancelInboxMessage(key) > 0 {
-		a.audit("platform_recall_cancel_queued", "platform", event.Platform, "scope", event.ScopeID, "message_id", event.MessageID)
+		a.audit("platform_recall_cancel_queued", "platform", event.Platform, "scope", event.ScopeID, "message_id", event.MessageID, "result", logging.ResultCanceled)
 		return
 	}
 	a.messageWorkMu.Lock()
@@ -177,7 +177,7 @@ func (a *Agent) cancelMessageWork(ctx context.Context, event platform.PlatformEv
 	if a.requests != nil {
 		a.requests.Cancel(ref.RequestID)
 	}
-	a.audit("platform_recall_cancel", "platform", event.Platform, "scope", event.ScopeID, "message_id", event.MessageID, "session_id", ref.SessionID, "request_id", ref.RequestID)
+	a.audit("platform_recall_cancel", "platform", event.Platform, "scope", event.ScopeID, "message_id", event.MessageID, "session_id", ref.SessionID, "request_id", ref.RequestID, "result", logging.ResultCanceled)
 }
 
 func (a *Agent) recallTombstoneTTL() time.Duration {
@@ -238,7 +238,7 @@ func (a *Agent) cancelUserWork(ctx context.Context, event platform.PlatformEvent
 	}
 	count := a.requests.CancelFairKey(fairKey)
 	count += a.cancelInboxFairKey(fairKey)
-	a.audit("platform_user_cancel", "platform", event.Platform, "scope", event.ScopeID, "user_id", userID, "fair_key", fairKey, "count", count)
+	a.audit("platform_user_cancel", "platform", event.Platform, "scope", event.ScopeID, "user_id", userID, "fair_key", fairKey, "count", count, "result", logging.ResultCanceled)
 }
 
 func (a *Agent) forgetMemoriesForRecalledMessage(ctx context.Context, event platform.PlatformEvent) {
@@ -256,11 +256,11 @@ func (a *Agent) forgetMemoriesForRecalledMessage(ctx context.Context, event plat
 		if a.logger != nil {
 			a.logger.WarnContext(ctx, "forget recalled angel memory failed", "platform", platformName, "scope", scopeID, "message_id", messageID, "error", err.Error())
 		}
-		a.audit("angel_memory_forget_failed", "platform", platformName, "scope", scopeID, "message_id", messageID, "error", err.Error())
+		a.audit("angel_memory_forget_failed", "platform", platformName, "scope", scopeID, "message_id", messageID, "error", err.Error(), "result", logging.ResultFailed)
 		return
 	}
 	if count > 0 {
-		a.audit("angel_memory_forget_recalled", "platform", platformName, "scope", scopeID, "message_id", messageID, "count", count)
+		a.audit("angel_memory_forget_recalled", "platform", platformName, "scope", scopeID, "message_id", messageID, "count", count, "result", logging.ResultSucceeded)
 	}
 }
 
