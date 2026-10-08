@@ -70,6 +70,16 @@ type ModelListResult struct {
 	Errors  []ModelProviderError
 }
 
+// ModelProfile 是一个命名模型选择（services.toml 的 model_profiles / model_aliases）。
+// Available 表示该 profile 指向的 provider 在当前进程里真的有客户端；不可用的 profile
+// 在 `@model:<name>` 与群策略里都会被拒绝，所以列表要把两种情况分开显示。
+type ModelProfile struct {
+	Name      string
+	Provider  string
+	Model     string
+	Available bool
+}
+
 type ModelService interface {
 	CurrentModel() string
 	CurrentProvider() string
@@ -83,6 +93,9 @@ type ModelService interface {
 	SelectNamingModel(arg string) (ModelOption, error)
 	Models(query string) []ModelOption
 	ModelList(query string, opts ModelListOptions) ModelListResult
+	// ModelProfiles 列出命名模型选择，让操作者能看到有哪些名字可用（而不必去翻
+	// services.toml 的注释）。
+	ModelProfiles() []ModelProfile
 }
 
 type ContextStatusService interface {

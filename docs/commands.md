@@ -33,9 +33,13 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 | `/model --elwisp3 <模型>` | 切换 Elnis elwisp3 模型槽位。 |
 | `/model --compact <模型>` | 切换上下文压缩模型。 |
 | `/model --naming <模型>` | 切换 Session 自动命名模型。 |
+| `/model --profiles` | 列出 `services.toml` 里的命名模型选择（`model_profiles` / `model_aliases`），并标注当前进程是否可用。 |
 | `/checkmodel [关键词]` | 查看或搜索模型。 |
 
 模型参数可以是列表编号、模型名或 `provider/model`。
+
+`/model --profiles` 列出的名字可以直接用于 `@model:<名字>` 和群策略的 `default-model`；
+标注 `unavailable` 的名字表示它指向的 provider 在当前进程里没有可用客户端，配置存在但用不了。
 
 示例：
 
@@ -44,6 +48,7 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 /models --fresh
 /models --refresh
 /model 2
+/model --profiles
 /model --work deepseek/deepseek-chat
 /model --chat openai/gpt-4o-mini
 /model --elwisp2 openai/gpt-4.1

@@ -24,9 +24,10 @@ func (c modelCommand) Info() command.Info {
 func modelCommandInfo() command.Info {
 	return command.Info{
 		Name:        "model",
-		Usage:       "/model [--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>",
+		Usage:       "/model [--profiles|--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>",
 		Description: "Switch model for current or specified mode.",
 		Help: strings.TrimSpace(`Options:
+  --profiles           List named model selections (@model:<name>).
   --chat <model>       Switch chat mode model.
   --work <model>       Switch work mode model.
   --elwisp1 <model>    Switch Elnis elwisp1 model slot.
@@ -40,6 +41,7 @@ Model can be a list number, model name, or provider/model.
 
 Examples:
   /model 2
+  /model --profiles
   /model --chat gpt-4o
   /model --work openai/gpt-4.1
   /model --elwisp2 openai/gpt-4.1
@@ -57,6 +59,12 @@ func (c modelCommand) Handle(ctx context.Context, req command.Request) (*command
 	args, target, err := parseModelArgs(req.Prefix, req.Args)
 	if err != nil {
 		return nil, err
+	}
+	if target == modelTargetProfiles {
+		if deps.Models == nil {
+			return nil, fmt.Errorf("model service unavailable")
+		}
+		return formatModelProfiles(deps.Models.ModelProfiles()), nil
 	}
 	var selected ModelOption
 	switch target {
@@ -90,6 +98,25 @@ func (c modelCommand) Handle(ctx context.Context, req command.Request) (*command
 	default:
 		return &command.Result{Content: fmt.Sprintf("switched to model: %s/%s", selected.Provider, selected.Model)}, nil
 	}
+}
+
+// formatModelProfiles 列出命名模型选择（services.toml 的 model_profiles / model_aliases）。
+// 失效的 profile 仍然列出但标注 unavailable：它写对了名字却指向当前进程缺少客户端的
+// provider，直接隐藏会让操作者以为是自己名字写错。
+func formatModelProfiles(profiles []ModelProfile) *command.Result {
+	if len(profiles) == 0 {
+		return &command.Result{Content: "no named model profiles configured (services.toml: model_profiles / model_aliases)"}
+	}
+	var sb strings.Builder
+	sb.WriteString("named model profiles (@model:<name>):\n")
+	for _, profile := range profiles {
+		status := "unavailable"
+		if profile.Available {
+			status = "available"
+		}
+		sb.WriteString(fmt.Sprintf("  %s -> %s/%s (%s)\n", profile.Name, profile.Provider, profile.Model, status))
+	}
+	return &command.Result{Content: trimTrailingNewlines(sb.String())}
 }
 
 func (c modelCommand) Complete(ctx context.Context, req command.CompletionRequest) []command.Completion {
@@ -163,6 +190,7 @@ func completeModelOptions(query string, start, end int) []command.Completion {
 		Text        string
 		Description string
 	}{
+		{"--profiles", "List named model selections"},
 		{"--chat", "Switch chat mode model"},
 		{"--work", "Switch work mode model"},
 		{"--elwisp1", "Switch Elnis elwisp1 model slot"},
@@ -188,7 +216,7 @@ func optionOnlyModelArgs(args string) bool {
 		return false
 	}
 	last := fields[len(fields)-1]
-	return last == "--chat" || last == "--work" || last == "--elwisp1" || last == "--elwisp2" || last == "--elwisp3" || last == "--compact" || last == "--naming" || last == "-c" || last == "-n"
+	return last == "--profiles" || last == "--chat" || last == "--work" || last == "--elwisp1" || last == "--elwisp2" || last == "--elwisp3" || last == "--compact" || last == "--naming" || last == "-c" || last == "-n"
 }
 
 func NewCheckModel(deps Deps) command.Handler {
@@ -300,14 +328,15 @@ func parseModelListArgs(args string) (string, bool) {
 type modelTarget string
 
 const (
-	modelTargetCurrent modelTarget = "current"
-	modelTargetChat    modelTarget = "chat"
-	modelTargetWork    modelTarget = "work"
-	modelTargetElwisp1 modelTarget = "elwisp1"
-	modelTargetElwisp2 modelTarget = "elwisp2"
-	modelTargetElwisp3 modelTarget = "elwisp3"
-	modelTargetCompact modelTarget = "compact"
-	modelTargetNaming  modelTarget = "naming"
+	modelTargetCurrent  modelTarget = "current"
+	modelTargetProfiles modelTarget = "profiles"
+	modelTargetChat     modelTarget = "chat"
+	modelTargetWork     modelTarget = "work"
+	modelTargetElwisp1  modelTarget = "elwisp1"
+	modelTargetElwisp2  modelTarget = "elwisp2"
+	modelTargetElwisp3  modelTarget = "elwisp3"
+	modelTargetCompact  modelTarget = "compact"
+	modelTargetNaming   modelTarget = "naming"
 )
 
 func parseModelArgs(prefix, args string) (string, modelTarget, error) {
@@ -317,6 +346,8 @@ func parseModelArgs(prefix, args string) (string, modelTarget, error) {
 	for _, field := range fields {
 		nextTarget := modelTarget("")
 		switch field {
+		case "--profiles":
+			nextTarget = modelTargetProfiles
 		case "--chat":
 			nextTarget = modelTargetChat
 		case "--work":
@@ -334,7 +365,7 @@ func parseModelArgs(prefix, args string) (string, modelTarget, error) {
 		}
 		if nextTarget != "" {
 			if target != modelTargetCurrent {
-				return "", "", fmt.Errorf("usage: %smodel [--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>", prefix)
+				return "", "", fmt.Errorf("usage: %smodel [--profiles|--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>", prefix)
 			}
 			target = nextTarget
 			continue

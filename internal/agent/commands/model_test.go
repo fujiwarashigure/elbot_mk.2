@@ -9,8 +9,11 @@ import (
 )
 
 type fakeModelService struct {
-	models []ModelOption
+	models   []ModelOption
+	profiles []ModelProfile
 }
+
+func (s fakeModelService) ModelProfiles() []ModelProfile { return s.profiles }
 
 func (s fakeModelService) CurrentModel() string                   { return "" }
 func (s fakeModelService) CurrentProvider() string                { return "" }
@@ -47,8 +50,67 @@ func TestModelCommandCompletesOptions(t *testing.T) {
 	if len(got) < 7 {
 		t.Fatalf("Complete options = %#v", got)
 	}
-	if got[0].Text != "--chat" || got[0].Kind != "model_option" || got[0].ReplaceStart != len("/model ") {
+	if got[0].Text != "--profiles" || got[0].Kind != "model_option" || got[0].ReplaceStart != len("/model ") {
 		t.Fatalf("first option = %#v", got[0])
+	}
+	seen := map[string]bool{}
+	for _, completion := range got {
+		seen[completion.Text] = true
+	}
+	for _, want := range []string{"--profiles", "--chat", "--work", "--naming"} {
+		if !seen[want] {
+			t.Fatalf("option %q missing from %#v", want, got)
+		}
+	}
+}
+
+func TestModelCommandCompletesProfilesOption(t *testing.T) {
+	completer := NewModel(Deps{Models: fakeModelService{}}).(command.Completer)
+	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --pro", Prefix: "/", Name: "model", Args: "--pro", Cursor: len("/model --pro")})
+	if len(got) != 1 || got[0].Text != "--profiles" {
+		t.Fatalf("profile option completion = %#v", got)
+	}
+}
+
+func TestModelCommandDoesNotCompleteModelNamesAfterProfiles(t *testing.T) {
+	models := fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}}}
+	completer := NewModel(Deps{Models: models}).(command.Completer)
+	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --profiles", Prefix: "/", Name: "model", Args: "--profiles", Cursor: len("/model --profiles")})
+	if len(got) != 1 || got[0].Text != "--profiles" {
+		t.Fatalf("Complete after --profiles = %#v", got)
+	}
+}
+
+func TestModelCommandListsProfiles(t *testing.T) {
+	models := fakeModelService{profiles: []ModelProfile{
+		{Name: "fast", Provider: "openai", Model: "gpt-4o", Available: true},
+		{Name: "dead", Provider: "missing", Model: "ghost"},
+	}}
+	result, err := NewModel(Deps{Models: models}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--profiles"})
+	if err != nil {
+		t.Fatalf("Handle --profiles: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Handle --profiles returned nil result")
+	}
+	if !strings.Contains(result.Content, "fast -> openai/gpt-4o (available)") {
+		t.Fatalf("available profile missing: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "dead -> missing/ghost (unavailable)") {
+		t.Fatalf("unavailable profile missing: %q", result.Content)
+	}
+	if strings.Contains(result.Content, "switched") {
+		t.Fatalf("--profiles must not switch a model: %q", result.Content)
+	}
+}
+
+func TestModelCommandListsProfilesWhenEmpty(t *testing.T) {
+	result, err := NewModel(Deps{Models: fakeModelService{}}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--profiles"})
+	if err != nil {
+		t.Fatalf("Handle --profiles: %v", err)
+	}
+	if result == nil || !strings.Contains(result.Content, "no named model profiles") {
+		t.Fatalf("result = %#v", result)
 	}
 }
 

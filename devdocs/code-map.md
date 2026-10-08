@@ -376,7 +376,7 @@ rg -n "ContextLoader|Compress|Window|System Prompt|MessageSegment|usage" interna
 
 - `internal/llm/`：LLM 抽象和 MessageSegment。
 - `internal/llm/openai/`：OpenAI-compatible adapter。`openai.go` 是 Chat Completions 适配器（`{base_url}/chat/completions`），`responses.go` 是 Responses 适配器（`{base_url}/responses`，内嵌前者以复用重试、`/models`、SSE 行扫描与 `parseError` 错误分类，只替换请求信封和流式事件翻译）；`[providers.*].api_mode` 决定用哪个，两者对上层输出同一套 `llm.StreamChunk`。
-- `internal/agent/model.go`：模型运行态、模型切换、provider client 缓存。
+- `internal/agent/model.go`：模型运行态、模型切换、provider client 缓存；`Agent.ModelProfiles()` 把 `services.toml` 的 `model_profiles` / `aliases` 汇成 `/model --profiles` 的列表（按别名键列出用户实际输入的名字，`Available` 反映 provider 在当前进程里有没有 client）。
 - `internal/agent/chat_llm.go`：Agent LLM 调用适配。
 
 常用搜索：

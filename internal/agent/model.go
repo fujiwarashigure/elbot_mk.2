@@ -234,6 +234,48 @@ func (a *Agent) Models(query string) []agentcommands.ModelOption {
 	return a.ModelList(query, agentcommands.ModelListOptions{}).Options
 }
 
+// ModelProfiles 列出 `services.toml` 配置的命名模型选择：`model_profiles.<name>` 的名字与
+// 它的 `aliases`。装配时别名表已经包含每个 profile 自身的名字（见 `internal/app/runtime.go`
+// 的 `registerTurnAlias`），而解析顺序是"别名先于同名 profile"（`resolveGroupModelSelection`），
+// 所以这里以别名表的键为准列出：它正是用户在 `@model:<名字>` 里实际输入的名字，同一个名字
+// 不会因为别名与 profile 重名而出现两行。Available 反映该名字指向的 provider 在当前进程里
+// 是否真的有客户端——没有客户端的名字用不了，列出来会被误认为可用。
+func (a *Agent) ModelProfiles() []agentcommands.ModelProfile {
+	if a == nil {
+		return nil
+	}
+	out := make([]agentcommands.ModelProfile, 0, len(a.modelProfiles)+len(a.modelAliases))
+	seen := make(map[string]bool, len(a.modelProfiles)+len(a.modelAliases))
+	appendProfile := func(name string, selection config.ModelSelection) {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if name == "" || seen[key] || selection.Provider == "" || selection.Model == "" {
+			return
+		}
+		seen[key] = true
+		out = append(out, agentcommands.ModelProfile{
+			Name:      name,
+			Provider:  selection.Provider,
+			Model:     selection.Model,
+			Available: a.clientForProvider(selection.Provider) != nil,
+		})
+	}
+	for alias, name := range a.modelAliases {
+		selection, ok := a.modelProfiles[strings.TrimSpace(name)]
+		if !ok {
+			continue
+		}
+		appendProfile(strings.ToLower(strings.TrimSpace(alias)), selection)
+	}
+	// 没有任何别名（含自身名字）指向的 profile 仍然要列出来：手工装配或未来改装配方式时
+	// 漏掉别名表，不应该让 profile 在列表里凭空消失。
+	for name, selection := range a.modelProfiles {
+		appendProfile(name, selection)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 func (a *Agent) ModelList(query string, opts agentcommands.ModelListOptions) agentcommands.ModelListResult {
 	return a.modelOptions(query, modelListOptions{Fresh: opts.Fresh})
 }
