@@ -64,3 +64,17 @@
 3. 只有在第 2 步确认"定制层已与内核解耦"之后，才动 `chat*.go`。
 
 **不建议**在 fork 现有 agent 上直接加协议分支（路线 B 的直接形态）：那会长期维护两套会话语义，且与本仓库"不考虑历史兼容到让代码变复杂"的 AGENTS.md 原则冲突。
+
+## 6. 决策与实施结果（本轮）
+
+**用户决策：取路线 D（按需补接口），不做换基。** 三个接缝已实施，均不改变现有行为：
+
+| 接缝 | 落点 | 关键点 |
+| --- | --- | --- |
+| 协议能力查询 | `internal/llm/protocol.go` + `openai` 两个适配器 + `internal/app/models.go` 的 `protocolRouter` | `ProtocolCapabilitiesOf(client, model)` 是唯一入口；未实现查询接口的客户端得到最保守答案（Chat Completions、服务端能力全 false）；router **按模型**回答，因为一个 provider 可以按模型混用两种协议。Responses 适配器如实报告"服务端能力全 false"——本文件第 1 节取证说明 fork 的 Responses 只是协议翻译层，虚报能力会让上层按不存在的服务端状态设计 |
+| 压缩分派点 | `internal/contextmgr` 的 `Compactor` / `CompactionChoice` + `contextRuntimeState.compactorFor` | 目前唯一后端是客户端 `client_summary`；协议声称支持服务端原生压缩而 fork 没有实现时显式回退，并写审计 `event=context_compaction_backend`（`backend` / `reason`），不静默 |
+| 存储协议来源 | 会话 metadata 的 `llm_origin`（`{protocol, provider, model}`）+ `Agent.recordLLMOrigin` | 上游的 `session_llm_origin` 迁移在 fork 里用加法式 metadata 字段承载，避免为一个诊断字段改 schema；值未变时不写事务（每会话只在换协议/换模型时写一次） |
+
+**本轮明确未做**：`previous_response_id` 服务端续链、原生压缩实现、reasoning 加密载荷存回、`additional_tools` 增量工具定义、`native_dialogue` / `native_material_roots` 迁移、`internal/llm/openai` 的"协议翻译 vs 会话语义"拆分（第 5 节建议的前置顺序第 2 步）。
+
+**将来换基时的入口**：协议能力在 `ProtocolCapabilitiesFor` 一处声明（新增服务端能力只需让它返回 true 并补上实现），压缩后端在 `contextRuntimeState.compactorFor` 一处分派，会话来源在 `llm_origin` 一处可查。

@@ -21,7 +21,10 @@ type contextRuntimeState struct {
 	turns          *turn.Manager
 	loader         contextmgr.Loader
 	windowResolver *contextmgr.WindowResolver
-	compressor     contextmgr.Compressor
+	compactor      contextmgr.Compactor
+	// clientFor 保留一份客户端查找入口：协议能力查询（分派压缩后端、记录会话协议来源）
+	// 需要按 provider 拿到实际适配器。
+	clientFor contextmgr.ClientProvider
 
 	mu              sync.Mutex
 	compressTimeout time.Duration
@@ -51,8 +54,30 @@ func (r *contextRuntimeState) configure(ctxCfg config.ContextConfig, metadata co
 	r.compactModel = compactModel
 	r.loader = contextmgr.Loader{Store: r.store}
 	r.windowResolver = contextmgr.NewWindowResolver(metadata, providers, clientFor)
-	r.compressor = contextmgr.Compressor{ClientFor: clientFor}
+	r.compactor = contextmgr.Compressor{ClientFor: clientFor}
+	r.clientFor = clientFor
 	r.mu.Unlock()
+}
+
+// compactorFor 按协议能力选择这次压缩使用的后端，并说明是否发生了回退。
+// 目前只有客户端后端：即使适配器声称支持服务端原生压缩，也必须回退到客户端压缩并让调用方
+// 记一条审计——"协议支持但实现没跟上"不能变成压缩静默失效，也不能静默假装走了服务端路径。
+func (r *contextRuntimeState) compactorFor(providerName, model string) (contextmgr.Compactor, contextmgr.CompactionChoice) {
+	r.mu.Lock()
+	compactor := r.compactor
+	clientFor := r.clientFor
+	r.mu.Unlock()
+	if compactor == nil {
+		return nil, contextmgr.CompactionChoice{}
+	}
+	choice := contextmgr.CompactionChoice{Backend: compactor.Name()}
+	if clientFor == nil {
+		return compactor, choice
+	}
+	if llm.ProtocolCapabilitiesOf(clientFor(providerName), model).NativeCompaction {
+		choice.FallbackReason = "protocol_advertises_native_compaction_without_backend"
+	}
+	return compactor, choice
 }
 
 func (r *contextRuntimeState) load(ctx context.Context, sessionID string) (*contextmgr.LoadedContext, error) {

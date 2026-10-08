@@ -374,11 +374,13 @@ rg -n "ContextLoader|Compress|Window|System Prompt|MessageSegment|usage" interna
 
 先看：
 
-- `internal/llm/`：LLM 抽象和 MessageSegment。
-- `internal/llm/openai/`：OpenAI-compatible adapter。`openai.go` 是 Chat Completions 适配器（`{base_url}/chat/completions`），`responses.go` 是 Responses 适配器（`{base_url}/responses`，内嵌前者以复用重试、`/models`、SSE 行扫描与 `parseError` 错误分类，只替换请求信封和流式事件翻译）；`[providers.*].api_mode` 决定用哪个，两者对上层输出同一套 `llm.StreamChunk`。
+- `internal/llm/`：LLM 抽象和 MessageSegment。`protocol.go` 是"这个适配器、这个模型实际支持哪些协议能力"的唯一入口：`ProtocolCapabilities`（服务端续链 / 原生压缩 / 增量工具 / 服务端存储）+ 可选接口 `ProtocolCapabilityReporter` + 保守的 `ProtocolCapabilitiesOf`（未实现查询接口的客户端按 Chat Completions 处理）。
+- `internal/llm/openai/`：OpenAI-compatible adapter。`openai.go` 是 Chat Completions 适配器（`{base_url}/chat/completions`），`responses.go` 是 Responses 适配器（`{base_url}/responses`，内嵌前者以复用重试、`/models`、SSE 行扫描与 `parseError` 错误分类，只替换请求信封和流式事件翻译）；`[providers.*].api_mode` 决定用哪个，两者对上层输出同一套 `llm.StreamChunk`。两个适配器都实现 `ProtocolCapabilitiesFor`：Responses 适配器报告 `responses` 但服务端能力全 false（它是协议翻译层，固定 `store=false`、每轮重放历史，不虚报能力）。
 - `internal/agent/model.go`：模型运行态、模型切换、provider client 缓存；`Agent.ModelProfiles()` 把 `services.toml` 的 `model_profiles` / `aliases` 汇成 `/model --profiles` 的列表（按别名键列出用户实际输入的名字，`Available` 反映 provider 在当前进程里有没有 client）；`mergeExternalRuntimeState` 是所有 `state.toml` 写入者必须先调用的合并入口（先合并外部编辑、再改内存、最后 `saveRuntimeState`）。
 - `internal/agent/model_snapshot.go`：命名模型快照（`/model --save` / `--snapshots` / `--apply` / `--delete`）。快照是 `state.toml [model_snapshots]`（`config.StateModelSnapshot`：各模式 + compact + naming），内存副本由 `modelSnapshotsMu` 保护，与 `mode_models` 一起走 `applyRuntimeState` / `saveRuntimeState` / `runtimeStateDigest`；名字校验与"不与静态 profile 同名"的约束也在这里。
 - `internal/agent/chat_llm.go`：Agent LLM 调用适配。
+- `internal/contextmgr/compressor.go`、`internal/agent/context_compact.go`：上下文压缩后端。`contextmgr.Compactor`（`Name` / `Compact` / `SummarizeText`）是后端接口，目前唯一实现是客户端摘要压缩 `Compressor`（`Name() == "client_summary"`）；`contextRuntimeState.compactorFor(provider, model)` 按 `llm.ProtocolCapabilities` 分派，协议声称支持服务端原生压缩而 fork 没有对应实现时**显式回退**并由 `Agent.compactSession` 写审计 `context_compaction_backend`（含 `backend` / `reason`）。
+- 会话协议来源：`internal/agent/session_metadata.go` 的 `llm_origin`（`{protocol, provider, model}`）由 `Agent.recordLLMOrigin`（`internal/agent/context_usage.go`）在每轮模型调用后写入，值未变时不写事务；对应上游的 `session_llm_origin` 迁移，fork 用加法式 metadata 字段承载。
 
 常用搜索：
 

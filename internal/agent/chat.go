@@ -452,6 +452,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		return err
 	}
 	a.recordUsage(session.ID, usage)
+	a.recordLLMOrigin(ctx, session, selection)
 	doneStatus := runtimeDoneStatus(runtimestatus.Snapshot{SessionID: session.ID, Provider: selection.Provider, Model: selection.Model, Mode: session.Mode, TurnStartedAt: turnStartedAt, StageStartedAt: turnStartedAt, Usage: usage}, storage.Now())
 	out.PublishRuntimeStatus(ctx, doneStatus)
 	nextSelection := a.modelSelectionForTurn(ctx, session)

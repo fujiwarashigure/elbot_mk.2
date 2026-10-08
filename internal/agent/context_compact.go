@@ -7,6 +7,7 @@ import (
 
 	"elbot/internal/config"
 	"elbot/internal/contextmgr"
+	"elbot/internal/logging"
 	"elbot/internal/request"
 	"elbot/internal/session"
 	"elbot/internal/storage"
@@ -30,20 +31,23 @@ func (a *Agent) compactSession(ctx context.Context, current *storage.Session, tr
 	if err := a.authorizeExecutionModelSelection(ctx, selection); err != nil {
 		return nil, "", err
 	}
-	next, err := a.contextRuntime.compactSession(ctx, current, a.scope(ctx), triggerReason, selection)
+	next, choice, err := a.contextRuntime.compactSession(ctx, current, a.scope(ctx), triggerReason, selection)
 	if err != nil {
 		return nil, "", err
 	}
+	// 记录这次压缩实际走的后端：压缩很少发生，而"到底是谁压的、有没有回退"事后无法从结果
+	// 反推。没有回退时也记一条，用于确认服务端压缩到底有没有接上。
+	a.audit("context_compaction_backend", "session_id", next.ID, "backend", choice.Backend, "reason", choice.FallbackReason, "provider", selection.Provider, "model", selection.Model, "trigger", triggerReason, "result", logging.ResultSucceeded)
 	return next, fmt.Sprintf("上下文压缩完成。\nnew session: %s", next.ID), nil
 }
 
-func (r *contextRuntimeState) compactSession(ctx context.Context, current *storage.Session, scope session.Scope, triggerReason string, selection config.ModelSelection) (*storage.Session, error) {
+func (r *contextRuntimeState) compactSession(ctx context.Context, current *storage.Session, scope session.Scope, triggerReason string, selection config.ModelSelection) (*storage.Session, contextmgr.CompactionChoice, error) {
 	if len(r.requests.ListBySession(current.ID)) > 0 {
-		return nil, fmt.Errorf("当前会话有正在运行的请求，无法压缩")
+		return nil, contextmgr.CompactionChoice{}, fmt.Errorf("当前会话有正在运行的请求，无法压缩")
 	}
 	_, reqCtx, done, err := r.requests.Start(ctx, request.StartRequest{SessionID: current.ID, Kind: request.KindCompress, Label: "compact", ScopeKey: requestScopeKeyFromScope(scope), Timeout: r.compressTimeout})
 	if err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
 	lifecycleClosed := false
 	turnStarted := false
@@ -59,34 +63,35 @@ func (r *contextRuntimeState) compactSession(ctx context.Context, current *stora
 	}
 	defer closeLifecycle()
 	if err := reqCtx.Err(); err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
 	if !r.turns.StartCompact(current.ID) {
-		return nil, fmt.Errorf("当前会话正在处理其他任务，无法压缩")
+		return nil, contextmgr.CompactionChoice{}, fmt.Errorf("当前会话正在处理其他任务，无法压缩")
 	}
 	turnStarted = true
 	if err := reqCtx.Err(); err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
 
 	loaded, err := r.load(reqCtx, current.ID)
 	if err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
 	if len(loaded.Messages) == 0 {
-		return nil, fmt.Errorf("没有可压缩的历史消息")
+		return nil, contextmgr.CompactionChoice{}, fmt.Errorf("没有可压缩的历史消息")
 	}
 	rawMessages, err := r.loadRawMessages(reqCtx, current.ID)
 	if err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
 	compactMessages, err := r.compactMessages(reqCtx, loaded)
 	if err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
-	r.mu.Lock()
-	compressor := r.compressor
-	r.mu.Unlock()
+	compressor, choice := r.compactorFor(selection.Provider, selection.Model)
+	if compressor == nil {
+		return nil, contextmgr.CompactionChoice{}, fmt.Errorf("压缩后端未配置")
+	}
 	result, err := compressor.Compact(reqCtx, contextmgr.CompactRequest{
 		Provider:          selection.Provider,
 		Model:             selection.Model,
@@ -95,7 +100,7 @@ func (r *contextRuntimeState) compactSession(ctx context.Context, current *stora
 		UserInputMaxRunes: r.userOriginalMaxRunes(),
 	})
 	if err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
 	fromMessageID := loaded.Messages[0].ID
 	if loaded.Summary != nil && loaded.Summary.FromMessageID != "" {
@@ -130,10 +135,10 @@ func (r *contextRuntimeState) compactSession(ctx context.Context, current *stora
 		Metadata: encodeSessionMetadata(metadata),
 	})
 	if err != nil {
-		return nil, err
+		return nil, contextmgr.CompactionChoice{}, err
 	}
 	closeLifecycle()
-	return next, nil
+	return next, choice, nil
 }
 
 func nextCompactedTitle(source *storage.Session) (title string, generation int, baseTitle string) {

@@ -113,6 +113,35 @@ func (a *Agent) persistUsage(ctx context.Context, sessionID string, usage *llm.U
 	}
 }
 
+// recordLLMOrigin 在会话 metadata 里记录"这段对话由哪套协议产生"。它先与内存里的会话行比对，
+// 值没变就完全不做写事务，因此正常情况下每个会话只在换协议/换模型时写一次。
+//
+// 记录的是适配器**实际**的协议（`llm.ProtocolCapabilitiesOf`），不是配置里声明的 api_mode：
+// 一个 provider 可以按模型混用两种协议，只有实际用的那套才决定这段历史将来能不能续链。
+func (a *Agent) recordLLMOrigin(ctx context.Context, session *storage.Session, selection config.ModelSelection) {
+	if a.store == nil || session == nil || session.ID == "" || selection.Provider == "" || selection.Model == "" {
+		return
+	}
+	origin := llmOriginState{
+		Protocol: string(llm.ProtocolCapabilitiesOf(a.clientForProvider(selection.Provider), selection.Model).Protocol),
+		Provider: selection.Provider,
+		Model:    selection.Model,
+	}
+	if decodeSessionMetadata(session.Metadata).LLMOrigin == origin {
+		return
+	}
+	err := a.mutateSessionMetadata(ctx, session, func(metadata *sessionMetadata) bool {
+		if metadata.LLMOrigin == origin {
+			return false
+		}
+		metadata.LLMOrigin = origin
+		return true
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Warn("persist llm origin failed", "session_id", session.ID, "error", err)
+	}
+}
+
 func (a *Agent) shouldCompact(ctx context.Context, session *storage.Session, selection config.ModelSelection) bool {
 	if !a.historyEnabled(ctx) {
 		return false

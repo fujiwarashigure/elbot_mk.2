@@ -172,15 +172,26 @@
 
 **验收**：通知目标的裁决逻辑只有一处入口（`Agent.SendNotice`，已确认）；cron / Elnis / Hook 三条投递路径都走它（已确认）；平台级跳过规则中"语义相同"的那条已只有一份实现，且边界（群聊普通通知照发、私聊预览照发、显式目标预览照发、多输出不算预览）都有测试固定。
 
-## 5. [ ] P2 换基路线 B：原生 Responses 协议（20–35 人日，**需先决策**）
+## 5. [x] P2 决策：**不换基，走路线 D（按需补接口）**——三个接缝已实施
 
-**决策材料已就绪：[`p2-native-responses-decision.md`](p2-native-responses-decision.md)**（提交 `2a26c17`）——本文只留结论摘要，取证与逐项对比见那份文档。
+**决策材料：[`p2-native-responses-decision.md`](p2-native-responses-decision.md)**（提交 `2a26c17`）。**用户已决策：本轮按路线 D 补接口，不做换基（路线 B/C 暂不启动）。**
 
 - **目标收益**：服务端续链（`previous_response_id`）、原生压缩、reasoning 加密内容、`additional_tools` 增量工具定义、原生 checkpoint。
 - **现实结论**：这不是"再写一个客户端"，而是换内核——LLM 分层（fork 的 `internal/llm/openai` 在上游已删除）、agent 路由（会替换 fork 的 `chat.go` / `chat_llm.go` / `chat_tools.go` / `core.go`，正是 P0/P1 刚加固过的地方）、压缩、存储（3 个新迁移：`session_llm_origin`、`native_dialogue`、`native_material_roots`）、模型来源、工具可用性。
-- **取证结论（本次核对）**：fork 的 Responses 支持是协议翻译层——`store=false` 明确写在 `responses.go` 注释里（重放完整历史、从不读回已存响应），`previous_response_id` 与 `additional_tools` 在全仓库出现 **0** 次，压缩仍是客户端的。
-- **决策点**：若确定要它，走路线 C（另建 `upstream-track` 分支，先把 fork 定制层插件化/接口化再换基），不要在 fork 现有 agent 上继续加协议分支（会长期维护两套会话语义）。
-- **当前替代方案（也是本文建议）**：fork 已自带的 Responses 适配器（`internal/llm/openai/responses.go`，协议翻译层 + 复用 chat 会话循环）够用；新增能力时通过接口查询协议（工具可用性、压缩分派、存储协议来源），为将来换基留接缝。这条低风险增量同时是路线 C 的第一步。
+- **取证结论（本轮再次确认）**：fork 的 Responses 支持是协议翻译层——`store=false` 明确写在 `responses.go` 注释里（重放完整历史、从不读回已存响应），`previous_response_id` 与 `additional_tools` 在全仓库出现 **0** 次，压缩仍是客户端的。因此新增的协议能力查询接口对 Responses 适配器**如实报告"服务端能力全 false"**，而不是照抄协议文档。
+- **为什么不做 B**：会替换的 `chat*.go` / `core.go` 正是前几轮刚加固的地方（后台接管安全点、工具白名单、事务化字段更新、预载事实区分、预算预占），在同一个文件上换内核等于把刚建立的回归保护推倒重来；20–35 人日的成本也远超短期省下的 token。
+
+**路线 D 已实施（三个接缝，全部不改变现有行为）**：
+
+| 接缝 | 实现 | 换基时省掉什么 |
+| --- | --- | --- |
+| 协议能力查询 | `internal/llm/protocol.go`：`Protocol`（`chat_completions` / `responses`）、`ProtocolCapabilities`（`ServerSideConversation` / `NativeCompaction` / `IncrementalTools` / `ServerSideStore`）、可选接口 `ProtocolCapabilityReporter`、保守入口 `ProtocolCapabilitiesOf(client, model)`。Chat 适配器报告 chat、Responses 适配器报告 responses（服务端能力全 false），`internal/app/models.go` 的 `protocolRouter` **按模型**回答（同一 provider 混用两种协议时以实际适配器为准） | 不必在 agent 各处写 `if protocol == responses` 式判断；换基只需改这里的返回值 |
+| 压缩分派点 | `internal/contextmgr`：`Compactor` 接口（`Name` / `Compact` / `SummarizeText`）+ `CompactionChoice`；`contextRuntimeState.compactorFor(provider, model)` 按协议能力选后端，目前恒定选中客户端后端 `client_summary`；协议声称支持服务端原生压缩而 fork 没有实现时，**显式回退**并在压缩后写一条审计（`event=context_compaction_backend`，含 `backend` / `reason`），而不是静默失效或静默假装走了服务端路径 | 新增服务端压缩时只加一个 `Compactor` 实现并在分派点登记，不动压缩流程 |
+| 存储协议来源 | 会话 metadata 的 `llm_origin`（`{protocol, provider, model}`，`internal/agent/session_metadata.go`）：每轮模型调用后由 `recordLLMOrigin` 记录，值未变时**不写事务**。上游对应的是 `session_llm_origin` 迁移；fork 用加法式 metadata 字段承载同一事实，避免为一个诊断字段引入 schema 迁移 | 换基时"哪些会话能续链/需要迁移"有据可查，不必考古 |
+
+**验收**：`gofmt` 干净、`go build -p 1 ./...` 通过；`internal/llm`、`internal/app`、`internal/contextmgr`、`internal/agent` 相关测试通过；新增测试覆盖"未实现查询接口时保守默认值""按模型回答协议能力""Responses 适配器不虚报服务端能力""协议声称原生压缩但没有后端时必须回退且留下审计""`llm_origin` 只在变化时写入"。
+
+**仍未做（明确不在本轮范围）**：服务端续链、原生压缩实现、reasoning 加密载荷、`additional_tools`、`native_dialogue` / `native_material_roots` 迁移；`internal/llm/openai` 的协议翻译与会话语义拆分（路线 C 的第 2 步）也未启动。
 
 ---
 
@@ -195,10 +206,13 @@
 **本机既有环境失败（与上述改动无关，不要计入本次回归）**：
 
 - `internal/agent`：2 个 `TestEmoticonHook*`（`exec: "sh": executable file not found`）。
-- `internal/agent`：`TestMemberPanelShowsOwnTasksAndQuota` / `TestGroupServicesCommandIntegration` / `TestModelsGroupsProvidersAndSwitchPersistsState` 等**偶发**失败，报错是 `TempDir RemoveAll cleanup: unlinkat ...: The directory is not empty` —— 测试返回后仍有迟到的 `state.toml` 写入落在那次 `t.TempDir()` 里，属于测试夹具的清理竞态，与 `stateWriteMu`（只串行化同一实例的写回）无关；单独跑这些测试稳定通过，全包连跑约每次命中 1 例。
-- `internal/tool/builtin`：4 个 `TestAnalyzeBashShellAdvice*`。
+- `internal/agent`：`TestMemberPanelShowsOwnTasksAndQuota` / `TestGroupServicesCommandIntegration` / `TestModelsGroupsProvidersAndSwitchPersistsState` / `TestGroupKnowledge*` / `TestReminderCreateListRemoveAndDispatch` / `TestLearningModerationActionsAreGranularAndRevocable` 等**偶发**失败，报错是 `TempDir RemoveAll cleanup: unlinkat ...: The directory is not empty` —— 测试返回后仍有迟到的 `state.toml` 写入落在那次 `t.TempDir()` 里，属于测试夹具的清理竞态，与 `stateWriteMu`（只串行化同一实例的写回）无关；单独跑这些测试稳定通过，全包连跑约每次命中 1 例。
+  - **归属已实测**：用 `git worktree add` 检出改动前的 `fe0d08a`，在同样的并行负载下（`./internal/agent/ ./internal/tool/builtin/ ./internal/platform/refcontext/`）跑 4 轮，同样出现 `TestLearningModerationActionsAreGranularAndRevocable` / `TestModelsGroupsProvidersAndSwitchPersistsState` 等偶发失败；单独跑 `./internal/agent/` 3 轮则稳定只有 2 个 `TestEmoticonHook*`。因此这些 flake 是既有的负载敏感问题，不是本次改动引入。
+- `internal/tool/builtin`：4 个 `TestAnalyzeBashShellAdvice*`，以及 `TestShellToolUsesConfiguredEnvironment` / `TestResolveWindowsShellCachedAndValid` / `TestShellMediaInputsAndCleanup`（本机 `bash` 来自 WSL 但 `sh` 不存在、且 shell 解析结果随 PATH 变化）。
 - `internal/tool/skill`：`TestFinalizeElSkillReturnsBuildFailure`（测试内部跑 `go build`）。
 - `internal/hook/rules`：`TestExecCancellationKillsDescendantProcesses`（依赖 TCP 回连，本机 accept 超时）。
+- `internal/llm/openai`：`TestChatStream_ActiveStreamCompletesWithoutResponseTimeout` 等基于真实计时的用例在并行跑全量时偶发失败（单独跑 3 轮均通过）。
+- `internal/character` / `internal/request`：偶发 `[build failed]`，原因是 `go test` 写测试二进制时被拒（`...\eac-beta\tmp\go-build*\b001\*.test.exe: Access is denied`），属本机 Go 构建缓存/临时目录权限问题；`go vet` 这两个包通过，说明代码本身可编译。
 
 **本机 Go 工具链事实（本次验证环境，供后续复核）**：
 

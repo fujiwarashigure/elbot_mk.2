@@ -20,6 +20,18 @@ type sessionMetadata struct {
 	ContextCompact           *contextCompactState `json:"context_compact,omitempty"`
 	TitleRenamed             bool                 `json:"title_renamed,omitempty"`
 	TitleSource              string               `json:"title_source,omitempty"`
+	// LLMOrigin 记录这个会话的对话是由哪套协议、哪个 provider/model 产生的（见
+	// recordLLMOrigin）。上游把同一事实做成一张表（session_llm_origin）；fork 用会话
+	// metadata 的加法式字段承载它，换基时"这个会话能不能用服务端续链"就取决于这个值。
+	LLMOrigin llmOriginState `json:"llm_origin,omitempty"`
+}
+
+// llmOriginState 是会话的协议来源。字段都是字符串，因此可以直接比较，用来避免每次模型调用
+// 都写一次 metadata。
+type llmOriginState struct {
+	Protocol string `json:"protocol,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 type contextCompactState struct {
@@ -81,6 +93,7 @@ func encodeSessionMetadataInto(raw string, metadata sessionMetadata) string {
 	setMetadataField(base, "context_compact", metadata.ContextCompact)
 	setMetadataField(base, "title_renamed", metadata.TitleRenamed)
 	setMetadataField(base, "title_source", metadata.TitleSource)
+	setMetadataField(base, "llm_origin", metadata.LLMOrigin)
 	data, _ := json.Marshal(base)
 	if string(data) == "{}" {
 		return ""
@@ -117,6 +130,11 @@ func setMetadataField(data map[string]any, key string, value any) {
 		}
 	case bool:
 		if !typed {
+			delete(data, key)
+			return
+		}
+	case llmOriginState:
+		if typed == (llmOriginState{}) {
 			delete(data, key)
 			return
 		}

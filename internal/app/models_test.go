@@ -111,6 +111,36 @@ func TestProviderLLMRoutesEachModelToItsProtocol(t *testing.T) {
 	}
 }
 
+// 协议能力必须按模型回答：一个 provider 混用两种协议时，只有实际用哪套适配器才决定它能不能
+// 用服务端能力，配置里的默认 api_mode 不能代表所有模型。
+func TestProviderLLMReportsProtocolCapabilitiesPerModel(t *testing.T) {
+	var paths []string
+	srv := protocolServer(&paths)
+	defer srv.Close()
+
+	client, err := newProviderLLM("mixed", config.ProviderConfig{
+		BaseURL: srv.URL + "/v1",
+		APIMode: "chat",
+		ModelConfigs: map[string]config.ModelConfig{
+			"resp-model": {APIMode: "response"},
+		},
+	}, openai.RequestOptions{})
+	if err != nil {
+		t.Fatalf("newProviderLLM: %v", err)
+	}
+	if caps := llm.ProtocolCapabilitiesOf(client, "plain-model"); caps.Protocol != llm.ProtocolChatCompletions {
+		t.Fatalf("chat model protocol = %q", caps.Protocol)
+	}
+	responses := llm.ProtocolCapabilitiesOf(client, "resp-model")
+	if responses.Protocol != llm.ProtocolResponses {
+		t.Fatalf("responses model protocol = %q", responses.Protocol)
+	}
+	// fork 的 Responses 适配器是协议翻译层，服务端能力必须如实报告为 false。
+	if responses.ServerSideConversation || responses.NativeCompaction || responses.IncrementalTools || responses.ServerSideStore {
+		t.Fatalf("fork responses adapter must not claim server-side capabilities: %#v", responses)
+	}
+}
+
 func TestProviderLLMUsesResponsesDefaultWithChatModelOverride(t *testing.T) {
 	var paths []string
 	srv := protocolServer(&paths)

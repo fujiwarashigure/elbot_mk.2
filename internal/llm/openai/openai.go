@@ -127,6 +127,12 @@ func (a *Adapter) endpoint() string {
 	return strings.TrimRight(a.baseURL, "/") + "/chat/completions"
 }
 
+// ProtocolCapabilitiesFor reports the weakest protocol: Chat Completions has no
+// server-side conversation, compaction, incremental tools or response storage.
+func (a *Adapter) ProtocolCapabilitiesFor(string) llm.ProtocolCapabilities {
+	return llm.ProtocolCapabilities{Protocol: llm.ProtocolChatCompletions}
+}
+
 func (a *Adapter) validateBaseURL() error {
 	if strings.TrimSpace(a.baseURL) == "" {
 		return errors.New("openai base_url is required")

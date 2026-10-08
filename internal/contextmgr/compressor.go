@@ -33,9 +33,29 @@ type CompactResult struct {
 	Usage            *llm.Usage
 }
 
+// Compactor 是一次上下文压缩的执行后端。当前唯一实现是客户端的 Compressor（把历史发给
+// 压缩模型生成摘要）；一旦某个协议真的能用服务端原生压缩，就新增一个实现并在分派点按
+// llm.ProtocolCapabilities 选择，而不是把协议判断写进压缩流程。
+type Compactor interface {
+	// Name 说明这条压缩路径，用于日志与审计（"这次是谁压的"）。
+	Name() string
+	Compact(ctx context.Context, req CompactRequest) (*CompactResult, error)
+	SummarizeText(ctx context.Context, req SummarizeRequest) (*SummarizeResult, error)
+}
+
+// CompactionChoice 记录一次压缩实际走了哪个后端，以及是否发生了"协议更强、实现未跟上"的
+// 回退。回退必须显式记录：静默回退会让"服务端压缩没生效"变成没人发现的行为差异。
+type CompactionChoice struct {
+	Backend        string
+	FallbackReason string
+}
+
 type Compressor struct {
 	ClientFor ClientProvider
 }
+
+// Name identifies the client-side summary backend.
+func (c Compressor) Name() string { return "client_summary" }
 
 func (c Compressor) Compact(ctx context.Context, req CompactRequest) (*CompactResult, error) {
 	if c.ClientFor == nil {

@@ -53,6 +53,16 @@ func (a *ResponsesAdapter) endpoint() string {
 	return strings.TrimRight(a.baseURL, "/") + "/responses"
 }
 
+// ProtocolCapabilitiesFor reports what this adapter actually does, not what the
+// Responses API could do: it speaks the Responses protocol, but it is a
+// translation layer that sends store=false, replays the whole history every turn
+// and never sends previous_response_id / additional_tools. Reporting the
+// theoretical capabilities here would make callers plan for server-side state
+// that never happens.
+func (a *ResponsesAdapter) ProtocolCapabilitiesFor(string) llm.ProtocolCapabilities {
+	return llm.ProtocolCapabilities{Protocol: llm.ProtocolResponses}
+}
+
 // ChatStream sends one streaming Responses request and returns its chunks.
 func (a *ResponsesAdapter) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
 	if err := a.validateBaseURL(); err != nil {

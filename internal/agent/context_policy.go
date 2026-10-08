@@ -155,7 +155,7 @@ func (r *contextRuntimeState) promptBudget(ctx context.Context, selection config
 
 func (r *contextRuntimeState) summarizeText(ctx context.Context, selection config.ModelSelection, text string, maxTokens int) (string, error) {
 	r.mu.Lock()
-	compressor := r.compressor
+	compressor := r.compactor
 	timeout := r.compressTimeout
 	r.mu.Unlock()
 

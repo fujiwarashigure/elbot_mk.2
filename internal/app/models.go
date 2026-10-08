@@ -124,6 +124,14 @@ func (r *protocolRouter) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 	return r.pick(req.Model).ChatStream(ctx, req)
 }
 
+// ProtocolCapabilitiesFor answers per model, exactly like ChatStream: a provider
+// that mixes protocols reports what the adapter of that model actually does, so
+// dispatch decisions (for example compaction) never rely on the provider's
+// default api_mode.
+func (r *protocolRouter) ProtocolCapabilitiesFor(model string) llm.ProtocolCapabilities {
+	return llm.ProtocolCapabilitiesOf(r.pick(model), model)
+}
+
 // ListModels is protocol-independent (/models), so the chat adapter answers and
 // the responses adapter is only a fallback for gateways that reject /models.
 func (r *protocolRouter) ListModels(ctx context.Context) ([]string, error) {
