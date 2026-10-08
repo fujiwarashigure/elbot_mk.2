@@ -381,8 +381,21 @@ func TestFilesystemScannerRemoveDeletesDirectoryAndReloads(t *testing.T) {
 
 func TestAgentDescriptorDetailAddsAgentSkillNotice(t *testing.T) {
 	d := NewDescriptor(Record{Name: "docx", Detail: "# DOCX", Kind: KindAgent})
-	if !strings.Contains(d.Detail(), "agent_skill_creator") || len(d.ActivateTools()) != 1 || d.ActivateTools()[0] != AgentSkillManagerName {
-		t.Fatalf("detail=%q activate=%#v", d.Detail(), d.ActivateTools())
+	superadminCtx := security.WithActor(context.Background(), security.Actor{ID: "cli:local", Platform: "cli", Role: security.RoleSuperadmin})
+	detail, err := d.LoadDetail(superadminCtx)
+	if err != nil {
+		t.Fatalf("LoadDetail: %v", err)
+	}
+	if !strings.Contains(detail.Content, "agent_skill_creator") || len(d.ActivateTools()) != 1 || d.ActivateTools()[0] != AgentSkillManagerName {
+		t.Fatalf("detail=%q activate=%#v", detail.Content, d.ActivateTools())
+	}
+	userCtx := security.WithActor(context.Background(), security.Actor{ID: "cli:u1", Platform: "cli", Role: security.RoleUser})
+	userDetail, err := d.LoadDetail(userCtx)
+	if err != nil {
+		t.Fatalf("LoadDetail: %v", err)
+	}
+	if strings.Contains(userDetail.Content, "agent_skill_creator") {
+		t.Fatalf("creator notice leaked to a regular user: %q", userDetail.Content)
 	}
 }
 

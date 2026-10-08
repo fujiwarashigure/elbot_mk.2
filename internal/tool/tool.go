@@ -237,9 +237,11 @@ type StructuredDetailProvider interface {
 	DetailBlock() DetailBlock
 }
 
-// LazyDetailProvider loads detail content only when a tool is discovered or preloaded.
+// LazyDetailProvider loads detail content only when a tool is discovered or
+// preloaded. The context carries the caller actor, because some details append
+// role-dependent hints.
 type LazyDetailProvider interface {
-	LoadDetail() (DetailBlock, error)
+	LoadDetail(ctx context.Context) (DetailBlock, error)
 }
 
 const (
@@ -456,14 +458,14 @@ func (r *Registry) Discover(name string) (*DiscoveryResult, error) {
 		}
 		return &DiscoveryResult{Tools: out}, nil
 	}
-	details, errors := r.DiscoverDetails([]string{name}, func(Tool) bool { return true })
+	details, errors := r.DiscoverDetails(context.Background(), []string{name}, func(Tool) bool { return true })
 	if len(errors) > 0 {
 		return nil, fmt.Errorf("tool %q not found", name)
 	}
 	return &DiscoveryResult{Tools: details}, nil
 }
 
-func (r *Registry) DiscoverDetails(names []string, allowed func(Tool) bool) ([]DiscoveredTool, []DiscoveryError) {
+func (r *Registry) DiscoverDetails(ctx context.Context, names []string, allowed func(Tool) bool) ([]DiscoveredTool, []DiscoveryError) {
 	if allowed == nil {
 		allowed = func(Tool) bool { return true }
 	}
@@ -472,12 +474,12 @@ func (r *Registry) DiscoverDetails(names []string, allowed func(Tool) bool) ([]D
 	details := []DiscoveredTool{}
 	errors := []DiscoveryError{}
 	for _, name := range normalizeNames(names) {
-		details, errors = r.addDiscoveryDetail(name, true, allowed, seen, visiting, details, errors)
+		details, errors = r.addDiscoveryDetail(ctx, name, true, allowed, seen, visiting, details, errors)
 	}
 	return details, errors
 }
 
-func (r *Registry) addDiscoveryDetail(name string, root bool, allowed func(Tool) bool, seen, visiting map[string]bool, details []DiscoveredTool, errors []DiscoveryError) ([]DiscoveredTool, []DiscoveryError) {
+func (r *Registry) addDiscoveryDetail(ctx context.Context, name string, root bool, allowed func(Tool) bool, seen, visiting map[string]bool, details []DiscoveredTool, errors []DiscoveryError) ([]DiscoveredTool, []DiscoveryError) {
 	name = strings.TrimSpace(name)
 	if name == "" || seen[name] {
 		return details, errors
@@ -497,7 +499,7 @@ func (r *Registry) addDiscoveryDetail(name string, root bool, allowed func(Tool)
 	info := tool.Info()
 	discovered := DiscoveredTool{Info: publicInfo(info)}
 	if loader, ok := tool.(LazyDetailProvider); ok {
-		block, err := loader.LoadDetail()
+		block, err := loader.LoadDetail(ctx)
 		if err != nil {
 			errors = append(errors, DiscoveryError{Name: name, Reason: err.Error()})
 			delete(visiting, name)
@@ -519,7 +521,7 @@ func (r *Registry) addDiscoveryDetail(name string, root bool, allowed func(Tool)
 	}
 	details = append(details, discovered)
 	for _, dep := range info.DependsOn {
-		details, errors = r.addDiscoveryDetail(dep, false, allowed, seen, visiting, details, errors)
+		details, errors = r.addDiscoveryDetail(ctx, dep, false, allowed, seen, visiting, details, errors)
 	}
 	delete(visiting, name)
 	return details, errors

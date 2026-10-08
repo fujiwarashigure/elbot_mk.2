@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- 文档型 AgentSkill 的详情此前向所有角色都追加 `agent_skill_creator` 引导；现在只有超级管理员可见：`tool.LazyDetailProvider.LoadDetail` 与 `Registry.DiscoverDetails` 改为透传带 actor 的 context，`discover_tool`、`@skill:` 预载与后台预载三条路径都显式传入 actor，普通用户或身份缺失时不再出现该引导（`ELBOT_SKILL.toml` 无效提示仍对所有角色保留）。
 - 修复 `/stop` 的越权：此前任何用户都能用 `/stop <request_id>` 或 `/requests` 显示的编号停止进程内其它会话的请求，Tab 补全也会把所有人的 request ID 列出来。现在普通用户的可停止集合、编号解析和补全都限定在自己当前 Session 的请求，只有超级管理员保留全局视角；`/requests`、`/stopall` 仍为超级管理员专用。
 - 修复唤醒词、工具/技能/角色指令与命令续接剥离时把整条消息的全部文字段合并成一段并插到首个文字段位置的问题；现在只改写实际变化的文字区间，段间的图片与文件段保持原位置和原始顺序。
 - 修复 `shell` 执行期间内存随输出增长的问题：此前用无界 `bytes.Buffer` 缓存 stdout/stderr、命令结束后才截断；现在收集时即只保留前 16 KiB 前缀并继续排空丢弃剩余输出，截断时在末尾标注，返回上限不变。

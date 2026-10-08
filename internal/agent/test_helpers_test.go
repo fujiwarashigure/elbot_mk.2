@@ -458,7 +458,7 @@ type agentLazyDetailTool struct {
 	err error
 }
 
-func (t agentLazyDetailTool) LoadDetail() (tool.DetailBlock, error) {
+func (t agentLazyDetailTool) LoadDetail(context.Context) (tool.DetailBlock, error) {
 	if t.err != nil {
 		return tool.DetailBlock{}, t.err
 	}

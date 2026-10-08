@@ -108,7 +108,7 @@ func (t discoverTool) Call(ctx context.Context, req CallRequest) (*Result, error
 			info := candidate.Info()
 			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info) && discoverFilterAllowed(ctx, info)
 		})
-		details, errors := t.registry.DiscoverDetails(names, func(candidate Tool) bool {
+		details, errors := t.registry.DiscoverDetails(ctx, names, func(candidate Tool) bool {
 			info := candidate.Info()
 			return InfoAvailableInContext(ctx, info) && CanAccessTool(actor, policy, info) && discoverFilterAllowed(ctx, info)
 		})

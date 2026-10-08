@@ -74,7 +74,7 @@ func TestAngelForgetToolIsOptInAndReachableThroughRecall(t *testing.T) {
 			t.Fatalf("register %s: %v", candidate.Name(), err)
 		}
 	}
-	details, errs := registry.DiscoverDetails([]string{angelRecallToolName}, nil)
+	details, errs := registry.DiscoverDetails(context.Background(), []string{angelRecallToolName}, nil)
 	if len(errs) != 0 {
 		t.Fatalf("discover angel_recall errors = %#v", errs)
 	}
