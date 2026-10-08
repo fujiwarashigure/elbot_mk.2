@@ -83,6 +83,10 @@ func (m *Manager) Run(ctx context.Context, deps RunnerDeps, req RunRequest) RunR
 	if req.Session == nil || deps == nil {
 		return RunResult{}
 	}
+	// Chat sessions never run tools, even if a hook or the model supplied calls.
+	if req.Session.Mode == storage.SessionModeChat {
+		return RunResult{}
+	}
 	sessionID := req.Session.ID
 	messages := make([]llm.LLMMessage, 0, len(req.Calls))
 	preparedCalls := make([]llm.ToolCallRequest, 0, len(req.Calls))

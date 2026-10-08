@@ -126,6 +126,13 @@ func (a *Agent) continueCommandInput(ctx context.Context, continuation command.C
 }
 
 func (a *Agent) handleSessionInput(ctx context.Context, session *storage.Session, text string) error {
+	// Compaction admission comes before the input hook and directive handling:
+	// a message that will be refused must not preload tools or rewrite the
+	// session tool cache.
+	if a.compactActive(session.ID) {
+		a.sendChat(ctx, fmt.Sprintf("正在压缩上下文，请稍后再发送。可使用 %sstop 取消当前请求。", a.commandPrefix()))
+		return nil
+	}
 	event, err := a.runHook(ctx, hook.Event{Point: hook.PointAgentInputPrepared, Session: a.hookSession(session), Message: hook.MessagePayload{Role: string(llm.RoleUser), Segments: inboundSegments(ctx, text)}})
 	if err != nil {
 		return err

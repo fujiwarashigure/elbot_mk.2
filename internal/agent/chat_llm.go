@@ -28,7 +28,7 @@ type llmCallResult struct {
 	Stream    delivery.MessageStream
 }
 
-func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.ModelSelection, messages []llm.LLMMessage, tools []llm.ToolSchema, pending *pendingUserMessage, requestOptions llmRequestOptions, stream delivery.MessageStream, out turnOutput) (llmCallResult, error) {
+func (a *Agent) callLLM(ctx context.Context, sessionID string, toolsEnabled bool, selection config.ModelSelection, messages []llm.LLMMessage, tools []llm.ToolSchema, pending *pendingUserMessage, requestOptions llmRequestOptions, stream delivery.MessageStream, out turnOutput) (llmCallResult, error) {
 	startedAt := time.Now()
 	baseMessages := llm.CloneMessages(messages)
 	hookMessage := hook.MessagePayload{}
@@ -69,7 +69,12 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 		}
 		return llmCallResult{}, fmt.Errorf("llm request hook: %w", err)
 	}
-	tools = event.LLM.Tools
+	// A request hook must not hand tools to a chat session.
+	if toolsEnabled {
+		tools = event.LLM.Tools
+	} else {
+		tools = nil
+	}
 	requestOptions = mergeLLMRequestOptions(requestOptions, llmRequestOptionsFromPayload(event.LLM))
 	if pending != nil {
 		segments := a.materializeMedia(ctx, event.Message.Segments)
@@ -171,7 +176,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 			a.notifyVisionFallbackOnce(ctx, sessionID, out)
 			releaseChatReservation()
 			releaseProvider()
-			return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
+			return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, toolsEnabled, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
 		}
 		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", redact.Error(err))
 		a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, ElapsedMS: elapsedMillis(startedAt)}}, err)
@@ -192,7 +197,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 					a.notifyVisionFallbackOnce(ctx, sessionID, out)
 					releaseChatReservation()
 					releaseProvider()
-					return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
+					return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, toolsEnabled, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
 				}
 				// The image rejection arrived after user-visible output, reasoning
 				// or tool-call deltas. Replaying the request would stream a second
@@ -218,8 +223,10 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 			}
 			out.SendReasoning(ctx, chunk.DeltaReasoningContent)
 		}
-		for _, delta := range chunk.ToolCallDeltas {
-			toolCalls = append(toolCalls, llm.ToolCallRequest{ID: delta.ID, Name: delta.Name, Arguments: delta.Args})
+		if toolsEnabled {
+			for _, delta := range chunk.ToolCallDeltas {
+				toolCalls = append(toolCalls, llm.ToolCallRequest{ID: delta.ID, Name: delta.Name, Arguments: delta.Args})
+			}
 		}
 		delta := chunk.DeltaContent
 		assistant.WriteString(delta)
@@ -259,7 +266,11 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, selection config.
 		return llmCallResult{}, fmt.Errorf("llm response hook: %w", err)
 	}
 	usage = event.LLM.Usage
-	toolCalls = event.LLM.ToolCalls
+	if toolsEnabled {
+		toolCalls = event.LLM.ToolCalls
+	} else {
+		toolCalls = nil
+	}
 	finalText := event.LLM.Text
 	a.logLLMOutput(ctx, sessionID, selection, finalText, event.LLM.SourceText, len(toolCalls), elapsedMs)
 

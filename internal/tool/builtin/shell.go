@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -171,8 +170,8 @@ func (t ShellTool) Call(ctx context.Context, req tool.CallRequest) (result *tool
 	cmd := shellCommand(runCtx, environment, cmdText)
 	configureShellProcess(cmd)
 	cmd.Dir = workDir
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	var stdout shellOutputBuffer
+	var stderr shellOutputBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err = runShellCommand(runCtx, cmd)
@@ -182,7 +181,7 @@ func (t ShellTool) Call(ctx context.Context, req tool.CallRequest) (result *tool
 	} else if err != nil {
 		return nil, fmt.Errorf("run shell: %w", err)
 	}
-	data := shellData{Stdout: truncate(stdout.String()), Stderr: truncate(stderr.String()), ExitCode: exitCode}
+	data := shellData{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}
 	return &tool.Result{Content: formatShellContent(data), Warnings: advice.warnings}, nil
 }
 
@@ -345,11 +344,33 @@ func formatShellContent(data shellData) string {
 	return strings.Join(parts, "\n")
 }
 
-func truncate(text string) string {
-	if len(text) <= maxShellOutput {
-		return text
+// shellOutputBuffer retains a bounded prefix while draining all process output,
+// so a long-running command cannot grow memory with its own output.
+type shellOutputBuffer struct {
+	data      []byte
+	truncated bool
+}
+
+func (b *shellOutputBuffer) Write(p []byte) (int, error) {
+	keep := min(len(p), maxShellOutput-len(b.data))
+	if keep > 0 {
+		if b.data == nil {
+			b.data = make([]byte, 0, maxShellOutput)
+		}
+		b.data = append(b.data, p[:keep]...)
 	}
-	return text[:maxShellOutput] + "\n... output truncated ...\n"
+	b.truncated = b.truncated || keep < len(p)
+	// Report the whole write so the process keeps draining instead of blocking
+	// on a full pipe.
+	return len(p), nil
+}
+
+func (b *shellOutputBuffer) String() string {
+	text := string(b.data)
+	if b.truncated {
+		text += fmt.Sprintf("\n... output too long; truncated to first %d KiB ...\n", maxShellOutput/1024)
+	}
+	return text
 }
 
 func isPowerShellEnv() bool {

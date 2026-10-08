@@ -125,7 +125,7 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 | --- | --- |
 | `/requests` | 查看当前进程中的 active request，包括 turn、LLM、tool、hook 等请求；turn 会显示运行阶段和阶段耗时。 |
 | `/me [tasks\|quota\|all]` | 普通成员查看自己的进行中任务、排队消息和今日生图/视觉/语音转写/聊天额度；只读，不调用模型。 |
-| `/stop [request_id]` | 停止指定请求；也可使用 `/requests` 显示的编号；不传参数时停止当前 Session 的请求。停止一次性 exec Hook 时会结束该 Hook 的完整进程树；持久 Worker 只取消当前调用。 |
+| `/stop [request_id]` | 停止指定请求；也可使用 `/requests` 显示的编号；不传参数时停止当前 Session 的请求。普通用户只能停止自己当前 Session 的请求，编号与补全同样只列出这些请求；只有超级管理员可以按 ID/编号停止任意会话的请求。停止一次性 exec Hook 时会结束该 Hook 的完整进程树；持久 Worker 只取消当前调用。 |
 | `/stopall` | 停止当前进程中的所有 active request。 |
 
 示例：
@@ -138,7 +138,7 @@ Fork 会保留原会话，并从指定 assistant 消息位置创建新的上下�
 /stopall
 ```
 
-`/me` 只显示当前 actor 在当前平台/作用域内自己的任务和额度，按 FairKey 过滤；不会暴露其他成员的活动。`/requests` 仍保留全局/管理视角。
+`/me` 只显示当前 actor 在当前平台/作用域内自己的任务和额度，按 FairKey 过滤；不会暴露其他成员的活动。`/requests` 仍保留全局/管理视角（仅超级管理员可用），`/stopall` 同样仅超级管理员可用。
 
 ## 上下文压缩
 

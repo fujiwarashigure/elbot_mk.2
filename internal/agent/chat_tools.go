@@ -43,6 +43,9 @@ func (a *Agent) drainPendingUserInput(ctx context.Context, sessionID string, mes
 }
 
 func (a *Agent) executeToolCalls(ctx context.Context, session *storage.Session, calls []llm.ToolCallRequest, assistantText, assistantRawText string, out turnOutput) toolrun.RunResult {
+	if !sessionToolsEnabled(session) {
+		return toolrun.RunResult{}
+	}
 	return a.toolRunManager().Run(ctx, agentToolRunDeps{agent: a, output: out}, toolrun.RunRequest{
 		Session:          session,
 		Calls:            calls,
@@ -257,8 +260,15 @@ func previewArguments(args string) string {
 	return string(runes[:maxPreviewRunes]) + "..."
 }
 
+// sessionToolsEnabled reports whether one session may use tools at all. Only
+// work sessions do; chat sessions must ignore tool schemas and tool calls even
+// when a hook injects them.
+func sessionToolsEnabled(session *storage.Session) bool {
+	return session != nil && session.Mode == storage.SessionModeWork
+}
+
 func (a *Agent) toolsForSession(ctx context.Context, session *storage.Session) ([]llm.ToolSchema, error) {
-	if session == nil || session.Mode != storage.SessionModeWork {
+	if !sessionToolsEnabled(session) {
 		return nil, nil
 	}
 	var schemas []llm.ToolSchema

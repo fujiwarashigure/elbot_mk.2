@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -434,5 +435,29 @@ func TestResolveWindowsShellCachedAndValid(t *testing.T) {
 		if len(args1) != 1 || args1[0] != "-lc" {
 			t.Fatalf("unexpected bash args: %v", args1)
 		}
+	}
+}
+
+func TestShellOutputBufferDrainsWithBoundedMemory(t *testing.T) {
+	var buffer shellOutputBuffer
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	for i := 0; i < maxShellOutput/len(chunk)*4+3; i++ {
+		written, err := buffer.Write(chunk)
+		if err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if written != len(chunk) {
+			t.Fatalf("Write reported %d of %d bytes; the process would block on a full pipe", written, len(chunk))
+		}
+	}
+	got := buffer.String()
+	if !strings.HasPrefix(got, strings.Repeat("x", maxShellOutput)) {
+		t.Fatal("bounded output must keep the first maxShellOutput bytes")
+	}
+	if len(got) > maxShellOutput+128 {
+		t.Fatalf("buffer kept %d bytes, want at most %d plus the notice", len(got), maxShellOutput)
+	}
+	if !strings.Contains(got, "output too long") {
+		t.Fatalf("missing truncation notice: %q", got[len(got)-80:])
 	}
 }

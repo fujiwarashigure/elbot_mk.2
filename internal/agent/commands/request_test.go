@@ -8,9 +8,21 @@ import (
 
 	"elbot/internal/command"
 	"elbot/internal/request"
+	"elbot/internal/security"
+	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/turn"
 )
+
+// superadminTestCtx mirrors a CLI/operator actor; only superadmins may address
+// requests outside their own current session.
+func superadminTestCtx() context.Context {
+	return security.WithActor(context.Background(), security.Actor{ID: "cli:local", Platform: "cli", PlatformUserID: "local", Role: security.RoleSuperadmin})
+}
+
+func regularTestCtx() context.Context {
+	return security.WithActor(context.Background(), security.Actor{ID: "cli:u1", Platform: "cli", PlatformUserID: "u1", Role: security.RoleUser})
+}
 
 func TestRequestsCommandFormatsTree(t *testing.T) {
 	ctx := context.Background()
@@ -90,7 +102,7 @@ func TestFormatActiveRequestsUsesTree(t *testing.T) {
 }
 
 func TestStopCommandCancelsNumberedHookRequest(t *testing.T) {
-	ctx := context.Background()
+	ctx := superadminTestCtx()
 	manager := request.NewManager(time.Minute)
 	turnReq, turnCtx, turnDone, err := manager.Start(ctx, request.StartRequest{SessionID: "s1", Kind: request.KindTurn, Label: "chat"})
 	if err != nil {
@@ -115,7 +127,7 @@ func TestStopCommandCancelsNumberedHookRequest(t *testing.T) {
 }
 
 func TestStopCommandCancelsNumberedChildRequest(t *testing.T) {
-	ctx := context.Background()
+	ctx := superadminTestCtx()
 	manager := request.NewManager(time.Minute)
 	turnReq, turnCtx, turnDone, err := manager.Start(ctx, request.StartRequest{SessionID: "s1", Kind: request.KindTurn, Label: "chat"})
 	if err != nil {
@@ -140,7 +152,7 @@ func TestStopCommandCancelsNumberedChildRequest(t *testing.T) {
 }
 
 func TestStopCommandCancelsNumberedTurnAndChildren(t *testing.T) {
-	ctx := context.Background()
+	ctx := superadminTestCtx()
 	manager := request.NewManager(time.Minute)
 	turnReq, turnCtx, _, err := manager.Start(ctx, request.StartRequest{SessionID: "s1", Kind: request.KindTurn, Label: "chat"})
 	if err != nil {
@@ -163,8 +175,9 @@ func TestStopCommandCancelsNumberedTurnAndChildren(t *testing.T) {
 }
 
 func TestStopCommandCompletesRequestIDs(t *testing.T) {
+	ctx := superadminTestCtx()
 	manager := request.NewManager(0)
-	started, _, done, err := manager.Start(context.Background(), request.StartRequest{SessionID: "s1", Kind: request.KindLLM, Label: "chat"})
+	started, _, done, err := manager.Start(ctx, request.StartRequest{SessionID: "s1", Kind: request.KindLLM, Label: "chat"})
 	if err != nil {
 		t.Fatalf("start request: %v", err)
 	}
@@ -172,8 +185,72 @@ func TestStopCommandCompletesRequestIDs(t *testing.T) {
 
 	cmd := NewStop(Deps{Requests: manager}).(command.Completer)
 	prefix := started.ID[:8]
-	got := cmd.Complete(context.Background(), command.CompletionRequest{Raw: "/stop " + prefix, Prefix: "/", Name: "stop", Args: prefix, Cursor: len("/stop ") + len(prefix)})
+	got := cmd.Complete(ctx, command.CompletionRequest{Raw: "/stop " + prefix, Prefix: "/", Name: "stop", Args: prefix, Cursor: len("/stop ") + len(prefix)})
 	if len(got) != 1 || got[0].Text != started.ID || got[0].Kind != "request_id" {
 		t.Fatalf("Complete = %#v", got)
+	}
+}
+
+func TestStopCommandRejectsOtherUsersRequest(t *testing.T) {
+	ctx := regularTestCtx()
+	store := newCommandTestStore(t)
+	svc := session.NewService(store)
+	scope := session.Scope{ActorID: "cli:u1", Platform: "cli", PlatformScopeID: "local"}
+	otherScope := session.Scope{ActorID: "cli:u2", Platform: "cli", PlatformScopeID: "local"}
+	if _, err := svc.Create(ctx, otherScope, session.CreateRequest{Title: "他人的会话"}); err != nil {
+		t.Fatalf("create other session: %v", err)
+	}
+	other, err := svc.Create(ctx, otherScope, session.CreateRequest{Title: "他人的会话 2"})
+	if err != nil {
+		t.Fatalf("create other session: %v", err)
+	}
+	mine, err := svc.Create(ctx, scope, session.CreateRequest{Title: "我的会话"})
+	if err != nil {
+		t.Fatalf("create own session: %v", err)
+	}
+
+	manager := request.NewManager(time.Minute)
+	otherReq, otherCtx, otherDone, err := manager.Start(ctx, request.StartRequest{SessionID: other.ID, Kind: request.KindTurn, Label: "chat"})
+	if err != nil {
+		t.Fatalf("start other turn: %v", err)
+	}
+	defer otherDone()
+	_, mineCtx, mineDone, err := manager.Start(ctx, request.StartRequest{SessionID: mine.ID, Kind: request.KindTurn, Label: "chat"})
+	if err != nil {
+		t.Fatalf("start own turn: %v", err)
+	}
+	defer mineDone()
+
+	deps := Deps{Sessions: svc, Requests: manager, Turns: turn.NewManager(), Scope: func(context.Context) session.Scope { return scope }}
+	cmd := NewStop(deps)
+
+	if result, err := cmd.Handle(ctx, command.Request{Args: otherReq.ID}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	} else if !strings.HasPrefix(result.Content, "request not found") {
+		t.Fatalf("stopping another user's request = %q, want request not found", result.Content)
+	}
+	select {
+	case <-otherCtx.Done():
+		t.Fatal("another user's request was canceled")
+	default:
+	}
+	if len(manager.ListBySession(other.ID)) == 0 {
+		t.Fatal("another user's request disappeared from the manager")
+	}
+
+	// The numbers of /requests are resolved inside the caller's own scope only,
+	// so "1" addresses the caller's turn, not the other session's turn.
+	if result, err := cmd.Handle(ctx, command.Request{Args: "1"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	} else if !strings.Contains(result.Content, "stopped") {
+		t.Fatalf("stopping own request = %q, want stopped", result.Content)
+	}
+	assertCommandTestCanceled(t, mineCtx)
+
+	completions := cmd.(command.Completer).Complete(ctx, command.CompletionRequest{Raw: "/stop ", Prefix: "/", Name: "stop", Args: "", Cursor: len("/stop ")})
+	for _, completion := range completions {
+		if completion.Text == otherReq.ID {
+			t.Fatalf("completion leaked another user's request %q", otherReq.ID)
+		}
 	}
 }

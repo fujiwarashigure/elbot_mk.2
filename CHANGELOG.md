@@ -20,6 +20,11 @@
 
 ### Fixed
 
+- 修复 `/stop` 的越权：此前任何用户都能用 `/stop <request_id>` 或 `/requests` 显示的编号停止进程内其它会话的请求，Tab 补全也会把所有人的 request ID 列出来。现在普通用户的可停止集合、编号解析和补全都限定在自己当前 Session 的请求，只有超级管理员保留全局视角；`/requests`、`/stopall` 仍为超级管理员专用。
+- 修复唤醒词、工具/技能/角色指令与命令续接剥离时把整条消息的全部文字段合并成一段并插到首个文字段位置的问题；现在只改写实际变化的文字区间，段间的图片与文件段保持原位置和原始顺序。
+- 修复 `shell` 执行期间内存随输出增长的问题：此前用无界 `bytes.Buffer` 缓存 stdout/stderr、命令结束后才截断；现在收集时即只保留前 16 KiB 前缀并继续排空丢弃剩余输出，截断时在末尾标注，返回上限不变。
+- 修复压缩期间仍会预载工具的问题：此前压缩中收到的消息虽然被拒绝回复，但 `@tool:` / `@skill:` 剥离与 `tool_cache` 写入已经完成；现在压缩准入位于输入 Hook 与指令处理之前，被拒绝的消息不再预载或写入工具缓存。
+- 修复 chat 模式仍可能执行工具的问题：Hook 在 `llm.turn.prepared` / `llm.request.prepared` / `llm.response.received` 注入的工具 schema 或模型返回的 tool call 此前都会进入工具轮次；现在 chat 会话在这三个 Hook 之后都会清空工具与工具调用，`executeToolCalls` 与 `toolrun.Run` 也会拒绝 chat 会话。
 - 长回复分包与部分发送追踪覆盖主要平台：OneBot `sendContextText()` 在后续分页失败时返回带 `Failed` / `Failure` 的部分回执；QQ 官方新增按 rune 分页并保留后续页失败回执，Markdown 已有页面可见时不再回退纯文本造成重复发送；Telegram 的 HTML→纯文本、rich→HTML、流式最终替换以及 OneBot/Telegram/QQ 官方的多输出、多目标发送循环都会合并已成功页/目标的回执并标记部分失败。`delivery.Manager` 新增 `SendNoticesWithReceipt`，Agent 批量输出部分失败时会在审计日志中留下平台消息数量，方便对账而不是重发整批。
 
 ### Changed

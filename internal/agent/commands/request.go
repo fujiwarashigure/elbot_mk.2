@@ -67,7 +67,7 @@ func (c stopCommand) Handle(ctx context.Context, req command.Request) (*command.
 	deps := c.deps
 	arg := strings.TrimSpace(req.Args)
 	if arg != "" {
-		id, ok := resolveRequestArg(deps, arg)
+		id, ok := resolveRequestArg(stoppableRequests(ctx, deps), arg)
 		if !ok {
 			return &command.Result{Content: fmt.Sprintf("request not found: %s", arg)}, nil
 		}
@@ -99,12 +99,32 @@ func (c stopCommand) Handle(ctx context.Context, req command.Request) (*command.
 }
 
 func (c stopCommand) Complete(ctx context.Context, req command.CompletionRequest) []command.Completion {
-	_ = ctx
 	token := currentCompletionToken(req)
 	if !isFirstArg(req, token) {
 		return nil
 	}
-	return completeRequestIDs(c.deps, token.Text, token.Start, token.End)
+	return completeRequestIDs(stoppableRequests(ctx, c.deps), token.Text, token.Start, token.End)
+}
+
+// stoppableRequests lists the requests one actor may stop by id or by the
+// numbers shown in /requests output. Superadmins keep the process-wide view;
+// everyone else is limited to the current session, so a regular user cannot
+// cancel another user's request.
+func stoppableRequests(ctx context.Context, deps Deps) []request.Request {
+	if deps.Requests == nil {
+		return nil
+	}
+	if actor, ok := security.ActorFromContext(ctx); ok && actor.Role == security.RoleSuperadmin {
+		return deps.Requests.List()
+	}
+	if deps.Sessions == nil || deps.Scope == nil {
+		return nil
+	}
+	current, err := deps.Sessions.Current(ctx, deps.Scope(ctx))
+	if err != nil || current == nil {
+		return nil
+	}
+	return deps.Requests.ListBySession(current.ID)
 }
 
 func NewStopAll(deps Deps) command.Handler {
@@ -191,14 +211,15 @@ func writeRequestLine(sb *strings.Builder, ctx context.Context, deps Deps, numbe
 	}
 }
 
-func resolveRequestArg(deps Deps, arg string) (string, bool) {
-	if deps.Requests == nil {
-		return "", false
+// resolveRequestArg resolves one argument against the caller's stoppable
+// requests, by exact request ID first and then by the /requests tree number.
+func resolveRequestArg(requests []request.Request, arg string) (string, bool) {
+	for _, req := range requests {
+		if req.ID == arg {
+			return req.ID, true
+		}
 	}
-	if req, ok := deps.Requests.Get(arg); ok {
-		return req.ID, true
-	}
-	tree := buildRequestTree(deps.Requests.List())
+	tree := buildRequestTree(requests)
 	req, ok := tree.ByNumber[arg]
 	if !ok {
 		return "", false

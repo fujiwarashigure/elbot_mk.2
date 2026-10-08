@@ -177,7 +177,12 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	if err := a.authorizeExecutionModelSelection(ctx, selection); err != nil {
 		return err
 	}
-	tools = turnEvent.LLM.Tools
+	// Chat sessions ignore tool schemas, including the ones a turn hook forces in.
+	if sessionToolsEnabled(session) {
+		tools = turnEvent.LLM.Tools
+	} else {
+		tools = nil
+	}
 	requestOptions := llmRequestOptionsFromPayload(turnEvent.LLM)
 	out.PublishRuntimeStatus(ctx, runtimestatus.Snapshot{SessionID: session.ID, Phase: runtimestatus.PhasePreparing, Provider: selection.Provider, Model: selection.Model, Mode: session.Mode, TurnStartedAt: turnStartedAt, StageStartedAt: turnStartedAt})
 	canonicalUserSegments := a.materializeMedia(ctx, turnEvent.Message.Segments)
@@ -228,7 +233,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		stream := out.StartStream(reqCtx)
 		llmStageStartedAt := storage.Now()
 		out.PublishRuntimeStatus(ctx, runtimestatus.Snapshot{SessionID: session.ID, Phase: runtimestatus.PhaseLLM, Provider: selection.Provider, Model: selection.Model, Mode: session.Mode, RequestID: reqCtxInfo.ID, Kind: request.KindTurn, Label: "chat", TurnStartedAt: turnStartedAt, StageStartedAt: llmStageStartedAt, Usage: usage})
-		result, err := a.callLLM(reqCtx, session.ID, selection, llmMessages, tools, pending, requestOptions, stream, out)
+		result, err := a.callLLM(reqCtx, session.ID, sessionToolsEnabled(session), selection, llmMessages, tools, pending, requestOptions, stream, out)
 		if len(result.Messages) > 0 {
 			llmMessages = result.Messages
 		}
@@ -284,7 +289,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 			llmMessages = append(llmMessages, llm.LLMMessage{Role: llm.RoleUser, Segments: llm.TextSegments("工具调用轮次已达到上限，可以询问用户是否继续或者基于已有工具结果和当前上下文总结当前进度。")})
 			tools = nil
 			stream := out.StartStream(reqCtx)
-			summary, err := a.callLLM(reqCtx, session.ID, selection, llmMessages, tools, summaryPending, requestOptions, stream, out)
+			summary, err := a.callLLM(reqCtx, session.ID, sessionToolsEnabled(session), selection, llmMessages, tools, summaryPending, requestOptions, stream, out)
 			if err != nil {
 				if errors.Is(err, errPromptOverflow) {
 					return nil
