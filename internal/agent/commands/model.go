@@ -24,10 +24,14 @@ func (c modelCommand) Info() command.Info {
 func modelCommandInfo() command.Info {
 	return command.Info{
 		Name:        "model",
-		Usage:       "/model [--profiles|--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>",
+		Usage:       "/model [--profiles|--snapshots|--save <名字>|--apply <名字>|--delete <名字>|--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>",
 		Description: "Switch model for current or specified mode.",
 		Help: strings.TrimSpace(`Options:
   --profiles           List named model selections (@model:<name>).
+  --snapshots          List saved named model snapshots.
+  --save <name>        Save the current model selections under <name>.
+  --apply <name>       Switch every slot back to the saved snapshot.
+  --delete <name>      Delete a saved snapshot.
   --chat <model>       Switch chat mode model.
   --work <model>       Switch work mode model.
   --elwisp1 <model>    Switch Elnis elwisp1 model slot.
@@ -42,6 +46,10 @@ Model can be a list number, model name, or provider/model.
 Examples:
   /model 2
   /model --profiles
+  /model --snapshots
+  /model --save cheap
+  /model --apply cheap
+  /model --delete cheap
   /model --chat gpt-4o
   /model --work openai/gpt-4.1
   /model --elwisp2 openai/gpt-4.1
@@ -65,6 +73,38 @@ func (c modelCommand) Handle(ctx context.Context, req command.Request) (*command
 			return nil, fmt.Errorf("model service unavailable")
 		}
 		return formatModelProfiles(deps.Models.ModelProfiles()), nil
+	}
+	switch target {
+	case modelTargetSnapshots:
+		if deps.Models == nil {
+			return nil, fmt.Errorf("model service unavailable")
+		}
+		return formatModelSnapshots(deps.Models.ModelSnapshots()), nil
+	case modelTargetSave:
+		if deps.Models == nil {
+			return nil, fmt.Errorf("model service unavailable")
+		}
+		if err := deps.Models.SaveModelSnapshot(args); err != nil {
+			return nil, err
+		}
+		return &command.Result{Content: fmt.Sprintf("saved model snapshot: %s", args)}, nil
+	case modelTargetApply:
+		if deps.Models == nil {
+			return nil, fmt.Errorf("model service unavailable")
+		}
+		applied, err := deps.Models.ApplyModelSnapshot(args)
+		if err != nil {
+			return nil, err
+		}
+		return &command.Result{Content: "applied model snapshot:\n" + formatModelSnapshotSlots(applied)}, nil
+	case modelTargetDelete:
+		if deps.Models == nil {
+			return nil, fmt.Errorf("model service unavailable")
+		}
+		if err := deps.Models.DeleteModelSnapshot(args); err != nil {
+			return nil, err
+		}
+		return &command.Result{Content: fmt.Sprintf("deleted model snapshot: %s", args)}, nil
 	}
 	var selected ModelOption
 	switch target {
@@ -119,6 +159,34 @@ func formatModelProfiles(profiles []ModelProfile) *command.Result {
 	return &command.Result{Content: trimTrailingNewlines(sb.String())}
 }
 
+// formatModelSnapshots 列出已保存的命名快照。空列表也要说明怎么创建，
+// 否则用户看到一个空回复不知道下一步做什么。
+func formatModelSnapshots(snapshots []ModelSnapshot) *command.Result {
+	if len(snapshots) == 0 {
+		return &command.Result{Content: "no saved model snapshots (use `/model --save <name>` to save the current selections)"}
+	}
+	var sb strings.Builder
+	sb.WriteString("saved model snapshots:\n")
+	for _, snapshot := range snapshots {
+		sb.WriteString(fmt.Sprintf("  %s\n", snapshot.Name))
+		for _, line := range strings.Split(formatModelSnapshotSlots(snapshot), "\n") {
+			sb.WriteString("    " + line + "\n")
+		}
+	}
+	return &command.Result{Content: trimTrailingNewlines(sb.String())}
+}
+
+func formatModelSnapshotSlots(snapshot ModelSnapshot) string {
+	if len(snapshot.Slots) == 0 {
+		return "(empty snapshot)"
+	}
+	lines := make([]string, 0, len(snapshot.Slots))
+	for _, slot := range snapshot.Slots {
+		lines = append(lines, fmt.Sprintf("%s -> %s/%s", slot.Label, slot.Provider, slot.Model))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (c modelCommand) Complete(ctx context.Context, req command.CompletionRequest) []command.Completion {
 	_ = ctx
 	cursor := req.Cursor
@@ -132,6 +200,11 @@ func (c modelCommand) Complete(ctx context.Context, req command.CompletionReques
 	query := req.Raw[tokenStart:cursor]
 	if strings.HasPrefix(query, "-") {
 		return completeModelOptions(query, tokenStart, cursor)
+	}
+	// --apply / --delete 后面跟的是快照名，不是模型名：这里补全已保存的快照，
+	// 免得用户必须先去 --snapshots 里抄名字。
+	if previous := previousCompletionToken(req.Args, query); previous == "--apply" || previous == "--delete" {
+		return c.completeModelSnapshotNames(query, tokenStart, cursor)
 	}
 	if optionOnlyModelArgs(req.Args) || c.deps.Models == nil {
 		return nil
@@ -170,6 +243,36 @@ func (c modelCommand) fuzzyModelOptions(query string) []ModelOption {
 	return out
 }
 
+// previousCompletionToken 返回当前正在补全的 token 之前的那个 token（用来判断
+// "--apply" / "--delete" 这类需要参数的命令，参数是不是快照名）。
+func previousCompletionToken(args, query string) string {
+	trimmed := strings.TrimSuffix(args, query)
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[len(fields)-1]
+}
+
+func (c modelCommand) completeModelSnapshotNames(query string, start, end int) []command.Completion {
+	if c.deps.Models == nil {
+		return nil
+	}
+	snapshots := c.deps.Models.ModelSnapshots()
+	out := make([]command.Completion, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if !strings.HasPrefix(snapshot.Name, query) {
+			continue
+		}
+		parts := make([]string, 0, len(snapshot.Slots))
+		for _, slot := range snapshot.Slots {
+			parts = append(parts, slot.Label+"="+slot.Provider+"/"+slot.Model)
+		}
+		out = append(out, command.Completion{Text: snapshot.Name, Label: snapshot.Name, Description: strings.Join(parts, ", "), Kind: "model_snapshot", ReplaceStart: start, ReplaceEnd: end})
+	}
+	return out
+}
+
 func fuzzySubsequenceMatch(value, query string) bool {
 	if query == "" {
 		return true
@@ -191,6 +294,10 @@ func completeModelOptions(query string, start, end int) []command.Completion {
 		Description string
 	}{
 		{"--profiles", "List named model selections"},
+		{"--snapshots", "List saved model snapshots"},
+		{"--save", "Save current model selections as a snapshot"},
+		{"--apply", "Apply a saved model snapshot"},
+		{"--delete", "Delete a saved model snapshot"},
 		{"--chat", "Switch chat mode model"},
 		{"--work", "Switch work mode model"},
 		{"--elwisp1", "Switch Elnis elwisp1 model slot"},
@@ -216,7 +323,7 @@ func optionOnlyModelArgs(args string) bool {
 		return false
 	}
 	last := fields[len(fields)-1]
-	return last == "--profiles" || last == "--chat" || last == "--work" || last == "--elwisp1" || last == "--elwisp2" || last == "--elwisp3" || last == "--compact" || last == "--naming" || last == "-c" || last == "-n"
+	return last == "--profiles" || last == "--snapshots" || last == "--save" || last == "--apply" || last == "--delete" || last == "--chat" || last == "--work" || last == "--elwisp1" || last == "--elwisp2" || last == "--elwisp3" || last == "--compact" || last == "--naming" || last == "-c" || last == "-n"
 }
 
 func NewCheckModel(deps Deps) command.Handler {
@@ -328,15 +435,19 @@ func parseModelListArgs(args string) (string, bool) {
 type modelTarget string
 
 const (
-	modelTargetCurrent  modelTarget = "current"
-	modelTargetProfiles modelTarget = "profiles"
-	modelTargetChat     modelTarget = "chat"
-	modelTargetWork     modelTarget = "work"
-	modelTargetElwisp1  modelTarget = "elwisp1"
-	modelTargetElwisp2  modelTarget = "elwisp2"
-	modelTargetElwisp3  modelTarget = "elwisp3"
-	modelTargetCompact  modelTarget = "compact"
-	modelTargetNaming   modelTarget = "naming"
+	modelTargetCurrent   modelTarget = "current"
+	modelTargetProfiles  modelTarget = "profiles"
+	modelTargetSnapshots modelTarget = "snapshots"
+	modelTargetSave      modelTarget = "save"
+	modelTargetApply     modelTarget = "apply"
+	modelTargetDelete    modelTarget = "delete"
+	modelTargetChat      modelTarget = "chat"
+	modelTargetWork      modelTarget = "work"
+	modelTargetElwisp1   modelTarget = "elwisp1"
+	modelTargetElwisp2   modelTarget = "elwisp2"
+	modelTargetElwisp3   modelTarget = "elwisp3"
+	modelTargetCompact   modelTarget = "compact"
+	modelTargetNaming    modelTarget = "naming"
 )
 
 func parseModelArgs(prefix, args string) (string, modelTarget, error) {
@@ -348,6 +459,14 @@ func parseModelArgs(prefix, args string) (string, modelTarget, error) {
 		switch field {
 		case "--profiles":
 			nextTarget = modelTargetProfiles
+		case "--snapshots":
+			nextTarget = modelTargetSnapshots
+		case "--save":
+			nextTarget = modelTargetSave
+		case "--apply":
+			nextTarget = modelTargetApply
+		case "--delete":
+			nextTarget = modelTargetDelete
 		case "--chat":
 			nextTarget = modelTargetChat
 		case "--work":
@@ -365,7 +484,7 @@ func parseModelArgs(prefix, args string) (string, modelTarget, error) {
 		}
 		if nextTarget != "" {
 			if target != modelTargetCurrent {
-				return "", "", fmt.Errorf("usage: %smodel [--profiles|--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>", prefix)
+				return "", "", fmt.Errorf("usage: %smodel [--profiles|--snapshots|--save <name>|--apply <name>|--delete <name>|--chat|--work|--elwisp1|--elwisp2|--elwisp3|--compact|--naming] <name or number>", prefix)
 			}
 			target = nextTarget
 			continue

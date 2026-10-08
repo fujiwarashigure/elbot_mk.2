@@ -526,13 +526,39 @@ model = "deepseek-chat"
 - `elwisp1`、`elwisp2`、`elwisp3` 是 Elnis LLM 事件可选模型槽位；Elvena 请求可通过 `model_slot` 指定，未配置时回退到 `work`。
 - 运行时使用 `/model` 切换模型后，状态会写回 `state.toml`。
 
+#### 命名模型快照 `[model_snapshots]`
+
+`/model --save <名字>` 会把**当前**的整套模型选择（`mode_models` 各模式 + `compact_model` + `naming_model`）存成一份命名快照，写在同一个 `state.toml` 里：
+
+```toml
+[model_snapshots.cheap]
+[model_snapshots.cheap.mode_models.work]
+provider = "deepseek"
+model = "deepseek-chat"
+
+[model_snapshots.cheap.mode_models.chat]
+provider = "deepseek"
+model = "deepseek-chat"
+
+[model_snapshots.cheap.compact_model]
+provider = "deepseek"
+model = "deepseek-chat"
+```
+
+- `/model --snapshots` 列出已保存的快照与每个槽位，`/model --apply <名字>` 整套切回去，`/model --delete <名字>` 删除；`--save` 用同名再存一次就是覆盖。
+- 快照名只能用字母、数字、下划线、连字符（含中文等 Unicode 字母），最长 32 个字符。
+- 快照名**不能**和 `services.toml` 的 `model_profiles` / `aliases` 重名：那些名字归 `@model:<名字>` 与群策略使用，同名会让一个名字有两种含义，`--save` 会直接拒绝。
+- `--apply` 会先校验快照里的每个 provider 在当前进程里都存在，只要有一个不存在就整条拒绝、不做部分切换。
+- `--apply` 只覆盖快照里记录的槽位：保存时没有设置的槽位（例如当时还没配 `elwisp3`）不会因此被清空或改动。
+- 快照属于运行态，与 `mode_models` 一起参与外部编辑热加载（见下节）。
+
 ### 外部修改 `state.toml` 的热加载
 
 `state.toml` 会被 ElBot 运行时回写，同时也支持手工编辑后热加载，不需要重启：
 
 - 进程每 15 秒检查一次 `state.toml` 的修改时间；文件比进程最后加载/写回的版本更新时，会立即读取并生效，并记录 `runtime_state_reloaded` 审计事件，同时给超级管理员发送一条通知（每次外部修改只通知一次，只有实际生效的变更才会通知）；
 - 需要立刻生效时使用 `/state reload`；`/state` 可查看文件路径、已加载时间和是否存在未生效的外部修改；
-- 热加载覆盖 `mode_models`、`compact_model`、`naming_model`、`context_overflow`、`group_policy`、`group_knowledge`、`group_services`、`group_runtime`；
+- 热加载覆盖 `mode_models`、`compact_model`、`naming_model`、`model_snapshots`、`context_overflow`、`group_policy`、`group_knowledge`、`group_services`、`group_runtime`；
 - 每次内部写回之前都会先合并外部修改，因此“刚手工改完就触发内部写回”不会丢掉这次修改；
 - `[budget]` 额度账本由运行中的进程独占：热加载不会用文件内容覆盖内存中的账本（避免丢掉在途预占），账本只在进程启动时从文件恢复。手工编辑 `[budget]` 不会在运行中生效，且会在下一次写回时被内存值替换；
 - 文件内容非法（例如 provider 不存在）时，热加载失败并保留内存中的旧状态，日志里会记录具体原因。

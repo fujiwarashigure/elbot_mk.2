@@ -1600,12 +1600,24 @@ type StateConfig struct {
 	ModeModels      map[string]ModelSelection        `toml:"mode_models"`
 	NamingModel     ModelSelection                   `toml:"naming_model"`
 	CompactModel    ModelSelection                   `toml:"compact_model"`
+	ModelSnapshots  map[string]StateModelSnapshot    `toml:"model_snapshots,omitempty"`
 	ContextOverflow map[string]ContextOverflowConfig `toml:"context_overflow,omitempty"`
 	GroupPolicy     map[string]GroupPolicyConfig     `toml:"group_policy,omitempty"`
 	GroupRuntime    map[string]GroupRuntimeConfig    `toml:"group_runtime,omitempty"`
 	GroupKnowledge  map[string][]GroupKnowledgeEntry `toml:"group_knowledge,omitempty"`
 	GroupServices   StateGroupServicesConfig         `toml:"group_services,omitempty"`
 	Budget          StateBudgetConfig                `toml:"budget,omitempty"`
+}
+
+// StateModelSnapshot 是一组命名保存的模型选择（`/model --save`），把一个名字绑定到
+// "按模式/用途的一组模型"，之后可以用 `/model --apply <名字>` 整体切回。
+//
+// 它保存在 state.toml 而不是 app.toml / services.toml：后两者是多个进程共享的只读配置，
+// 运行中的进程不应改写别人的配置文件；命名快照是运行态，和 mode_models 同属一类。
+type StateModelSnapshot struct {
+	ModeModels   map[string]ModelSelection `toml:"mode_models,omitempty"`
+	CompactModel ModelSelection            `toml:"compact_model,omitempty"`
+	NamingModel  ModelSelection            `toml:"naming_model,omitempty"`
 }
 
 // GroupRuntimeConfig is the persisted, event-derived runtime state of one

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,11 +10,47 @@ import (
 )
 
 type fakeModelService struct {
-	models   []ModelOption
-	profiles []ModelProfile
+	models    []ModelOption
+	profiles  []ModelProfile
+	snapshots []ModelSnapshot
+	// snapshotErr / applyErr / deleteErr 让测试覆盖失败路径；applyResult 是应用成功时
+	// 返回的视图，便于断言命令回复的内容。
+	snapshotErr error
+	applyErr    error
+	deleteErr   error
+	applyResult ModelSnapshot
+	savedName   string
+	appliedName string
+	deletedName string
 }
 
 func (s fakeModelService) ModelProfiles() []ModelProfile { return s.profiles }
+
+func (s fakeModelService) ModelSnapshots() []ModelSnapshot { return s.snapshots }
+
+func (s *fakeModelService) SaveModelSnapshot(name string) error {
+	if s.snapshotErr != nil {
+		return s.snapshotErr
+	}
+	s.savedName = name
+	return nil
+}
+
+func (s *fakeModelService) ApplyModelSnapshot(name string) (ModelSnapshot, error) {
+	if s.applyErr != nil {
+		return ModelSnapshot{}, s.applyErr
+	}
+	s.appliedName = name
+	return s.applyResult, nil
+}
+
+func (s *fakeModelService) DeleteModelSnapshot(name string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.deletedName = name
+	return nil
+}
 
 func (s fakeModelService) CurrentModel() string                   { return "" }
 func (s fakeModelService) CurrentProvider() string                { return "" }
@@ -45,7 +82,7 @@ func (s fakeModelService) ModelList(query string, opts ModelListOptions) ModelLi
 }
 
 func TestModelCommandCompletesOptions(t *testing.T) {
-	completer := NewModel(Deps{Models: fakeModelService{}}).(command.Completer)
+	completer := NewModel(Deps{Models: &fakeModelService{}}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --", Prefix: "/", Name: "model", Args: "--", Cursor: len("/model --")})
 	if len(got) < 7 {
 		t.Fatalf("Complete options = %#v", got)
@@ -65,7 +102,7 @@ func TestModelCommandCompletesOptions(t *testing.T) {
 }
 
 func TestModelCommandCompletesProfilesOption(t *testing.T) {
-	completer := NewModel(Deps{Models: fakeModelService{}}).(command.Completer)
+	completer := NewModel(Deps{Models: &fakeModelService{}}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --pro", Prefix: "/", Name: "model", Args: "--pro", Cursor: len("/model --pro")})
 	if len(got) != 1 || got[0].Text != "--profiles" {
 		t.Fatalf("profile option completion = %#v", got)
@@ -73,7 +110,7 @@ func TestModelCommandCompletesProfilesOption(t *testing.T) {
 }
 
 func TestModelCommandDoesNotCompleteModelNamesAfterProfiles(t *testing.T) {
-	models := fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}}}
+	models := &fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}}}
 	completer := NewModel(Deps{Models: models}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --profiles", Prefix: "/", Name: "model", Args: "--profiles", Cursor: len("/model --profiles")})
 	if len(got) != 1 || got[0].Text != "--profiles" {
@@ -82,7 +119,7 @@ func TestModelCommandDoesNotCompleteModelNamesAfterProfiles(t *testing.T) {
 }
 
 func TestModelCommandListsProfiles(t *testing.T) {
-	models := fakeModelService{profiles: []ModelProfile{
+	models := &fakeModelService{profiles: []ModelProfile{
 		{Name: "fast", Provider: "openai", Model: "gpt-4o", Available: true},
 		{Name: "dead", Provider: "missing", Model: "ghost"},
 	}}
@@ -105,7 +142,7 @@ func TestModelCommandListsProfiles(t *testing.T) {
 }
 
 func TestModelCommandListsProfilesWhenEmpty(t *testing.T) {
-	result, err := NewModel(Deps{Models: fakeModelService{}}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--profiles"})
+	result, err := NewModel(Deps{Models: &fakeModelService{}}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--profiles"})
 	if err != nil {
 		t.Fatalf("Handle --profiles: %v", err)
 	}
@@ -114,8 +151,139 @@ func TestModelCommandListsProfilesWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestModelCommandSavesSnapshot(t *testing.T) {
+	models := &fakeModelService{}
+	result, err := NewModel(Deps{Models: models}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--save cheap"})
+	if err != nil {
+		t.Fatalf("Handle --save: %v", err)
+	}
+	if models.savedName != "cheap" {
+		t.Fatalf("saved name = %q", models.savedName)
+	}
+	if result == nil || !strings.Contains(result.Content, "saved model snapshot: cheap") {
+		t.Fatalf("result = %#v", result)
+	}
+	if strings.Contains(result.Content, "switched") {
+		t.Fatalf("--save must not switch a model: %q", result.Content)
+	}
+}
+
+func TestModelCommandSaveRequiresName(t *testing.T) {
+	models := &fakeModelService{snapshotErr: errors.New("快照名不能为空")}
+	if _, err := NewModel(Deps{Models: models}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--save"}); err == nil {
+		t.Fatal("--save without a name must fail")
+	}
+}
+
+func TestModelCommandAppliesSnapshot(t *testing.T) {
+	models := &fakeModelService{applyResult: ModelSnapshot{Name: "cheap", Slots: []ModelSnapshotSlot{
+		{Label: "chat", Provider: "openai", Model: "gpt-4o-mini"},
+		{Label: "work", Provider: "deepseek", Model: "deepseek-chat"},
+	}}}
+	result, err := NewModel(Deps{Models: models}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--apply cheap"})
+	if err != nil {
+		t.Fatalf("Handle --apply: %v", err)
+	}
+	if models.appliedName != "cheap" {
+		t.Fatalf("applied name = %q", models.appliedName)
+	}
+	if result == nil || !strings.Contains(result.Content, "chat -> openai/gpt-4o-mini") || !strings.Contains(result.Content, "work -> deepseek/deepseek-chat") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestModelCommandApplyReportsFailure(t *testing.T) {
+	models := &fakeModelService{applyErr: errors.New(`没有名为 "nope" 的模型快照`)}
+	if _, err := NewModel(Deps{Models: models}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--apply nope"}); err == nil {
+		t.Fatal("--apply of a missing snapshot must fail")
+	}
+}
+
+func TestModelCommandDeletesSnapshot(t *testing.T) {
+	models := &fakeModelService{}
+	result, err := NewModel(Deps{Models: models}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--delete cheap"})
+	if err != nil {
+		t.Fatalf("Handle --delete: %v", err)
+	}
+	if models.deletedName != "cheap" {
+		t.Fatalf("deleted name = %q", models.deletedName)
+	}
+	if result == nil || !strings.Contains(result.Content, "deleted model snapshot: cheap") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestModelCommandListsSnapshots(t *testing.T) {
+	models := &fakeModelService{snapshots: []ModelSnapshot{
+		{Name: "cheap", Slots: []ModelSnapshotSlot{{Label: "chat", Provider: "openai", Model: "gpt-4o-mini"}}},
+		{Name: "strong", Slots: []ModelSnapshotSlot{{Label: "work", Provider: "anthropic", Model: "claude-sonnet"}}},
+	}}
+	result, err := NewModel(Deps{Models: models}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--snapshots"})
+	if err != nil {
+		t.Fatalf("Handle --snapshots: %v", err)
+	}
+	if result == nil || !strings.Contains(result.Content, "cheap") || !strings.Contains(result.Content, "strong") {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(result.Content, "chat -> openai/gpt-4o-mini") {
+		t.Fatalf("snapshot slots missing: %q", result.Content)
+	}
+	if strings.Contains(result.Content, "switched") {
+		t.Fatalf("--snapshots must not switch a model: %q", result.Content)
+	}
+}
+
+func TestModelCommandListsSnapshotsWhenEmpty(t *testing.T) {
+	result, err := NewModel(Deps{Models: &fakeModelService{}}).Handle(context.Background(), command.Request{Prefix: "/", Name: "model", Args: "--snapshots"})
+	if err != nil {
+		t.Fatalf("Handle --snapshots: %v", err)
+	}
+	if result == nil || !strings.Contains(result.Content, "no saved model snapshots") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestModelCommandCompletesSnapshotNamesAfterApply(t *testing.T) {
+	models := &fakeModelService{snapshots: []ModelSnapshot{
+		{Name: "cheap", Slots: []ModelSnapshotSlot{{Label: "chat", Provider: "openai", Model: "gpt-4o-mini"}}},
+		{Name: "strong", Slots: []ModelSnapshotSlot{{Label: "work", Provider: "anthropic", Model: "claude-sonnet"}}},
+	}}
+	completer := NewModel(Deps{Models: models}).(command.Completer)
+	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --apply ch", Prefix: "/", Name: "model", Args: "--apply ch", Cursor: len("/model --apply ch")})
+	if len(got) != 1 || got[0].Text != "cheap" || got[0].Kind != "model_snapshot" {
+		t.Fatalf("snapshot completion = %#v", got)
+	}
+	if got[0].ReplaceStart != len("/model --apply ") {
+		t.Fatalf("replace range = %d..%d", got[0].ReplaceStart, got[0].ReplaceEnd)
+	}
+	if !strings.Contains(got[0].Description, "chat=openai/gpt-4o-mini") {
+		t.Fatalf("description = %q", got[0].Description)
+	}
+}
+
+// --apply 后面补的是快照名，不是模型名：有模型可选时也不能混进来。
+func TestModelCommandDoesNotCompleteModelNamesAfterApply(t *testing.T) {
+	models := &fakeModelService{
+		models:    []ModelOption{{Provider: "openai", Model: "gpt-4o"}},
+		snapshots: []ModelSnapshot{{Name: "cheap", Slots: []ModelSnapshotSlot{{Label: "chat", Provider: "openai", Model: "gpt-4o"}}}},
+	}
+	completer := NewModel(Deps{Models: models}).(command.Completer)
+	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --apply ", Prefix: "/", Name: "model", Args: "--apply ", Cursor: len("/model --apply ")})
+	if len(got) != 1 || got[0].Text != "cheap" {
+		t.Fatalf("completion after --apply = %#v", got)
+	}
+}
+
+func TestModelCommandSnapshotOptionsAreCompleted(t *testing.T) {
+	completer := NewModel(Deps{Models: &fakeModelService{}}).(command.Completer)
+	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --sna", Prefix: "/", Name: "model", Args: "--sna", Cursor: len("/model --sna")})
+	if len(got) != 1 || got[0].Text != "--snapshots" {
+		t.Fatalf("snapshot option completion = %#v", got)
+	}
+}
+
 func TestModelCommandCompletesElwispOptions(t *testing.T) {
-	completer := NewModel(Deps{Models: fakeModelService{}}).(command.Completer)
+	completer := NewModel(Deps{Models: &fakeModelService{}}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --elw", Prefix: "/", Name: "model", Args: "--elw", Cursor: len("/model --elw")})
 	if len(got) != 3 {
 		t.Fatalf("Complete elwisp options = %#v", got)
@@ -126,7 +294,7 @@ func TestModelCommandCompletesElwispOptions(t *testing.T) {
 }
 
 func TestModelCommandCompletesModelNames(t *testing.T) {
-	models := fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}, {Provider: "anthropic", Model: "claude-sonnet"}}}
+	models := &fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}, {Provider: "anthropic", Model: "claude-sonnet"}}}
 	completer := NewModel(Deps{Models: models}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model gp", Prefix: "/", Name: "model", Args: "gp", Cursor: len("/model gp")})
 	if len(got) != 1 {
@@ -138,7 +306,7 @@ func TestModelCommandCompletesModelNames(t *testing.T) {
 }
 
 func TestModelCommandCompletesModelAfterTargetOption(t *testing.T) {
-	models := fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}, {Provider: "anthropic", Model: "claude-sonnet"}}}
+	models := &fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}, {Provider: "anthropic", Model: "claude-sonnet"}}}
 	completer := NewModel(Deps{Models: models}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --chat cla", Prefix: "/", Name: "model", Args: "--chat cla", Cursor: len("/model --chat cla")})
 	if len(got) != 1 {
@@ -150,7 +318,7 @@ func TestModelCommandCompletesModelAfterTargetOption(t *testing.T) {
 }
 
 func TestModelCommandFuzzyCompletesAbbreviation(t *testing.T) {
-	models := fakeModelService{models: []ModelOption{{Provider: "deepseek", Model: "deepseek-v3"}, {Provider: "openai", Model: "gpt-4o"}}}
+	models := &fakeModelService{models: []ModelOption{{Provider: "deepseek", Model: "deepseek-v3"}, {Provider: "openai", Model: "gpt-4o"}}}
 	completer := NewModel(Deps{Models: models}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model dpsk", Prefix: "/", Name: "model", Args: "dpsk", Cursor: len("/model dpsk")})
 	if len(got) != 1 {
@@ -162,7 +330,7 @@ func TestModelCommandFuzzyCompletesAbbreviation(t *testing.T) {
 }
 
 func TestModelCommandDoesNotCompleteModelImmediatelyAfterOption(t *testing.T) {
-	models := fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}}}
+	models := &fakeModelService{models: []ModelOption{{Provider: "openai", Model: "gpt-4o"}}}
 	completer := NewModel(Deps{Models: models}).(command.Completer)
 	got := completer.Complete(context.Background(), command.CompletionRequest{Raw: "/model --chat", Prefix: "/", Name: "model", Args: "--chat", Cursor: len("/model --chat")})
 	if len(got) != 1 || got[0].Text != "--chat" {

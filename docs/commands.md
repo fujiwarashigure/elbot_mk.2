@@ -34,12 +34,20 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 | `/model --compact <模型>` | 切换上下文压缩模型。 |
 | `/model --naming <模型>` | 切换 Session 自动命名模型。 |
 | `/model --profiles` | 列出 `services.toml` 里的命名模型选择（`model_profiles` / `model_aliases`），并标注当前进程是否可用。 |
+| `/model --snapshots` | 列出已保存的命名模型快照与每个槽位。 |
+| `/model --save <名字>` | 把当前的整套模型选择（各模式 + 压缩 + 命名）存成命名快照，写在 `state.toml` 的 `[model_snapshots]`。 |
+| `/model --apply <名字>` | 按快照整套切回模型。 |
+| `/model --delete <名字>` | 删除命名快照。 |
 | `/checkmodel [关键词]` | 查看或搜索模型。 |
 
 模型参数可以是列表编号、模型名或 `provider/model`。
 
 `/model --profiles` 列出的名字可以直接用于 `@model:<名字>` 和群策略的 `default-model`；
 标注 `unavailable` 的名字表示它指向的 provider 在当前进程里没有可用客户端，配置存在但用不了。
+
+`/model --save` / `--apply` 操作的是**快照**，它记录的是"按模式/用途的一组模型"，和只固定一个模型的
+`model_profiles` 不是一回事，因此两者同名会被拒绝；在快照名后面可以直接用补全（`--apply` / `--delete`），
+不需要先去 `--snapshots` 里抄名字。快照的详细约束见 `configuration.md` 的"命名模型快照"。
 
 示例：
 
@@ -49,6 +57,10 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 /models --refresh
 /model 2
 /model --profiles
+/model --snapshots
+/model --save cheap
+/model --apply cheap
+/model --delete cheap
 /model --work deepseek/deepseek-chat
 /model --chat openai/gpt-4o-mini
 /model --elwisp2 openai/gpt-4.1

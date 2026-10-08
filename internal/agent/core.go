@@ -129,19 +129,24 @@ type Agent struct {
 	outputs                   delivery.Manager
 	namingModelMu             sync.RWMutex
 	namingModel               config.ModelSelection
-	statusMu                  sync.Mutex
-	runtimeStatus             map[string]runtimestatus.Snapshot
-	sessionCommands           *agentcommands.SessionCommandState
-	idleExpiration            session.IdleExpirationConfig
-	mediaRetentionDays        int
-	sandboxRoot               string
-	logger                    *slog.Logger
-	auditLogger               *slog.Logger
-	logReader                 logging.Reader
-	autoConfirmMu             sync.Mutex
-	autoConfirmSession        map[string]bool
-	autoConfirmTools          map[string]map[string]bool
-	visionFallbackMu          sync.Mutex
+	// modelSnapshots 是 state.toml [model_snapshots] 的内存副本：命名保存的一组模型
+	// 选择（`/model --save` / `--apply`）。它属于运行态，因此和 mode_models 一起
+	// 经过 saveRuntimeState / applyRuntimeState，并参与外部编辑热加载。
+	modelSnapshotsMu   sync.RWMutex
+	modelSnapshots     map[string]config.StateModelSnapshot
+	statusMu           sync.Mutex
+	runtimeStatus      map[string]runtimestatus.Snapshot
+	sessionCommands    *agentcommands.SessionCommandState
+	idleExpiration     session.IdleExpirationConfig
+	mediaRetentionDays int
+	sandboxRoot        string
+	logger             *slog.Logger
+	auditLogger        *slog.Logger
+	logReader          logging.Reader
+	autoConfirmMu      sync.Mutex
+	autoConfirmSession map[string]bool
+	autoConfirmTools   map[string]map[string]bool
+	visionFallbackMu   sync.Mutex
 
 	visionFallbackNotified  map[string]bool
 	responseTimeout         time.Duration

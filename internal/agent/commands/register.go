@@ -80,6 +80,21 @@ type ModelProfile struct {
 	Available bool
 }
 
+// ModelSnapshotSlot 是命名快照里的一个槽位：模式名（chat / work / elwisp1…）或用途
+// （compact / naming），以及它指向的 provider/model。
+type ModelSnapshotSlot struct {
+	Label    string
+	Provider string
+	Model    string
+}
+
+// ModelSnapshot 是一组命名保存的模型选择（`/model --save`）：与 model_profiles 不同，
+// profile 只固定一个模型，快照记录的是"按模式/用途的一组模型"。
+type ModelSnapshot struct {
+	Name  string
+	Slots []ModelSnapshotSlot
+}
+
 type ModelService interface {
 	CurrentModel() string
 	CurrentProvider() string
@@ -96,6 +111,12 @@ type ModelService interface {
 	// ModelProfiles 列出命名模型选择，让操作者能看到有哪些名字可用（而不必去翻
 	// services.toml 的注释）。
 	ModelProfiles() []ModelProfile
+	// ModelSnapshots / SaveModelSnapshot / ApplyModelSnapshot / DeleteModelSnapshot 是
+	// 命名模型快照的读写入口，快照本身保存在 state.toml。
+	ModelSnapshots() []ModelSnapshot
+	SaveModelSnapshot(name string) error
+	ApplyModelSnapshot(name string) (ModelSnapshot, error)
+	DeleteModelSnapshot(name string) error
 }
 
 type ContextStatusService interface {

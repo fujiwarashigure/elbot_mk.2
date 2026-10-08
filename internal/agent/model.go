@@ -130,6 +130,9 @@ func (a *Agent) SelectCompactModel(arg string) (agentcommands.ModelOption, error
 	if err != nil {
 		return agentcommands.ModelOption{}, err
 	}
+	// 改内存前先吸收外部对 state.toml 的编辑：saveRuntimeState 会用文件里的分片覆盖内存，
+	// 先改再合并会把这次切换丢掉，而命令已经报成功（见 mergeExternalRuntimeState）。
+	a.mergeExternalRuntimeState()
 	a.contextRuntime.setCompactModel(config.ModelSelection{Provider: selected.Provider, Model: selected.Model})
 	selected.Compact = true
 	if a.statePath != "" {
@@ -145,6 +148,7 @@ func (a *Agent) SelectNamingModel(arg string) (agentcommands.ModelOption, error)
 	if err != nil {
 		return agentcommands.ModelOption{}, err
 	}
+	a.mergeExternalRuntimeState()
 	a.setNamingModel(config.ModelSelection{Provider: selected.Provider, Model: selected.Model})
 	selected.Naming = true
 	if a.titleGen != nil {
@@ -167,7 +171,8 @@ func (a *Agent) SelectModelForMode(mode, arg string) (agentcommands.ModelOption,
 	if err != nil {
 		return agentcommands.ModelOption{}, err
 	}
-
+	// 与 SelectCompactModel 同理：先合并外部编辑，再改内存。
+	a.mergeExternalRuntimeState()
 	if err := a.applyModeModelSelection(mode, selected.Provider, selected.Model); err != nil {
 		return agentcommands.ModelOption{}, err
 	}
@@ -671,6 +676,7 @@ func (a *Agent) applyRuntimeState(state *config.StateConfig) error {
 		}
 	}
 	a.setContextOverflowSnapshot(state.ContextOverflow)
+	a.setModelSnapshotsSnapshot(state.ModelSnapshots)
 	a.setGroupPolicySnapshot(state.GroupPolicy)
 	a.setGroupKnowledgeSnapshot(normalizeGroupKnowledgeSnapshot(state.GroupKnowledge, a.groupKnowledgeCfg))
 	a.setGroupServicesSnapshot(normalizeGroupServicesSnapshot(state.GroupServices, a.groupServicesCfg))
@@ -685,6 +691,7 @@ var runtimeStateSections = []string{
 	"mode_models",
 	"compact_model",
 	"naming_model",
+	"model_snapshots",
 	"context_overflow",
 	"group_policy",
 	"group_knowledge",
@@ -697,6 +704,7 @@ func (a *Agent) runtimeStateDigest() map[string]string {
 		"mode_models":      runtimeStateDigestOf(a.modeModelsSnapshot()),
 		"compact_model":    runtimeStateDigestOf(a.contextRuntime.configuredCompactModel()),
 		"naming_model":     runtimeStateDigestOf(a.configuredNamingModel()),
+		"model_snapshots":  runtimeStateDigestOf(a.modelSnapshotsSnapshot()),
 		"context_overflow": runtimeStateDigestOf(a.contextOverflowSnapshot()),
 		"group_policy":     runtimeStateDigestOf(a.groupPolicySnapshot()),
 		"group_knowledge":  runtimeStateDigestOf(a.groupKnowledgeSnapshot()),
@@ -723,6 +731,27 @@ func changedRuntimeStateSections(before, after map[string]string) []string {
 	return changed
 }
 
+// mergeExternalRuntimeState 吸收外部对 state.toml 的编辑。
+//
+// 调用时机必须在**本地改动内存之前**：refreshRuntimeState 会用文件里的分片覆盖内存，
+// 如果先改内存再合并，"改内存 → 合并（被文件覆盖）→ 落盘"会把手上的改动悄悄丢掉，
+// 而命令已经报成功。因此写入者先合并、再改内存、最后 saveRuntimeState。
+func (a *Agent) mergeExternalRuntimeState() {
+	if a.statePath == "" {
+		return
+	}
+	reload, err := a.refreshRuntimeState(false)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("reload externally edited state config", "path", a.statePath, "error", err.Error())
+		}
+		return
+	}
+	if reload.Applied && len(reload.Changed) > 0 {
+		a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "write_back", "result", logging.ResultSucceeded)
+	}
+}
+
 // saveRuntimeState 把运行态写回 state.toml。
 //
 // stateWriteMu 覆盖"先合并外部修改、再取快照、最后落盘"的**全过程**：state.toml 是单个
@@ -739,13 +768,7 @@ func (a *Agent) saveRuntimeState() error {
 	// Merge an external edit before writing back, otherwise this process would
 	// overwrite a change an operator just made to state.toml. Lost updates are
 	// not recoverable afterwards, so the merge must happen before the snapshot.
-	if reload, err := a.refreshRuntimeState(false); err != nil {
-		if a.logger != nil {
-			a.logger.Warn("reload externally edited state config", "path", a.statePath, "error", err.Error())
-		}
-	} else if reload.Applied && len(reload.Changed) > 0 {
-		a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "write_back", "result", logging.ResultSucceeded)
-	}
+	a.mergeExternalRuntimeState()
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 	now := time.Now()
@@ -758,6 +781,7 @@ func (a *Agent) saveRuntimeState() error {
 		ModeModels:      a.modeModelsSnapshot(),
 		CompactModel:    a.contextRuntime.configuredCompactModel(),
 		NamingModel:     a.configuredNamingModel(),
+		ModelSnapshots:  a.modelSnapshotsSnapshot(),
 		ContextOverflow: a.contextOverflowSnapshot(),
 		GroupPolicy:     a.groupPolicySnapshot(),
 		GroupKnowledge:  a.groupKnowledgeSnapshot(),

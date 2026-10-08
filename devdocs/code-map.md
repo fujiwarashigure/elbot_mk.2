@@ -376,7 +376,8 @@ rg -n "ContextLoader|Compress|Window|System Prompt|MessageSegment|usage" interna
 
 - `internal/llm/`：LLM 抽象和 MessageSegment。
 - `internal/llm/openai/`：OpenAI-compatible adapter。`openai.go` 是 Chat Completions 适配器（`{base_url}/chat/completions`），`responses.go` 是 Responses 适配器（`{base_url}/responses`，内嵌前者以复用重试、`/models`、SSE 行扫描与 `parseError` 错误分类，只替换请求信封和流式事件翻译）；`[providers.*].api_mode` 决定用哪个，两者对上层输出同一套 `llm.StreamChunk`。
-- `internal/agent/model.go`：模型运行态、模型切换、provider client 缓存；`Agent.ModelProfiles()` 把 `services.toml` 的 `model_profiles` / `aliases` 汇成 `/model --profiles` 的列表（按别名键列出用户实际输入的名字，`Available` 反映 provider 在当前进程里有没有 client）。
+- `internal/agent/model.go`：模型运行态、模型切换、provider client 缓存；`Agent.ModelProfiles()` 把 `services.toml` 的 `model_profiles` / `aliases` 汇成 `/model --profiles` 的列表（按别名键列出用户实际输入的名字，`Available` 反映 provider 在当前进程里有没有 client）；`mergeExternalRuntimeState` 是所有 `state.toml` 写入者必须先调用的合并入口（先合并外部编辑、再改内存、最后 `saveRuntimeState`）。
+- `internal/agent/model_snapshot.go`：命名模型快照（`/model --save` / `--snapshots` / `--apply` / `--delete`）。快照是 `state.toml [model_snapshots]`（`config.StateModelSnapshot`：各模式 + compact + naming），内存副本由 `modelSnapshotsMu` 保护，与 `mode_models` 一起走 `applyRuntimeState` / `saveRuntimeState` / `runtimeStateDigest`；名字校验与"不与静态 profile 同名"的约束也在这里。
 - `internal/agent/chat_llm.go`：Agent LLM 调用适配。
 
 常用搜索：
