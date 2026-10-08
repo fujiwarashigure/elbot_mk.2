@@ -222,6 +222,8 @@ type Deps struct {
 	// FileBackups keeps the pre-edit content of files ElBot edited, so
 	// /rollback can undo the latest edit of each file in the current Session.
 	FileBackups *fileops.RollbackStore
+	// Doctor runs the read-only configuration check behind /doctor.
+	Doctor DoctorService
 }
 
 func RegisterFactories(registrar Registrar, deps Deps, factories ...HandlerFactory) error {
@@ -255,6 +257,7 @@ func DefaultModules() []Module {
 		GroupServicesModule{},
 		RequestModule{},
 		FileModule{},
+		DoctorModule{},
 		LogModule{},
 		ToolModule{},
 		CharacterModule{},

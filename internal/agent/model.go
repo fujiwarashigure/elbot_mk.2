@@ -147,7 +147,7 @@ func (a *Agent) SelectNamingModel(arg string) (agentcommands.ModelOption, error)
 	a.setNamingModel(config.ModelSelection{Provider: selected.Provider, Model: selected.Model})
 	selected.Naming = true
 	if a.titleGen != nil {
-		a.titleGen.setNaming(a.clientForProvider(selected.Provider), selected.Model)
+		a.titleGen.setNaming(a.clientForProvider(selected.Provider), selected.Provider, selected.Model)
 	}
 	if a.statePath != "" {
 		if err := a.saveRuntimeState(); err != nil {
@@ -494,6 +494,11 @@ func (a *Agent) attachLLMRetryNotifier(client llm.LLM, providerName string) {
 		}
 		a.recordProviderRetry(ctx, providerName)
 		safe := redact.Summarize(event.Err.Error(), maxUserErrorRunes)
+		// The retry must leave a trace even when no notice can be delivered
+		// (service mode, blocked target, expired notice window).
+		if a.logger != nil {
+			a.logger.WarnContext(ctx, "model call retry", "event", "model_retry", "provider", providerName, "retry_attempt", event.Attempt, "max_retries", event.MaxRetries, "delay_ms", event.Delay.Milliseconds(), "error", safe)
+		}
 		text := fmt.Sprintf("LLM 请求失败，正在重试 %d/%d（%s 后）：%s", event.Attempt, event.MaxRetries, event.Delay.Round(time.Millisecond), safe)
 		if providerName != "" {
 			text = fmt.Sprintf("LLM 请求失败，正在重试 %d/%d（provider=%s，%s 后）：%s", event.Attempt, event.MaxRetries, providerName, event.Delay.Round(time.Millisecond), safe)
@@ -619,7 +624,7 @@ func (a *Agent) applyRuntimeState(state *config.StateConfig) error {
 	if state.NamingModel.Provider != "" && state.NamingModel.Model != "" {
 		a.setNamingModel(state.NamingModel)
 		if a.titleGen != nil {
-			a.titleGen.setNaming(a.clientForProvider(state.NamingModel.Provider), state.NamingModel.Model)
+			a.titleGen.setNaming(a.clientForProvider(state.NamingModel.Provider), state.NamingModel.Provider, state.NamingModel.Model)
 		}
 	}
 	a.setContextOverflowSnapshot(state.ContextOverflow)

@@ -220,7 +220,10 @@ func (a *Agent) cachedToolsForSession(session *storage.Session) []toolrun.Cached
 		}
 		if t, ok := a.toolRuntime.registry.Get(name); ok {
 			schema := t.Schema()
-			cached = append(cached, toolrun.CachedTool{Name: name, Source: toolrun.SourceKindNative, Description: t.Info().Description, Schema: schema})
+			info := t.Info()
+			// Keep the availability flags: rebuilding the cache without them
+			// would let a foreground-only tool reach a background session.
+			cached = append(cached, toolrun.CachedTool{Name: name, Source: toolrun.SourceKindNative, Description: info.Description, Schema: schema, ForegroundOnly: info.ForegroundOnly})
 		}
 	}
 	return toolrun.NormalizeCachedTools(cached)

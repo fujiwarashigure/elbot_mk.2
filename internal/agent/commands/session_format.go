@@ -138,8 +138,10 @@ func recentConversationMessages(ctx context.Context, deps Deps, sessionID string
 	return out
 }
 
+// previewContent renders one history message for /resume and /fork. Each
+// preview is capped so one long message cannot flood the reply.
 func previewContent(text string) string {
-	return strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	return truncateRunes(strings.TrimSpace(strings.ReplaceAll(text, "\n", " ")), historyPreviewRunes)
 }
 
 func assistantMessages(messages []storage.Message) []storage.Message {

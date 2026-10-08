@@ -87,7 +87,8 @@ func (a *Agent) notifyHook(ctx context.Context, event hook.Event) {
 	}
 	event = a.fillHookContext(ctx, event)
 	if err := manager.Notify(ctx, event); err != nil {
-		a.logHookError(event.Point, err)
+		// The hook manager already logged the failure with its rule context;
+		// logging it here again would duplicate the same error.
 		if errors.Is(err, context.Canceled) {
 			return
 		}
@@ -171,12 +172,14 @@ func trimHookNoticeText(text string) string {
 func (a *Agent) NotifyPlatformConnected(ctx context.Context, platformName string) {
 	event, err := a.runHook(ctx, hook.Event{Point: hook.PointPlatformConnected, Platform: hook.PlatformContext{Name: platformName}})
 	if err != nil {
-		a.logHookError(hook.PointPlatformConnected, err)
+		// The hook manager already logged the failure.
 		return
 	}
 	if len(event.Outputs) > 0 {
 		if err := a.sendOutputs(ctx, event.Outputs); err != nil {
-			a.logHookError(hook.PointPlatformConnected, err)
+			if a.logger != nil {
+				a.logger.WarnContext(ctx, "hook notice send failed", slog.String("point", string(hook.PointPlatformConnected)), slog.String("error", err.Error()))
+			}
 		}
 	}
 }

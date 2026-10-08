@@ -286,10 +286,6 @@ func parseAuditQuery(args string) (logging.LogQuery, error) {
 		fields["event"] = "assistant_message"
 	}
 
-	if len(query.FieldExists) > 0 {
-		query.FieldExists = nil
-		fields["event"] = "hook"
-	}
 	query.Fields = fields
 	return query, nil
 }
@@ -457,7 +453,9 @@ func parseLogArgsWithOptions(args string, query *logging.LogQuery, fields map[st
 			if !opts.eventFilters {
 				return fmt.Errorf("unknown option: %s", name)
 			}
-			query.FieldExists = append(query.FieldExists, "hook")
+			// Hook records are identified by their module, not by a fictitious
+			// event name; combining with --event must keep that event filter.
+			fields["module"] = "hook"
 		case "--msg":
 			value, err := nextArg(parts, &i, name)
 			if err != nil {

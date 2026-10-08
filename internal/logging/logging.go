@@ -31,7 +31,10 @@ func NewManager(level, sqlitePath string, retentionDays int) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	audit, auditWriter, err := newPrefixedFile(level, sqlitePath, "audit")
+	// Audit records (usage facts, naming diagnostics, hook tool calls) must
+	// survive a runtime level above info, so the audit file keeps its own floor.
+	auditLevel := auditFloorLevel(level)
+	audit, auditWriter, err := newPrefixedFile(auditLevel, sqlitePath, "audit")
 	if err != nil {
 		_ = runtimeWriter.Close()
 		return nil, err
@@ -268,4 +271,13 @@ func parseLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// auditFloorLevel keeps audit records (usage facts, naming diagnostics, hook
+// tool calls) even when the runtime level is warn or error.
+func auditFloorLevel(level string) string {
+	if parseLevel(level) > slog.LevelInfo {
+		return "info"
+	}
+	return level
 }

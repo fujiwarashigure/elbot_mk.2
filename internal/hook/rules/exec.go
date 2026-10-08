@@ -339,7 +339,7 @@ func (m Module) handleProtocolRequest(ctx context.Context, event hook.Event, act
 		if !ok || caller == nil {
 			return nil, fmt.Errorf("platform %q does not support api calls", platformName)
 		}
-		m.audit("hook.platform_call", "platform", platformName, "api", api, "rule", firstNonEmpty(action.source.FinalName, action.ActionName))
+		m.audit("hook.platform_call", "module", "hook", "platform", platformName, "api", api, "rule", firstNonEmpty(action.source.FinalName, action.ActionName))
 		resp, err := caller.CallPlatformAPI(ctx, api, callParams)
 		if err != nil {
 			return nil, err

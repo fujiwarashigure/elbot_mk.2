@@ -9,6 +9,9 @@ import (
 
 type namingLogger struct {
 	logger *slog.Logger
+	// audit keeps naming failures in the audit file, which is not filtered by
+	// the runtime log level.
+	audit func(event string, attrs ...any)
 }
 
 func (n namingLogger) NotifyNamingScheduled(ctx context.Context, event session.NamingScheduledEvent) {
@@ -34,6 +37,17 @@ func (n namingLogger) NotifyNamingCompleted(ctx context.Context, event session.N
 }
 
 func (n namingLogger) NotifyNamingFailed(ctx context.Context, event session.NamingFailedEvent) {
+	if n.audit != nil {
+		n.audit("session_naming_failed",
+			"session_id", event.SessionID,
+			"stage", event.Stage,
+			"llm_call", event.LLMCall,
+			"reason", event.Reason,
+			"failure_count", event.FailureCount,
+			"fallback_applied", event.FallbackApplied,
+			"error", event.Err,
+		)
+	}
 	if n.logger == nil {
 		return
 	}

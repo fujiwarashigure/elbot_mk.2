@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -46,6 +47,12 @@ func CheckConfig(configPath string) (string, error) {
 		report.Enabled, report.Schedule, report.WindowHours, report.Provider))
 
 	warnings := checkConfigWarnings(cfg)
+	if keys, err := config.UnknownAppConfigKeys(cfg.ConfigPath); err != nil {
+		warnings = append(warnings, "无法检查主配置未知字段："+err.Error())
+	} else if len(keys) > 0 {
+		warnings = append(warnings, "主配置存在未知字段（可能拼写错误或被忽略）："+strings.Join(keys, ", "))
+	}
+	warnings = append(warnings, config.BuiltinAssetDrift(filepath.Dir(cfg.ConfigPath))...)
 	if len(warnings) == 0 {
 		b.WriteString("warnings: none\n")
 	} else {

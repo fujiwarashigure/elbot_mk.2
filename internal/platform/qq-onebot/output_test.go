@@ -57,31 +57,54 @@ func TestSendNoticeKeepsPrivateToolPreview(t *testing.T) {
 	}
 }
 
-func TestSendContextTextReturnsPartialReceiptOnLaterPageFailure(t *testing.T) {
-	var calls atomic.Int64
+func TestSendContextTextSendsLongTextAsMergedForward(t *testing.T) {
+	requests := make(chan request, 2)
 	transport := newTestTransport(t, func(req request) response {
-		n := calls.Add(1)
-		if n == 3 {
-			return response{Status: "failed", Retcode: 100, Data: []byte(`{}`), Echo: req.Echo}
+		select {
+		case requests <- req:
+		default:
 		}
-		return response{Status: "ok", Data: []byte(fmt.Sprintf(`{"message_id":%d}`, n)), Echo: req.Echo}
+		return response{Status: "ok", Data: []byte(`{"message_id":77}`), Echo: req.Echo}
 	})
 	adapter := New(Config{Enabled: true, URL: transport.URL}, nil, nil, nil)
 	adapter.transport = transport
 	ctx := context.WithValue(context.Background(), targetKey{}, target{MessageType: "group", GroupID: 9})
 
 	receipt, err := adapter.sendContextText(ctx, strings.Repeat("a", qqTextPageRunes*3))
+	if err != nil {
+		t.Fatalf("sendContextText: %v", err)
+	}
+	if len(receipt.PlatformMessageIDs) != 1 || receipt.PlatformMessageIDs[0] != "77" {
+		t.Fatalf("receipt = %#v, want the merged-forward message id", receipt)
+	}
+	select {
+	case req := <-requests:
+		if req.Action != "send_group_forward_msg" {
+			t.Fatalf("action = %q, want send_group_forward_msg", req.Action)
+		}
+		nodes, _ := req.Params["messages"].([]any)
+		if len(nodes) != 3 {
+			t.Fatalf("forward nodes = %#v", req.Params["messages"])
+		}
+	default:
+		t.Fatal("no transport request was sent")
+	}
+}
+
+func TestSendContextTextReportsMergedForwardFailure(t *testing.T) {
+	transport := newTestTransport(t, func(req request) response {
+		return response{Status: "failed", Retcode: 100, Data: []byte(`{}`), Echo: req.Echo}
+	})
+	adapter := New(Config{Enabled: true, URL: transport.URL}, nil, nil, nil)
+	adapter.transport = transport
+	ctx := context.WithValue(context.Background(), targetKey{}, target{MessageType: "group", GroupID: 9})
+
+	receipt, err := adapter.sendContextText(ctx, strings.Repeat("a", qqTextPageRunes*2))
 	if err == nil {
-		t.Fatal("expected page 3 failure")
+		t.Fatal("expected the merged forward to fail")
 	}
-	if !receipt.Failed {
-		t.Fatalf("receipt should be marked failed: %#v", receipt)
-	}
-	if !strings.Contains(receipt.Failure, "page 3/3") {
-		t.Fatalf("failure = %q", receipt.Failure)
-	}
-	if len(receipt.PlatformMessageIDs) != 2 {
-		t.Fatalf("partial receipt = %#v", receipt.PlatformMessageIDs)
+	if len(receipt.PlatformMessageIDs) != 0 {
+		t.Fatalf("receipt = %#v", receipt)
 	}
 }
 

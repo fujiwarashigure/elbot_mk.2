@@ -204,7 +204,10 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	req.Profiler.Mark("skill reload scheduled")
 
 	hooks := hook.NewManager()
-	hooks.SetLogger(logger)
+	// Every hook-module log carries module=hook, which is what /log --hook and
+	// /audit --hook filter on.
+	hookLogger := logger.With("module", "hook")
+	hooks.SetLogger(hookLogger)
 	securityPolicy := security.NewPolicy(cfg.Security.UserMaxToolRisk, cfg.Security.SuperadminConfirmRisk, cfg.Security.Superadmins)
 	elvenaBus := elvena.NewBus()
 
@@ -220,7 +223,7 @@ func (defaultRuntimeFactory) Build(ctx context.Context, req RuntimeRequest) (*Ru
 	hookRuntime := hookruntime.NewManager(hookruntime.Options{
 		Media:      mediaCenter,
 		Registry:   toolRuntime.Registry,
-		Logger:     logger,
+		Logger:     hookLogger,
 		Audit:      auditFunc(foundation.Logs),
 		Send:       sendNotice,
 		SharedDir:  filepath.Join(config.PluginConfigDir(cfg.ConfigPath), "_shared"),
@@ -492,7 +495,7 @@ func buildAgent(
 		CommandPrefixes:        cfg.Commands.Prefixes,
 		SessionConfig:          session.Config{NamingConfig: session.NamingConfig{TriggerStep: cfg.Session.Naming.TriggerStep}, DefaultMode: cfg.Session.DefaultMode},
 		NamingSelection:        cfg.NamingModel,
-		NamingNotifier:         namingLogger{logger: foundation.Logger},
+		NamingNotifier:         namingLogger{logger: foundation.Logger, audit: auditFunc(foundation.Logs)},
 		SoulPath:               cfg.Soul.Path,
 		ResidentMemoryStore:    toolRuntime.ResidentMemoryStore,
 		AngelMemory:            toolRuntime.AngelMemory,
@@ -510,6 +513,7 @@ func buildAgent(
 		Logs:                   foundation.Logs,
 		ToolRegistry:           toolRuntime.Registry,
 		FileBackups:            fileBackups,
+		Doctor:                 doctorService{configPath: cfg.ConfigPath},
 		Skills:                 toolRuntime.SkillManager,
 		SecurityPolicy:         securityPolicy,
 		ContextConfig:          cfg.Context,

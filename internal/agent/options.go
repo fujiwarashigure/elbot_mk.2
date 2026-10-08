@@ -81,7 +81,9 @@ type Options struct {
 	ToolRegistry        *tool.Registry
 	// FileBackups keeps the pre-edit content of files ElBot edited, so
 	// /rollback can undo them within the current Session.
-	FileBackups           *fileops.RollbackStore
+	FileBackups *fileops.RollbackStore
+	// Doctor runs the read-only configuration check behind /doctor.
+	Doctor                agentcommands.DoctorService
 	Skills                SkillLifecycle
 	ToolProvider          ToolSchemaProvider
 	SecurityPolicy        *security.Policy

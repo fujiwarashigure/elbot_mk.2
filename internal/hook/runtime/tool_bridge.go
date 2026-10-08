@@ -106,7 +106,7 @@ func (w *worker) callTool(raw json.RawMessage) (any, error) {
 		if params.Background {
 			invocation = params.Origin
 		}
-		w.manager.opts.Audit("hook.tool_call", "hook", w.config.ID, "invocation", invocation, "tool", name, "status", status, "elapsed_ms", time.Since(started).Milliseconds(), "platform", actor.Platform, "user_id", actor.PlatformUserID)
+		w.manager.opts.Audit("hook.tool_call", "module", "hook", "hook", w.config.ID, "invocation", invocation, "tool", name, "status", status, "elapsed_ms", time.Since(started).Milliseconds(), "platform", actor.Platform, "user_id", actor.PlatformUserID)
 	}
 	if err != nil {
 		return nil, err

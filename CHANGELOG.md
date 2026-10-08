@@ -2,6 +2,8 @@
 
 ### Added
 
+- 新增仅超级管理员可用的 `/doctor`：只读检查当前配置的加载错误与缺失项、`app.toml` 未知字段（拼写错误不再被静默忽略）、内置 Skill 文件与默认版本的缺失/差异，逐条列出；无问题回复 `Everything is OK`，不修改任何文件、不调用模型。
+- QQ OneBot 超长回复（超过 3000 rune）从“拆成多条消息”改为**一条合并转发**：每页一个 `node`，用 `send_group_forward_msg` / `send_private_forward_msg` 发送，分页不再附加 `……（N/M）` 标记；引用回复里的合并转发会展开一层内容并保留“转发内容为引用”标记。
 - 新增文件回滚：`edit_file` 每次成功写入前在进程内保留该文件上一版内容（每个文件只保留最近一次，按 Session 隔离，上限 1024 条 / 256 MiB，超出淘汰最旧），新增仅超级管理员可用的 `/rollback [编号]` 与内置工具 `rollback_file`（发现 `read_file` / `edit_file` 时自动展开，可用 `@tool:rollback_file` 预载）。回滚会校验文件自编辑后未被改动，Shell 或外部程序的修改一律拒绝覆盖并提示未回滚；新建文件被回滚时直接删除；记录在切换 Session、重启进程或容量淘汰后失效。
 - 新增 `view_image` 内置工具：把图片本身交给模型，而不是只给地址。`source` 传媒体 ID、HTTP(S) URL 或本地路径（本地路径仅超级管理员，读取敏感文件走高风险确认），或用 `message_id`（可带 `#`）+ `media_index` 取当前聊天历史里的图片，省略 `media_index` 时取每条消息的首张图片；单次最多 5 次未入库媒体下载尝试，失败只返回文本提示，不回显上游错误。
 - 工具新增按模型能力可用：`tool.Info.VisionRequired` + 请求上下文里的 `tool.Capabilities`。声明 `vision = false` 的 Provider 或模型（`[providers.*].vision` / `model_configs.<model>.vision`）在当前 work Session 中不会发现、预载或执行 `view_image`；未声明能力（`VisionUnknown`）时保持原有行为。`view_image` 是第一个使用该机制的工具。
@@ -23,6 +25,12 @@
 
 ### Fixed
 
+- 修复后台任务的工具白名单可被绕过：此前 `toolrun.Resolve` 在缓存未命中时回落到全局 registry，后台任务按名字仍能解析并执行未预载的工具（包括本应禁止的 `discover_tool`）；现在后台上下文不再回落，`discover_tool` / `workspace` 一律不可用，`Schemas` 也按同一白名单过滤，外部声明的 `tool_cache` 在写入后台会话前先过滤。
+- 修复工具缓存重建时丢失 `ForegroundOnly` 标记：从会话 metadata 的 `discovered_tools` 重建 `toolrun.CachedTool` 时现在带上 `ForegroundOnly`，前台专用工具不会再进入后台会话。
+- 修复模型重试只在用户通知里可见的问题：重试现在同时写一条运行日志（`event=model_retry`，含 provider、次数、延迟与脱敏错误），服务模式或通知目标被屏蔽时也能在 `/log` 里看到。
+- 修复一次 Hook 失败被记录两次的问题：Hook 失败统一由 Hook 管理器记录（含规则、point 与 error），Agent 侧不再重复写同一条 `hook error`；平台连接通知的发送失败改为独立的 `hook notice send failed` 记录。
+- 修复审计日志被运行时等级过滤的问题：`audit-*.log` 独立保留下限（至少 info），`log_level=warn/error` 时用量事实与命名失败诊断不再丢失。
+- 修复模型重试与命名的诊断缺失：专门命名模型失败此前被完全静默吞掉，现在记录 `event=session_naming_failed`（含 provider/model 与脱敏错误）；命名失败同时写入审计事件 `session_naming_failed`。
 - 文档型 AgentSkill 的详情此前向所有角色都追加 `agent_skill_creator` 引导；现在只有超级管理员可见：`tool.LazyDetailProvider.LoadDetail` 与 `Registry.DiscoverDetails` 改为透传带 actor 的 context，`discover_tool`、`@skill:` 预载与后台预载三条路径都显式传入 actor，普通用户或身份缺失时不再出现该引导（`ELBOT_SKILL.toml` 无效提示仍对所有角色保留）。
 - 修复 `/stop` 的越权：此前任何用户都能用 `/stop <request_id>` 或 `/requests` 显示的编号停止进程内其它会话的请求，Tab 补全也会把所有人的 request ID 列出来。现在普通用户的可停止集合、编号解析和补全都限定在自己当前 Session 的请求，只有超级管理员保留全局视角；`/requests`、`/stopall` 仍为超级管理员专用。
 - 修复唤醒词、工具/技能/角色指令与命令续接剥离时把整条消息的全部文字段合并成一段并插到首个文字段位置的问题；现在只改写实际变化的文字区间，段间的图片与文件段保持原位置和原始顺序。
@@ -33,6 +41,8 @@
 
 ### Changed
 
+- `/resume` 与 `/fork` 返回的历史消息预览现在每条最多保留 200 个 Unicode 字符（超出加 `...`），单条长消息不再整段进入回复；`/messages` 的 40 字预览不变。
+- `/log --hook` 与 `/audit --hook` 改为筛选 `module=hook` 记录，不再使用并不存在的 `event=hook`；`--hook` 也不再覆盖同一命令里已经给出的 `--event` 筛选。Hook 运行日志与 Hook 审计事件现在统一带 `module=hook`。
 - 清理 v0.6.8 里“额度账本不含 token/货币与每用户/全局预算”的阶段性旧描述，改为与四维 token/费用账本一致的能力说明。
 - 命令前缀默认值由 `/*` 改为 `/`：`internal/command` 的 `defaultCommandPrefix`、`internal/agent` 与 `internal/platform` 的兜底前缀、`internal/config` 的运行时默认值和内置 `app.toml` 模板，以及 `deploy/data/config/elbot/app.toml` 全部切到 `/`；仓库内 `docs/*.md` 的命令示例也同步替换为 `/`（只保留 `notes/*.md`、`/plugins/*` 这类真正的通配符写法）。已有部署若在 `app.toml` 显式保留 `prefixes = ["/*"]` 则行为不变，配置里出现了什么前缀就仍按什么前缀解析。`docs.en/`、`README.md`、`README.zh-CN.md` 以及本文件的历史条目未同步替换。
 - `image_to_prompt`、`image_generate`、`angel_remember` 三个内置工具的风险等级由 `medium` 降为 `low`，在默认 `[security] user_max_tool_risk = "low"` 下普通用户即可调用，不再需要整体放宽工具风险上限。`image_generate` 仍额外受 `[image_generation] superadmin_only` 约束，只有该开关为 `false` 时才真正对普通用户开放；两个生图相关工具和长期记忆写入都建议同时配置群级额度（`image-quota` / `user-image-quota` / `vision-quota` / `user-vision-quota`）。

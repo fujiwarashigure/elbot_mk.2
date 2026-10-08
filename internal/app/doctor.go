@@ -26,6 +26,48 @@ import (
 
 const defaultDoctorTimeout = 60 * time.Second
 
+// doctorService backs the /doctor chat command with the deterministic config and
+// local-dependency checks, skipping the model probe so a slash command never
+// spends tokens.
+type doctorService struct {
+	configPath string
+}
+
+func (d doctorService) Doctor(ctx context.Context) (string, error) {
+	report, err := RunDoctor(ctx, DoctorOptions{ConfigPath: d.configPath, SkipModel: true, Timeout: 20 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	return formatDoctorReport(report), nil
+}
+
+// formatDoctorReport renders the read-only check for chat: every failed item,
+// or "Everything is OK" when nothing is wrong.
+func formatDoctorReport(report DoctorReport) string {
+	failed := make([]DoctorCheck, 0, len(report.Checks))
+	for _, check := range report.Checks {
+		if check.Status == "failed" {
+			failed = append(failed, check)
+		}
+	}
+	if len(failed) == 0 {
+		return "Everything is OK"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "配置检查发现 %d 个问题：", len(failed))
+	for _, check := range failed {
+		fmt.Fprintf(&sb, "\n- [%s] %s", check.Category, check.Name)
+		if strings.TrimSpace(check.Detail) != "" {
+			sb.WriteString("：" + check.Detail)
+		}
+		if strings.TrimSpace(check.Error) != "" {
+			sb.WriteString("：" + check.Error)
+		}
+	}
+	sb.WriteString("\n\n请按上面的条目修复配置；本命令只读，不会修改任何文件。")
+	return sb.String()
+}
+
 // errHealthzDisabled marks the secure default where /healthz is not registered
 // because no ops token is configured.
 var errHealthzDisabled = errors.New("/healthz is disabled because no ops token is configured")

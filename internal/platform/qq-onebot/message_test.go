@@ -67,14 +67,14 @@ func TestQQTextPagesSplitsLongText(t *testing.T) {
 	if len(pages) != 3 {
 		t.Fatalf("page count = %d", len(pages))
 	}
-	if !strings.HasSuffix(pages[0], "……（1/3）") || !strings.HasSuffix(pages[1], "……（2/3）") || !strings.HasSuffix(pages[2], "……（3/3）") {
-		t.Fatalf("pages = %#v", pages)
+	if got := len([]rune(pages[0])); got != qqTextPageRunes {
+		t.Fatalf("first page runes = %d", got)
 	}
-	if got := len([]rune(strings.TrimSuffix(pages[0], "……（1/3）"))); got != qqTextPageRunes {
-		t.Fatalf("first page body runes = %d", got)
+	if got := len([]rune(pages[2])); got != 1 {
+		t.Fatalf("last page runes = %d", got)
 	}
-	if got := len([]rune(strings.TrimSuffix(pages[2], "……（3/3）"))); got != 1 {
-		t.Fatalf("last page body runes = %d", got)
+	if strings.Contains(strings.Join(pages, ""), "……") {
+		t.Fatalf("pages must not carry pagination markers: %#v", pages)
 	}
 }
 
@@ -83,7 +83,7 @@ func TestQQTextPagesSplitsChineseRunes(t *testing.T) {
 	if len(pages) != 2 {
 		t.Fatalf("page count = %d", len(pages))
 	}
-	if !strings.HasPrefix(pages[1], "芙……（2/2）") {
+	if pages[1] != "芙" {
 		t.Fatalf("second page = %q", pages[1])
 	}
 }

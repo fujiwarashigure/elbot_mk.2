@@ -2,11 +2,14 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
 	"elbot/internal/llm"
+	"elbot/internal/redact"
 	"elbot/internal/session"
 	"elbot/internal/storage"
 )
@@ -17,6 +20,8 @@ type titleGenerator struct {
 	primaryModel string
 	naming       llm.LLM
 	namingModel  string
+	namingSource string
+	logger       *slog.Logger
 }
 
 func (g *titleGenerator) GenerateTitle(ctx context.Context, messages []storage.Message) (session.TitleResult, error) {
@@ -24,12 +29,22 @@ func (g *titleGenerator) GenerateTitle(ctx context.Context, messages []storage.M
 		return session.TitleResult{}, fmt.Errorf("no title model available")
 	}
 	g.mu.RLock()
-	naming, namingModel := g.naming, g.namingModel
+	naming, namingModel, namingSource := g.naming, g.namingModel, g.namingSource
 	primary, primaryModel := g.primary, g.primaryModel
+	logger := g.logger
 	g.mu.RUnlock()
 	if naming != nil && namingModel != "" {
 		if title, err := g.generate(ctx, naming, namingModel, messages); err == nil {
 			return session.TitleResult{RawTitle: title}, nil
+		} else if logger != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			// Never swallow the dedicated naming model's failure: the fallback
+			// hides it from the caller, so keep the diagnostic here.
+			logger.WarnContext(ctx, "session naming model failed",
+				"event", "session_naming_failed",
+				"provider", namingSource,
+				"model", namingModel,
+				"error", redact.Summarize(err.Error(), maxUserErrorRunes),
+			)
 		}
 		// 专门命名模型失败时继续回退主模型，避免命名功能影响主对话。
 	}
@@ -47,10 +62,17 @@ func (g *titleGenerator) setPrimary(client llm.LLM, model string) {
 	g.mu.Unlock()
 }
 
-func (g *titleGenerator) setNaming(client llm.LLM, model string) {
+func (g *titleGenerator) setNaming(client llm.LLM, provider, model string) {
 	g.mu.Lock()
 	g.naming = client
+	g.namingSource = provider
 	g.namingModel = model
+	g.mu.Unlock()
+}
+
+func (g *titleGenerator) setLogger(logger *slog.Logger) {
+	g.mu.Lock()
+	g.logger = logger
 	g.mu.Unlock()
 }
 

@@ -145,6 +145,22 @@ func (t *Transport) SendGroupSegments(ctx context.Context, groupID int64, segmen
 	return t.sendMessage(ctx, "send_group_msg", map[string]any{"group_id": groupID, "message": segments})
 }
 
+func (t *Transport) SendPrivateForwardMessage(ctx context.Context, userID int64, nodes []Segment) (string, error) {
+	return t.sendForwardMessage(ctx, "send_private_forward_msg", map[string]any{"user_id": userID, "messages": nodes})
+}
+
+func (t *Transport) SendGroupForwardMessage(ctx context.Context, groupID int64, nodes []Segment) (string, error) {
+	return t.sendForwardMessage(ctx, "send_group_forward_msg", map[string]any{"group_id": groupID, "messages": nodes})
+}
+
+func (t *Transport) sendForwardMessage(ctx context.Context, action string, params map[string]any) (string, error) {
+	id, err := t.sendMessage(ctx, action, params)
+	if err == nil && id == "" {
+		return "", fmt.Errorf("%s response has no message_id", action)
+	}
+	return id, err
+}
+
 func (t *Transport) readResponses(ctx context.Context) {
 	for {
 		if _, err := t.Read(ctx); err != nil {

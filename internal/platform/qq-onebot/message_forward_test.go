@@ -1,9 +1,42 @@
 package qqonebot
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
+
+func TestQuotedMergedForwardIsExpandedForTheModel(t *testing.T) {
+	transport := newTestTransport(t, func(req request) response {
+		switch req.Action {
+		case "get_msg":
+			return response{Status: "ok", Data: []byte(`{"user_id":2,"sender":{"nickname":"用户"},"message":[{"type":"text","data":{"text":"引用原文"}},{"type":"forward","data":{"id":"fwd-1"}}]}`), Echo: req.Echo}
+		case "get_forward_msg":
+			if req.Params["message_id"] != "fwd-1" {
+				t.Errorf("forward fetch id = %v", req.Params["message_id"])
+			}
+			return response{Status: "ok", Data: []byte(`{"messages":[{"type":"node","data":{"user_id":"1","content":[{"type":"text","data":{"text":"转发内容"}}]}}]}`), Echo: req.Echo}
+		default:
+			return response{Status: "failed", Retcode: 1, Data: []byte(`{}`), Echo: req.Echo}
+		}
+	})
+	adapter := New(Config{Enabled: true, URL: transport.URL}, nil, nil, nil)
+	adapter.transport = transport
+
+	ref, ok := adapter.referenceFetcher(Event{MessageType: "group", SelfID: 1000, GroupID: 9})(context.Background(), "77")
+	if !ok {
+		t.Fatal("missing reference")
+	}
+	if !strings.Contains(ref.Text, "转发内容") {
+		t.Fatalf("quoted forward content missing: %q", ref.Text)
+	}
+	if !strings.Contains(ref.Text, forwardTrustMarker) {
+		t.Fatalf("quoted forward must keep the trust marker: %q", ref.Text)
+	}
+	if !strings.Contains(ref.Text, "引用原文") {
+		t.Fatalf("quote text missing: %q", ref.Text)
+	}
+}
 
 func TestNormalizeSegmentsPreservesFormatting(t *testing.T) {
 	msg := normalizeSegments([]Segment{

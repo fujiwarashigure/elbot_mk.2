@@ -18,6 +18,9 @@ const resumeHistoryTurns = 3 // TODO: 后续支持配置恢复时展示多少轮
 const defaultSessionListPageSize = 10
 const messageListPageSize = 20
 
+// historyPreviewRunes caps one /resume or /fork history preview.
+const historyPreviewRunes = 200
+
 func NewArchive(deps Deps) command.Handler {
 	return sessionTargetCommand{
 		deps:        deps,

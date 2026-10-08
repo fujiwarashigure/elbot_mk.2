@@ -120,12 +120,28 @@ func (m *Manager) Schemas(ctx context.Context, view Context, cached []CachedTool
 		appendSchema(schema)
 	}
 	for _, cachedTool := range cached {
+		if view.DisableBaseTools && !BackgroundToolAllowed(cachedTool.Name) {
+			continue
+		}
 		if !cachedToolAvailable(ctx, cachedTool) {
 			continue
 		}
 		appendSchema(cachedTool.Schema)
 	}
 	return out, nil
+}
+
+// BackgroundToolAllowed reports whether one tool may run inside a background
+// task. Background sessions only get the tools the task preloaded: the
+// discovery helper would expose everything again, and the workspace switch is a
+// foreground-only concern.
+func BackgroundToolAllowed(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "discover_tool", "workspace":
+		return false
+	default:
+		return true
+	}
 }
 
 func schemaForContext(ctx context.Context, schema llm.ToolSchema) llm.ToolSchema {
@@ -155,11 +171,15 @@ func (m *Manager) Resolve(ctx context.Context, name string, cached []CachedTool)
 	if name == "" {
 		return ResolvedTool{Name: name, Available: false, Reason: "tool name is empty"}
 	}
+	background := tool.BackgroundContext(ctx)
 	for _, cachedTool := range cached {
 		if cachedTool.Name != name && cachedTool.CanonicalName != name {
 			continue
 		}
 		cachedCopy := cachedTool
+		if background && !BackgroundToolAllowed(cachedCopy.Name) {
+			return ResolvedTool{Name: name, Source: cachedCopy.Source, Cached: &cachedCopy, Available: false, Reason: "tool is not allowed in this background task"}
+		}
 		if !cachedToolAvailable(ctx, cachedCopy) {
 			return ResolvedTool{Name: name, Source: cachedCopy.Source, Cached: &cachedCopy, Available: false, Reason: "tool is unavailable in this context"}
 		}
@@ -182,6 +202,11 @@ func (m *Manager) Resolve(ctx context.Context, name string, cached []CachedTool)
 	}
 	if m != nil && m.Native != nil {
 		if nativeTool, ok := m.Native.Get(name); ok {
+			if background {
+				// A background task must not reach a tool it never preloaded;
+				// that was how discover_tool escaped the background whitelist.
+				return ResolvedTool{Name: name, Source: SourceKindNative, Native: nativeTool, Available: false, Reason: "tool is not allowed in this background task"}
+			}
 			if !AvailableInContext(ctx, nativeTool.Info()) {
 				return ResolvedTool{Name: name, Source: SourceKindNative, Native: nativeTool, Available: false, Reason: unavailableReason(ctx, nativeTool.Info())}
 			}

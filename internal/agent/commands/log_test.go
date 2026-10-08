@@ -202,7 +202,7 @@ func TestLogCommandParsesTypeFiltersAndQuotedContains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("log handle --hook: %v", err)
 	}
-	if len(service.query.FieldExists) != 1 || service.query.FieldExists[0] != "hook" {
+	if service.query.Fields["module"] != "hook" || len(service.query.FieldExists) != 0 {
 		t.Fatalf("query = %#v", service.query)
 	}
 }
@@ -221,8 +221,17 @@ func TestAuditCommandParsesTypeFiltersAndQuotedContains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("audit handle --hook: %v", err)
 	}
-	if service.query.Fields["event"] != "hook" {
+	if service.query.Fields["module"] != "hook" {
 		t.Fatalf("query = %#v", service.query)
+	}
+
+	// --hook must not wipe an event filter set in the same command.
+	_, err = NewAudit(Deps{Logs: service}).Handle(context.Background(), command.Request{Args: `--event hook.tool_call --hook`})
+	if err != nil {
+		t.Fatalf("audit handle combined: %v", err)
+	}
+	if service.query.Fields["event"] != "hook.tool_call" || service.query.Fields["module"] != "hook" {
+		t.Fatalf("combined query = %#v", service.query)
 	}
 }
 

@@ -109,6 +109,7 @@ type Agent struct {
 	selfLearning              *selflearning.Service
 	characters                *character.Store
 	fileBackups               *fileops.RollbackStore
+	doctor                    agentcommands.DoctorService
 	modelProfiles             map[string]config.ModelSelection
 	modelAliases              map[string]string
 	toolProfiles              map[string][]string
@@ -284,7 +285,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		clients[name] = configured
 	}
 	client := clients[workModel.Provider]
-	titleGen := &titleGenerator{primary: client, primaryModel: workModel.Model, naming: clients[namingSelection.Provider], namingModel: namingSelection.Model}
+	titleGen := &titleGenerator{primary: client, primaryModel: workModel.Model, naming: clients[namingSelection.Provider], namingModel: namingSelection.Model, namingSource: namingSelection.Provider}
 	promptSoul := SoulProvider(staticSoulProvider{Prompt: "You are a helpful assistant."})
 	if soulPath != "" {
 		promptSoul = &FileSoulProvider{Path: soulPath}
@@ -355,6 +356,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		selfLearning:              opts.SelfLearning,
 		characters:                opts.CharacterStore,
 		fileBackups:               opts.FileBackups,
+		doctor:                    opts.Doctor,
 		modelProfiles:             opts.ModelProfiles,
 		modelAliases:              opts.ModelAliases,
 		toolProfiles:              opts.ToolProfiles,
@@ -456,6 +458,7 @@ func NewWithOptions(opts Options) (*Agent, error) {
 		RuntimeStatus:      a.runtimeStatusForSession,
 		CancelSessionInbox: a.cancelInboxSession,
 		FileBackups:        a.fileBackups,
+		Doctor:             a.doctor,
 	}); err != nil {
 		return nil, err
 	}

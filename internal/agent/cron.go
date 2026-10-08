@@ -17,6 +17,7 @@ import (
 	"elbot/internal/session"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
+	"elbot/internal/toolrun"
 )
 
 type cronModelSelectionKey struct{}
@@ -92,8 +93,10 @@ func (a *Agent) RunBackground(ctx context.Context, req background.RunRequest) (b
 		return background.RunResult{}, err
 	}
 	if len(req.CachedTools) > 0 {
-		a.rememberCachedTools(ctx, bgSession, req.CachedTools)
-		a.audit("background_external_tools_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "tools", cachedToolNames(req.CachedTools))
+		if cached := backgroundCachedTools(req.CachedTools); len(cached) > 0 {
+			a.rememberCachedTools(ctx, bgSession, cached)
+			a.audit("background_external_tools_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "tools", cachedToolNames(cached))
+		}
 	}
 	preloaded := a.preloadBackgroundResources(ctx, bgSession, backgroundToolListNames(req.ToolListNames))
 	if len(preloaded.Tools) > 0 {
@@ -394,9 +397,24 @@ func backgroundMetadataMap(req background.RunRequest) map[string]any {
 		}
 	}
 	if len(req.CachedTools) > 0 {
-		data["tool_cache"] = req.CachedTools
+		if cached := backgroundCachedTools(req.CachedTools); len(cached) > 0 {
+			data["tool_cache"] = cached
+		}
 	}
 	return data
+}
+
+// backgroundCachedTools drops declarations a background task must never run, so
+// an external declaration cannot widen the background tool whitelist.
+func backgroundCachedTools(cached []toolrun.CachedTool) []toolrun.CachedTool {
+	out := make([]toolrun.CachedTool, 0, len(cached))
+	for _, item := range cached {
+		if !toolrun.BackgroundToolAllowed(item.Name) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func cronSessionMetadata(jobName, sourceSessionID string, copied bool) string {

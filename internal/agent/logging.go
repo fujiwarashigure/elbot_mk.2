@@ -15,6 +15,9 @@ type LogManager interface {
 
 func (a *Agent) SetLogger(logger *slog.Logger) {
 	a.logger = logger
+	if a.titleGen != nil {
+		a.titleGen.setLogger(logger)
+	}
 }
 
 func (a *Agent) SetLogManager(logs LogManager) {
@@ -26,6 +29,9 @@ func (a *Agent) SetLogManager(logs LogManager) {
 	a.logger = logs.Runtime()
 	a.auditLogger = logs.Audit()
 	a.logReader = logging.Reader{Dir: logs.LogDir()}
+	if a.titleGen != nil {
+		a.titleGen.setLogger(a.logger)
+	}
 }
 
 func (a *Agent) QueryLogs(ctx context.Context, query logging.LogQuery) ([]logging.LogEntry, error) {

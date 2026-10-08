@@ -66,21 +66,31 @@ type Config struct {
 	CommandPrefixes       []string `toml:"-"`
 }
 
+// qqTextPages splits one long text into page-sized chunks. Pagination markers
+// are gone: a multi-page answer is delivered as one merged-forward message.
 func qqTextPages(text string) []string {
 	runes := []rune(text)
 	if len(runes) <= qqTextPageRunes {
 		return []string{text}
 	}
-	total := (len(runes) + qqTextPageRunes - 1) / qqTextPageRunes
-	pages := make([]string, 0, total)
+	pages := make([]string, 0, (len(runes)+qqTextPageRunes-1)/qqTextPageRunes)
 	for start := 0; start < len(runes); start += qqTextPageRunes {
-		end := start + qqTextPageRunes
-		if end > len(runes) {
-			end = len(runes)
-		}
-		pages = append(pages, fmt.Sprintf("%s……（%d/%d）", string(runes[start:end]), len(pages)+1, total))
+		end := min(start+qqTextPageRunes, len(runes))
+		pages = append(pages, string(runes[start:end]))
 	}
 	return pages
+}
+
+// qqForwardNodes wraps every page in one node of a merged-forward message, so a
+// long answer arrives as a single expandable card instead of many bubbles.
+func qqForwardNodes(pages []string) []Segment {
+	nodes := make([]Segment, 0, len(pages))
+	for _, page := range pages {
+		nodes = append(nodes, Segment{Type: "node", Data: map[string]any{
+			"content": []Segment{{Type: "text", Data: map[string]any{"text": page}}},
+		}})
+	}
+	return nodes
 }
 
 func (a *Adapter) sendQQText(ctx context.Context, t target, text string) (string, error) {
@@ -425,19 +435,35 @@ func (a *Adapter) sendContextText(ctx context.Context, text string) (delivery.Re
 	if !ok {
 		return delivery.Receipt{}, fmt.Errorf("qq send target missing")
 	}
-	var receipt delivery.Receipt
 	pages := qqTextPages(text)
-	for index, page := range pages {
-		id, err := a.sendQQText(ctx, t, page)
-		if err != nil {
-			receipt = receipt.MarkPartialFailure(fmt.Errorf("page %d/%d: %w", index+1, len(pages), err))
-			return receipt, err
-		}
-		if strings.TrimSpace(id) != "" {
-			receipt.PlatformMessageIDs = append(receipt.PlatformMessageIDs, id)
-		}
+	if len(pages) > 1 {
+		return a.sendForwardPages(ctx, t, pages)
 	}
-	return receipt, nil
+	id, err := a.sendQQText(ctx, t, text)
+	if err != nil {
+		return delivery.Receipt{}, err
+	}
+	return receiptWithMessageID(id), nil
+}
+
+// sendForwardPages sends one merged-forward message; OneBot answers with a
+// single message id, so the receipt has no per-page failure state.
+func (a *Adapter) sendForwardPages(ctx context.Context, t target, pages []string) (delivery.Receipt, error) {
+	nodes := qqForwardNodes(pages)
+	var id string
+	var err error
+	switch t.MessageType {
+	case "private":
+		id, err = a.transport.SendPrivateForwardMessage(ctx, t.UserID, nodes)
+	case "group":
+		id, err = a.transport.SendGroupForwardMessage(ctx, t.GroupID, nodes)
+	default:
+		err = fmt.Errorf("unsupported message target %q", t.MessageType)
+	}
+	if err != nil {
+		return delivery.Receipt{}, err
+	}
+	return receiptWithMessageID(id), nil
 }
 
 func (a *Adapter) sendContextOutput(ctx context.Context, out delivery.Output) (delivery.Receipt, error) {
@@ -899,6 +925,12 @@ func (a *Adapter) referenceFetcher(event Event) func(context.Context, string) (r
 			return refcontext.ReferencedMessage{}, false
 		}
 		ref := normalizeMessage(data.Message, data.RawMessage, event.SelfID)
+		// A merged forward quoted in a reply must reach the model too. Only this
+		// quoted level is expanded, so a hostile quote cannot pull in an
+		// unbounded forward tree.
+		if len(ref.ForwardIDs) > 0 {
+			ref = a.resolveForwardSegments(ctx, event, ref)
+		}
 		label := "引用"
 		if data.UserID != 0 {
 			label = "引用：" + displayName(data.Sender, data.UserID)
