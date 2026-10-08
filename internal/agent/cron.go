@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,10 @@ import (
 )
 
 type cronModelSelectionKey struct{}
+
+// errBackgroundTakenOver 表示后台任务的目标 Session 已被前台接管：本次后台 turn 必须
+// 立刻停下，不再继续调用模型，也不再产生后台汇报。
+var errBackgroundTakenOver = errors.New("background session was taken over by foreground")
 
 type discardSender struct{}
 
@@ -48,7 +53,7 @@ func (a *Agent) RunCronMessage(ctx context.Context, req elcron.RunCronMessageReq
 		SandboxSubdir: string(background.KindCron),
 		Metadata:      map[string]string{"cron_job_name": req.JobName},
 	})
-	return elcron.RunCronMessageResult{SessionID: result.SessionID, Text: result.Text}, err
+	return elcron.RunCronMessageResult{SessionID: result.SessionID, Text: result.Text, TakenOver: result.TakenOver}, err
 }
 
 func (a *Agent) RunBackground(ctx context.Context, req background.RunRequest) (background.RunResult, error) {
@@ -90,6 +95,9 @@ func (a *Agent) RunBackground(ctx context.Context, req background.RunRequest) (b
 	scope := session.Scope{ActorID: actor.ID, Platform: platformName, PlatformScopeID: scopeID, IsCLI: platformName == "cli"}
 	bgSession, err := a.backgroundSession(ctx, req, scope)
 	if err != nil {
+		if errors.Is(err, errBackgroundTakenOver) {
+			return backgroundTakenOverResult(req.SessionID), nil
+		}
 		return background.RunResult{}, err
 	}
 	if len(req.CachedTools) > 0 {
@@ -106,7 +114,14 @@ func (a *Agent) RunBackground(ctx context.Context, req background.RunRequest) (b
 		a.audit("background_skill_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "skills", preloaded.Skills)
 	}
 	prompt := backgroundPromptWithSkills(req.Prompt, preloaded.SkillPrompt)
+	// 预载期间前台可能刚刚接管这个 Session，进入模型前再确认一次。
+	if a.backgroundSessionTakenOver(ctx, bgSession.ID) {
+		return backgroundTakenOverResult(bgSession.ID), nil
+	}
 	if err := a.startBackgroundChat(ctx, bgSession, prompt); err != nil {
+		if errors.Is(err, errBackgroundTakenOver) {
+			return backgroundTakenOverResult(bgSession.ID), nil
+		}
 		return background.RunResult{}, err
 	}
 	message, err := a.latestAssistantMessage(ctx, bgSession.ID)
@@ -125,6 +140,10 @@ func (a *Agent) backgroundSession(ctx context.Context, req background.RunRequest
 		bgSession, err := a.store.Sessions().Get(ctx, req.SessionID)
 		if err != nil {
 			return nil, err
+		}
+		// 已被前台接管的 Session 不再是后台任务的工作区（上游同样拒绝复用）。
+		if session.WasPromoted(bgSession) {
+			return nil, errBackgroundTakenOver
 		}
 		return a.ensureBackgroundSession(ctx, bgSession, req)
 	}
@@ -146,6 +165,9 @@ func (a *Agent) ensureBackgroundSession(ctx context.Context, bgSession *storage.
 	// Merge background metadata inside one transaction: the row also carries
 	// activity, workspace and naming fields that must survive.
 	updated, err := a.store.Sessions().Mutate(ctx, bgSession.ID, func(current *storage.Session) error {
+		if session.WasPromoted(current) {
+			return errBackgroundTakenOver
+		}
 		metadata := mergeBackgroundSessionMetadata(current.Metadata, req)
 		mode := normalizeBackgroundSessionMode(req.SessionMode)
 		if current.Mode == mode && current.Metadata == metadata {
@@ -163,6 +185,24 @@ func (a *Agent) ensureBackgroundSession(ctx context.Context, bgSession *storage.
 	bgSession.Metadata = updated.Metadata
 	bgSession.UpdatedAt = updated.UpdatedAt
 	return bgSession, nil
+}
+
+// backgroundSessionTakenOver 报告后台任务的目标 Session 是否已被前台接管。接管标记
+// 由前台激活（/resume、/unarchive）写在同一个事务里，因此这里读到的一定是已提交的
+// 状态。
+func (a *Agent) backgroundSessionTakenOver(ctx context.Context, sessionID string) bool {
+	if a == nil || a.store == nil || sessionID == "" {
+		return false
+	}
+	row, err := a.store.Sessions().Get(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	return session.WasPromoted(row)
+}
+
+func backgroundTakenOverResult(sessionID string) background.RunResult {
+	return background.RunResult{SessionID: sessionID, TakenOver: true, Outcome: background.OutcomeTakenOver}
 }
 
 func (a *Agent) latestAssistantMessage(ctx context.Context, sessionID string) (storage.Message, error) {

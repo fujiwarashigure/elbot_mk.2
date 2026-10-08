@@ -77,6 +77,13 @@ func (s *Service) Unarchive(ctx context.Context, scope Scope, sessionID string) 
 		return nil, err
 	}
 	updated, err := s.store.Sessions().Mutate(ctx, session.ID, func(current *storage.Session) error {
+		// 取消归档同时把该 Session 设为当前会话，因此后台 Session 在这里同样要
+		// 走接管流程，否则在途的后台 turn 会继续把它当任务 Session 用。
+		if IsBackground(current) {
+			if err := promoteToForeground(current, scope); err != nil {
+				return err
+			}
+		}
 		if current.ArchivedAt == nil {
 			return nil
 		}

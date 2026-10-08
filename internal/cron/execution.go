@@ -95,6 +95,11 @@ func (s *Service) runLLMReport(ctx context.Context, job storage.CronJob, meta Me
 	if err != nil {
 		result, parsed, err = s.retryLLMResultFormat(ctx, job, meta, actor, result.SessionID)
 	}
+	if result.TakenOver {
+		// 前台已经接管这个 Session：用户能在前台直接看到进度，本次后台运行不再
+		// 解析 JSON、不发汇报、也不重复投递。
+		return s.takenOverDeliveryState(job, meta, state, result.SessionID), "", nil
+	}
 	if err != nil {
 		message := cronParseFailedMessage(s.commandPrefixValue(), meta.Title, result.SessionID, err)
 		state.ReportReady = true
@@ -136,6 +141,20 @@ func (s *Service) retryLLMResultFormat(ctx context.Context, job storage.CronJob,
 	}
 	parsed, err := parseLLMResult(result.Text)
 	return result, parsed, err
+}
+
+// takenOverDeliveryState 把一次被前台接管的后台运行记成"已完成但无汇报"：报告为空，
+// 因此 deliverPrepared 不会发出任何文本，job 也不会被重复投递或判为失败。
+func (s *Service) takenOverDeliveryState(job storage.CronJob, meta Metadata, state CronDeliveryState, sessionID string) CronDeliveryState {
+	state.ReportReady = true
+	state.TaskCompleted = true
+	state.Report = ""
+	state.ReportSegments = nil
+	state.ReportSessionID = sessionID
+	state.ReportMessageID = ""
+	s.auditEvent("cron.background_taken_over", s.cronAuditAttrs(job.Name, meta, "session_id", sessionID)...)
+	s.logInfo("cron background task taken over by foreground", s.cronLogAttrs(job.Name, meta, "session_id", sessionID)...)
+	return state
 }
 
 func cronParseFailedMessage(prefix, title, sessionID string, err error) string {

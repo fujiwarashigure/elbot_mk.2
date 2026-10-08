@@ -62,6 +62,14 @@ func (s *Service) RunLLMEvent(ctx context.Context, event Event, eventID string) 
 	if parseErr != nil {
 		result, parsed, parseErr = s.retryLLMResultFormat(ctx, event, result.SessionID, model)
 	}
+	if result.TakenOver {
+		// 前台已经接管这个 Session：用户能在前台直接看到进度，这里不再解析 JSON、
+		// 不准备汇报、也不重复投递；事件按完成收尾而不是失败。
+		_ = s.completeEventWithSession(ctx, eventID, event.ResolvedTargets, StatusCompleted, result.SessionID, "", "")
+		s.auditEvent("elnis.background_taken_over", append(attrs, "event_id", eventID, "session_id", result.SessionID)...)
+		s.logInfo("elnis background task taken over by foreground", append(attrs, "event_id", eventID, "session_id", result.SessionID)...)
+		return nil
+	}
 	if parseErr != nil {
 		message := fmt.Sprintf("Elnis 事件 %s 解析格式失败，请查看后台 session。\nsession: %s\n错误：%v", event.EventKey, result.SessionID, parseErr)
 		_ = s.completeEventWithSession(ctx, eventID, event.ResolvedTargets, StatusFailed, result.SessionID, message, parseErr.Error())

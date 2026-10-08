@@ -39,12 +39,20 @@ type RunRequest struct {
 	Metadata       map[string]string
 }
 
+// OutcomeTakenOver 表示后台任务在运行中被前台接管而提前结束：它既不成功也不失败，
+// 不产生汇报，也不重复投递。
+const OutcomeTakenOver = "taken_over"
+
 type RunResult struct {
 	SessionID string
 	MessageID string
 	Text      string
 	Parsed    JSONResult
 	ParseErr  error
+	// TakenOver 为 true 时表示该 Session 已被前台接管，本次后台运行在安全点自行
+	// 停止，Text 为空且不应当作报告解析。
+	TakenOver bool
+	Outcome   string
 }
 
 type JSONResult struct {

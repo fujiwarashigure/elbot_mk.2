@@ -104,7 +104,7 @@ rg -n "ELBOT_OPS_TOKEN|WATCHDOG_OPS_TOKEN|restore-verify|fallback_mode|doctor|up
 - `internal/agent/reference.go`：只读提供当前 Session ID，供平台引用续聊/fork 判定。
 - `internal/agent/media_output.go`：发送前归一、发送副本解析与有序媒体回执缓存。
 - `internal/agent/options.go`、`logging.go`、`identity.go`：运行配置、日志和 Actor/Scope 解析。
-- `internal/agent/chat.go`：普通对话主流程；群级默认模型只在本轮没有显式 `@model:` 覆盖时生效。
+- `internal/agent/chat.go`：普通对话主流程；群级默认模型只在本轮没有显式 `@model:` 覆盖时生效。后台 turn（`backgroundTurnOutput`）在每次模型调用前、工具批次落库后与最终输出前各查一次前台接管标记（`backgroundSessionTakenOver` → `session.WasPromoted`），命中即返回 `errBackgroundTakenOver`，不发布 PhaseError、不写迟到助手消息。
 - `internal/agent/group_policy.go`：群级策略解析、唤醒/静默判断、模型目录、learning 审核动作授权；策略保存在 `state.toml` 的 `group_policy`。
 - `internal/agent/group_knowledge.go`、`internal/groupkb/`：按群 scope 的本地确定性 FAQ 匹配与状态；`groupkb` 只做归一化和 exact/contains/keywords 匹配，不调用模型；Agent 负责权限、上限、`state.toml [group_knowledge]` 持久化和命中后的直接回答。
 - `internal/agent/member_panel.go`、`internal/agent/commands/member_panel.go`：普通成员 `/me` 自助面板；按 FairKey 过滤自己的请求和排队消息，并汇总自己的生图/视觉/聊天额度，不暴露跨群全局聚合用量。
@@ -122,6 +122,7 @@ rg -n "ELBOT_OPS_TOKEN|WATCHDOG_OPS_TOKEN|restore-verify|fallback_mode|doctor|up
 - `internal/agent/turn_output.go`：turn 输出适配。
 - `internal/agent/prompt.go`：Prompt 构建。
 - `internal/agent/system_prompt*.go`：Soul、常驻记忆、工具提示等 system prompt 来源和组合。
+- `internal/agent/cron.go`：`RunBackground` / `RunCronMessage` 的后台入口；已提升（被前台接管）的 Session 在 `backgroundSession` / `ensureBackgroundSession` 阶段就短路，出口统一为 `RunResult{TakenOver: true, Outcome: OutcomeTakenOver}`（`err == nil`），cron 侧记为 `ReportReady=true, TaskCompleted=true, Report=""`，因此不投递任何汇报。
 - `internal/agent/tool_transcript.go`：工具 transcript 持久化。
 
 常用搜索：
@@ -333,7 +334,8 @@ rg -n "PlatformAdapter|SendChat|MessageSegment|Actor|Scope|remote|websocket|long
 - `internal/session/service.go`、`types.go`：Session 服务主体和领域请求/结果类型；字段写入统一走 `storage.SessionRepository.Mutate`（事务内读-改-写），`Resume` / `Touch` 的 `UpdatedAt` 也在事务内设置。
 - `internal/session/shared.go`：群共享线程的 Session 所有者、`Scope.Shared` key、元数据标记与访问判定。
 - `internal/session/mode.go`：模式激活和 work 历史限制。
-- `internal/session/lifecycle.go`、`query.go`、`fork.go`、`expiration.go`：生命周期、查询、Fork 和闲置过期策略；重命名/归档/置顶与闲置过期都在事务内基于最新行重新判定（手动改名标记、空闲判定）。
+- `internal/session/lifecycle.go`、`query.go`、`fork.go`、`expiration.go`：生命周期、查询、Fork 和闲置过期策略；重命名/归档/置顶与闲置过期都在事务内基于最新行重新判定（手动改名标记、空闲判定）；`Unarchive` 对后台 Session 同样执行提升。
+- `internal/session/promotion.go`：后台 Session 的前台接管判定与提升。`IsBackground` 按 metadata `background_kind` 或 `cron:` / `elnis:` scope 前缀判断，`WasPromoted` 按 metadata `foreground_origin` 判断；`promoteToForeground` 必须在 `Sessions().Mutate` 事务内调用，一次性写 `foreground_origin`（记录接管前的 kind/owner/platform/scope）、删除 `background_kind`、切到当前前台 scope 并置 `Mode = work`。`Resume` / `Unarchive` 用它做原地提升，`canAccess` 用 `IsBackground` 放行后台 Session 的跨 scope 恢复。
 - `internal/session/naming.go`：异步 Session 命名；迟到的命名写入在事务内检查 `title_renamed`，不覆盖手动改名。
 - `internal/agent/session_metadata.go`：Session metadata 编解码；`encodeSessionMetadataInto` 基于原始 JSON 只改写已知字段，保留未知键。
 - `internal/agent/workspace.go`：Agent workspace 持久化适配；`workspace_dir` 与通知目录经 `mutateMetadata` 在事务内合并。

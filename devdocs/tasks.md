@@ -6,6 +6,8 @@
 
 任务顺序以 MVP 为目标，不追求一次性实现完整设计。
 
+相对上游（`Elflare/elbot`）还需落地的改动单独记在 [`upstream-sync-todo.md`](upstream-sync-todo.md)，本文只维护 fork 自身的里程碑任务。
+
 ## Milestone 0：项目骨架
 
 目标：项目可以启动，具备基础配置和日志。

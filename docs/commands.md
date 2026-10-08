@@ -71,7 +71,7 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 | `/new` | 创建并切换到新 Session。 |
 | `/status` | 查看当前 Session 状态。 |
 | `/sessions [关键词]` | 列出或搜索可见 Session。 |
-| `/resume [最近编号或session_id]` | 恢复历史 Session；编号 `1` 表示最近更新的非当前 Session。 |
+| `/resume [最近编号或session_id]` | 恢复历史 Session；编号 `1` 表示最近更新的非当前 Session；恢复后台（cron / Elnis）Session 会中断该 Session 在途的后台任务（见下）。 |
 | `/archives [页码] [关键词]` | 查看已归档 Session。 |
 | `/archive [编号或session_id] --confirm` | 归档 Session，默认当前 Session。 |
 | `/unarchive [编号或session_id]` | 取消归档 Session，默认当前 Session。 |
@@ -97,6 +97,7 @@ ElBot 的 slash 命令由 Agent Core 统一处理，CLI、QQ、后续平台共�
 说明：
 
 - `/resume 1` 可以直接恢复最近更新的非当前 Session，无需先执行裸 `/resume`；编号按更新时间排列，不受置顶影响，翻页时编号连续。
+- 恢复一个正在跑的后台 Session（cron / Elnis）会**中断该 Session 在途的后台任务**：它当场被提升为前台会话，后台不再发起后续模型调用，也不再写入后台回答或发送本轮汇报；已经执行过的工具调用保留在会话历史里。`/unarchive` 把一个后台 Session 取消归档同样会中断它。
 - 当前会话处理中时，不支持执行 `/new`、`/resume`、`/fork`、`/chat`、`/work` 等 Session 切换命令；如有必要，请先使用 `/stop` 结束当前处理。
 - 各群可用 `/grouppolicy thread-mode group` 开启共享会话；此时 Session 命令面向全群共享当前会话，上面列出的切换/修改命令仅群主、群管理员或超管可用；开启后不迁移旧 per-user 会话。
 - `/sessions` 展示的编号可被 `/archive`、`/pin`、`/delete` 等 Session 操作命令复用。

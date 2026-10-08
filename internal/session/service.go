@@ -115,6 +115,13 @@ func (s *Service) Resume(ctx context.Context, scope Scope, sessionID string) (*s
 		return nil, fmt.Errorf("session %s is not in current platform scope", sessionID)
 	}
 	session, err := s.store.Sessions().Mutate(ctx, sessionID, func(current *storage.Session) error {
+		// 后台 Session 被前台激活时在这里原地接管：记录后台来源、清掉后台身份、
+		// 切到当前 scope。在途的后台 turn 会在下一个安全点看到接管标记并退出。
+		if IsBackground(current) {
+			if err := promoteToForeground(current, scope); err != nil {
+				return err
+			}
+		}
 		current.UpdatedAt = storage.Now()
 		return nil
 	})
@@ -187,14 +194,7 @@ func (s *Service) canAccess(scope Scope, session *storage.Session) bool {
 	if session.OwnerID != scope.ActorID || session.Platform != scope.Platform {
 		return false
 	}
-	return session.PlatformScopeID == scope.PlatformScopeID || isBackgroundSession(session)
-}
-func isBackgroundSession(session *storage.Session) bool {
-	if session == nil {
-		return false
-	}
-	scopeID := strings.TrimSpace(session.PlatformScopeID)
-	return strings.HasPrefix(scopeID, "cron:") || strings.HasPrefix(scopeID, "elnis:")
+	return session.PlatformScopeID == scope.PlatformScopeID || IsBackground(session)
 }
 
 func forkTitle(title string) string {

@@ -69,6 +69,11 @@ func (a *Agent) runChatTurnWithOutput(ctx context.Context, session *storage.Sess
 	var pending turn.Input
 	if err := a.runChat(ctx, session, text, out, selection, &pending); err != nil {
 		a.turns.StopSession(session.ID)
+		if errors.Is(err, errBackgroundTakenOver) {
+			// 前台接管不算失败：不再发布 error 运行状态，交由 RunBackground
+			// 返回 TakenOver。
+			return session, turn.Input{}, err
+		}
 		status := a.runtimeStatusForSession(session.ID)
 		status.Phase = runtimestatus.PhaseError
 		status.FinishedAt = storage.Now()
@@ -229,7 +234,13 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 	var usage *llm.Usage
 	toolRounds := 0
 	inToolPhase := false
+	// 后台 turn 才需要盯前台接管。检查点只放在模型调用与工具批次之间：那里没有
+	// 半途写入，停下是安全的；前台 turn 不付这个成本。
+	_, isBackgroundOutput := out.(backgroundTurnOutput)
 	for {
+		if isBackgroundOutput && a.backgroundSessionTakenOver(ctx, session.ID) {
+			return errBackgroundTakenOver
+		}
 		var pending *pendingUserMessage
 		if inToolPhase {
 			llmMessages, pending = a.drainPendingUserInput(ctx, session.ID, llmMessages)
@@ -339,6 +350,12 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		if err := a.persistTurnMessages(ctx, session.ID, "append_tool_transcript", execution.Transcript); err != nil {
 			return err
 		}
+		if isBackgroundOutput && a.backgroundSessionTakenOver(ctx, session.ID) {
+			// 工具批次是安全的停止点：这一批已经跑完并写入转录，这样前台接管后
+			// 看得到已执行过的工具；下一轮模型调用不再发起，也不会写入迟到的助手
+			// 消息。
+			return errBackgroundTakenOver
+		}
 		tools, err = a.toolsForSession(ctx, session)
 		if err != nil {
 			return err
@@ -347,10 +364,14 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 			llmMessages = append(llmMessages, llm.LLMMessage{Role: llm.RoleUser, Segments: llm.TextSegments("补充：" + execution.ConfirmationExtra)})
 		}
 	}
+	if isBackgroundOutput && a.backgroundSessionTakenOver(ctx, session.ID) {
+		// 模型已经给出终态文本，但 Session 已被前台接管：不再写助手消息，避免
+		// 接管后的会话被迟到的后台回答污染。
+		return errBackgroundTakenOver
+	}
 	platformOutputText := platformFinalText
-	_, backgroundOutput := out.(backgroundTurnOutput)
 	emptyAssistantResponse := strings.TrimSpace(platformOutputText) == "" && strings.TrimSpace(finalText) == "" && len(deferredOutputs) == 0
-	if emptyAssistantResponse && !backgroundOutput {
+	if emptyAssistantResponse && !isBackgroundOutput {
 		platformOutputText = "模型这次没有返回可见内容。"
 	}
 	out.PublishRuntimeStatus(ctx, runtimestatus.Snapshot{SessionID: session.ID, Phase: runtimestatus.PhaseSending, Provider: selection.Provider, Model: selection.Model, Mode: session.Mode, RequestID: reqCtxInfo.ID, Kind: request.KindTurn, Label: "chat", TurnStartedAt: turnStartedAt, StageStartedAt: storage.Now()})
