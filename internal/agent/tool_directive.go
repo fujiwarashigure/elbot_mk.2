@@ -174,7 +174,7 @@ func (a *Agent) applySkillDirectives(ctx context.Context, session *storage.Sessi
 			block, err := skillDetailBlock(security.WithActor(ctx, actor), candidate, detailer)
 			if err != nil {
 				result.Invalid = append(result.Invalid, name)
-				a.audit("skill_preload_failed", "session_id", session.ID, "tool", name, "error", err)
+				a.audit("skill_preload_failed", "session_id", session.ID, "tool", name, "error", err, "result", logging.ResultFailed)
 				continue
 			}
 			seenSkills[name] = true

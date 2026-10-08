@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"elbot/internal/angelmemory"
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 )
 
@@ -169,7 +170,7 @@ func (a *Agent) cancelMessageWork(ctx context.Context, event platform.PlatformEv
 	a.messageWorkMu.Unlock()
 	if !ok {
 		a.rememberRecentRecall(key)
-		a.audit("platform_recall_noop", "platform", event.Platform, "scope", event.ScopeID, "message_id", event.MessageID)
+		a.audit("platform_recall_noop", "platform", event.Platform, "scope", event.ScopeID, "message_id", event.MessageID, "result", logging.ResultSkipped)
 		return
 	}
 	a.markTurnCanceled(ref.RequestID)

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/tool"
 )
 
@@ -17,10 +18,10 @@ func (a *Agent) confirmBackgroundSandboxShell(ctx context.Context, sessionID str
 	}
 	kind := string(sandbox.BackgroundKind)
 	if risk == tool.RiskCritical {
-		a.audit("background_shell_rejected", "session_id", sessionID, "kind", kind, "tool", call.Name, "risk", risk, "sandbox_dir", sandbox.Dir, "arguments", previewArguments(call.Arguments))
+		a.audit("background_shell_rejected", "session_id", sessionID, "kind", kind, "tool", call.Name, "risk", risk, "sandbox_dir", sandbox.Dir, "arguments", previewArguments(call.Arguments), "result", logging.ResultRejected)
 		message.Segments = llm.TextSegments("后台沙盒禁止执行 critical 风险 shell 命令。请改用相对路径，把文件限制在当前 sandbox 目录内，避免绝对路径、.. 逃逸和危险命令；若仍无法完成，请在最终报告中说明阻塞原因。")
 		return false, true
 	}
-	a.audit("background_shell_auto_confirmed", "session_id", sessionID, "kind", kind, "tool", call.Name, "risk", risk, "sandbox_dir", sandbox.Dir, "arguments", previewArguments(call.Arguments))
+	a.audit("background_shell_auto_confirmed", "session_id", sessionID, "kind", kind, "tool", call.Name, "risk", risk, "sandbox_dir", sandbox.Dir, "arguments", previewArguments(call.Arguments), "result", logging.ResultSucceeded)
 	return true, true
 }

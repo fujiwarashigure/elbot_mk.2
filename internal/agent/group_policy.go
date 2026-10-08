@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"elbot/internal/config"
+	"elbot/internal/logging"
 	"elbot/internal/security"
 	"elbot/internal/session"
 )
@@ -526,6 +527,7 @@ func (a *Agent) SetGroupPolicy(ctx context.Context, field, value string) (string
 		"field", field,
 		"old", groupPolicyFieldAuditValue(previousPolicy, field),
 		"new", groupPolicyFieldAuditValue(policy, field),
+		"result", logging.ResultSucceeded,
 	)
 	return fmt.Sprintf("群策略已更新：%s = %s", field, policyValue), nil
 }
@@ -543,7 +545,7 @@ func (a *Agent) ResetGroupPolicy(ctx context.Context, field string) (string, err
 			a.setGroupPolicySnapshot(previous)
 			return "", err
 		}
-		a.audit("group_policy_reset", "actor_id", a.actor(ctx).ID, "scope", contextOverflowKey(scope), "field", "all")
+		a.audit("group_policy_reset", "actor_id", a.actor(ctx).ID, "scope", contextOverflowKey(scope), "field", "all", "result", logging.ResultSucceeded)
 		return "当前群策略已重置为全局默认。", nil
 	}
 	field = canonicalGroupPolicyField(rawField)
@@ -619,7 +621,7 @@ func (a *Agent) ResetGroupPolicy(ctx context.Context, field string) (string, err
 		a.setGroupPolicySnapshot(previous)
 		return "", err
 	}
-	a.audit("group_policy_reset", "actor_id", a.actor(ctx).ID, "scope", contextOverflowKey(scope), "field", field)
+	a.audit("group_policy_reset", "actor_id", a.actor(ctx).ID, "scope", contextOverflowKey(scope), "field", field, "result", logging.ResultSucceeded)
 	return fmt.Sprintf("群策略字段已重置：%s", field), nil
 }
 

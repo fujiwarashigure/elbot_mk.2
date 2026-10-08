@@ -8,6 +8,7 @@ import (
 	"elbot/internal/delivery"
 	"elbot/internal/hook"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 	"elbot/internal/storage"
 )
@@ -178,7 +179,7 @@ func (a *Agent) mapSentAssistantMessage(ctx context.Context, sessionID, messageI
 			SessionID:         sessionID,
 		}
 		if err := a.store.Messages().MapPlatformMessage(ctx, mapping); err != nil {
-			a.audit("persistence_error", "session_id", sessionID, "operation", "map_platform_message", "platform_message_id", platformMessageID, "error", err.Error())
+			a.audit("persistence_error", "session_id", sessionID, "operation", "map_platform_message", "platform_message_id", platformMessageID, "error", err.Error(), "result", logging.ResultFailed)
 			if a.logger != nil {
 				a.logger.WarnContext(ctx, "map platform message failed", "session_id", sessionID, "platform_message_id", platformMessageID, "error", err.Error())
 			}

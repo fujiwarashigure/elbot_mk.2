@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 	"elbot/internal/storage"
 	"elbot/internal/turn"
@@ -126,7 +127,7 @@ func (a *Agent) inboxSubmit(ctx context.Context, sessionID string, input turn.In
 		notify := !queue.fullNotified
 		queue.fullNotified = true
 		queue.mu.Unlock()
-		a.audit("inbox_queue_full", "session_id", sessionID, "actor_id", actorID, "queued", queuedItems, "limit", maxInboxItemsPerSession)
+		a.audit("inbox_queue_full", "session_id", sessionID, "actor_id", actorID, "queued", queuedItems, "limit", maxInboxItemsPerSession, "result", logging.ResultSkipped)
 		if notify {
 			a.sendChat(ctx, "当前会话待处理消息过多，请稍后再试。")
 		}

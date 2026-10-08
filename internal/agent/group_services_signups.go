@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"elbot/internal/config"
+	"elbot/internal/logging"
 )
 
 func (a *Agent) SignupCreate(ctx context.Context, title string, capacity int) (string, error) {
@@ -56,7 +57,7 @@ func (a *Agent) SignupCreate(ctx context.Context, title string, capacity int) (s
 	}); err != nil {
 		return "", err
 	}
-	a.audit("group_signup_create", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", actor.ID, "signup_id", entry.ID)
+	a.audit("group_signup_create", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", actor.ID, "signup_id", entry.ID, "result", logging.ResultSucceeded)
 	return formatGroupSignup(entry, actor.ID), nil
 }
 
@@ -197,7 +198,7 @@ func (a *Agent) SignupClose(ctx context.Context, id string) (string, error) {
 	if !found {
 		return fmt.Sprintf("没有找到报名 %q", strings.TrimSpace(id)), nil
 	}
-	a.audit("group_signup_close", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", a.actor(ctx).ID, "signup_id", closed.ID)
+	a.audit("group_signup_close", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", a.actor(ctx).ID, "signup_id", closed.ID, "result", logging.ResultSucceeded)
 	return formatGroupSignup(closed, a.actor(ctx).ID), nil
 }
 

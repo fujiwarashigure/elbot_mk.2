@@ -13,6 +13,7 @@ import (
 	"elbot/internal/delivery"
 	"elbot/internal/hook"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 	"elbot/internal/redact"
 	"elbot/internal/storage"
@@ -163,7 +164,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, toolsEnabled bool
 	releaseProvider, err := a.acquireProviderSlot(ctx, selection.Provider)
 	if err != nil {
 		releaseChatReservation()
-		a.audit("provider_concurrency_rejected", "provider", selection.Provider, "error", err.Error())
+		a.audit("provider_concurrency_rejected", "provider", selection.Provider, "error", err.Error(), "result", logging.ResultRejected)
 		return llmCallResult{Messages: baseMessages, Stream: stream}, err
 	}
 	defer releaseProvider()
@@ -178,7 +179,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, toolsEnabled bool
 			releaseProvider()
 			return a.callLLM(withVisionFallbackAttempt(ctx), sessionID, toolsEnabled, selection, a.visionFallbackMessages(ctx, baseMessages), tools, nil, requestOptions, stream, out)
 		}
-		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", redact.Error(err))
+		a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error", redact.Error(err), "result", logging.ResultFailed)
 		a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, ElapsedMS: elapsedMillis(startedAt)}}, err)
 		return llmCallResult{}, fmt.Errorf("chat: %w", err)
 	}
@@ -207,7 +208,7 @@ func (a *Agent) callLLM(ctx context.Context, sessionID string, toolsEnabled bool
 				return llmCallResult{}, markUserNotified(fmt.Errorf("chat stream: %w", chunk.Error))
 			}
 			details := newUserErrorDetails("LLM 响应中断", chunk.Error)
-			a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error_id", details.ID, "error", details.Safe)
+			a.audit("llm_error", "session_id", sessionID, "provider", selection.Provider, "model", selection.Model, "elapsed_ms", elapsedMillis(startedAt), "error_id", details.ID, "error", details.Safe, "result", logging.ResultFailed)
 			a.notifyHookError(ctx, hook.Event{Point: hook.PointLLMResponseReceived, Session: hook.SessionContext{ID: sessionID}, LLM: hook.LLMPayload{Provider: selection.Provider, Model: selection.Model, SourceText: assistant.String(), Text: assistant.String(), ToolCalls: toolCalls, Usage: usage, ElapsedMS: elapsedMillis(startedAt)}}, errors.New(details.Safe))
 			out.SendNotice(ctx, slog.LevelError, details.Text)
 
@@ -471,6 +472,7 @@ func (a *Agent) auditUsage(sessionID string, selection config.ModelSelection, us
 			"cache_hit_tokens", usage.CacheHitTokens,
 		)
 	}
+	attrs = append(attrs, "result", logging.ResultSucceeded)
 	a.audit("llm_usage", attrs...)
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 )
 
@@ -86,11 +87,11 @@ func (a *Agent) transcribePlatformAudio(ctx context.Context) context.Context {
 		return ctx
 	}
 	if skipped > 0 {
-		a.audit("asr_skipped", "reason", "batch_limit", "limit", limit, "skipped", skipped, "scope", contextOverflowKey(a.scope(ctx)))
+		a.audit("asr_skipped", "reason", "batch_limit", "limit", limit, "skipped", skipped, "scope", contextOverflowKey(a.scope(ctx)), "result", logging.ResultSkipped)
 	}
 	if strings.TrimSpace(a.asrSelection.Provider) != "" && strings.TrimSpace(a.asrSelection.Model) != "" {
 		if err := a.authorizeExecutionModelSelection(ctx, a.asrSelection); err != nil {
-			a.audit("model_denied", "kind", "asr", "provider", a.asrSelection.Provider, "model", a.asrSelection.Model, "reason", err.Error(), "scope", contextOverflowKey(a.scope(ctx)))
+			a.audit("model_denied", "kind", "asr", "provider", a.asrSelection.Provider, "model", a.asrSelection.Model, "reason", err.Error(), "scope", contextOverflowKey(a.scope(ctx)), "result", logging.ResultRejected)
 			return ctx
 		}
 	}
@@ -106,7 +107,7 @@ func (a *Agent) transcribePlatformAudio(ctx context.Context) context.Context {
 		reservationRequests = append(reservationRequests, budgetReservationRequest{CallID: callID, Digest: digest})
 	}
 	if ok, reason := a.reserveBudgetBatchRequests(ctx, "asr", reservationRequests); !ok {
-		a.audit("budget_denied", "kind", "asr", "reason", reason, "scope", contextOverflowKey(a.scope(ctx)))
+		a.audit("budget_denied", "kind", "asr", "reason", reason, "scope", contextOverflowKey(a.scope(ctx)), "result", logging.ResultRejected)
 		return ctx
 	}
 
@@ -140,7 +141,7 @@ func (a *Agent) transcribePlatformAudio(ctx context.Context) context.Context {
 	out := append([]platform.MessageSegment(nil), msg.Segments...)
 	for index, slot := range slots {
 		if results[index].err != nil {
-			a.audit("asr_failed", "media_id", slot.segment.MediaID, "error", results[index].err.Error(), "scope", contextOverflowKey(a.scope(ctx)))
+			a.audit("asr_failed", "media_id", slot.segment.MediaID, "error", results[index].err.Error(), "scope", contextOverflowKey(a.scope(ctx)), "result", logging.ResultFailed)
 			continue
 		}
 		text := asrTranscriptionText(index+1, results[index].text)

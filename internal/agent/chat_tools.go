@@ -10,6 +10,7 @@ import (
 
 	"elbot/internal/config"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
 	"elbot/internal/toolrun"
@@ -188,7 +189,17 @@ func (a *Agent) recordToolCall(ctx context.Context, sessionID string, call llm.T
 		"success", record.Success,
 		"elapsed_ms", record.FinishedAt.Sub(record.StartedAt).Milliseconds(),
 		"error", record.Error,
+		"result", resultFromSuccess(record.Success),
 	)
+}
+
+// resultFromSuccess 把工具执行的布尔结果映射成契约里的操作结果。工具"执行了但失败"
+// 是 failed；被策略拒绝走的是 permission_denied（rejected），不经过这里。
+func resultFromSuccess(success bool) string {
+	if success {
+		return logging.ResultSucceeded
+	}
+	return logging.ResultFailed
 }
 
 func (a *Agent) logRiskConfirmationWait(sessionID string, call llm.ToolCallRequest, risk tool.RiskLevel, reasons []string) {
@@ -196,11 +207,27 @@ func (a *Agent) logRiskConfirmationWait(sessionID string, call llm.ToolCallReque
 	if len(reasons) > 0 {
 		auditAttrs = append(auditAttrs, "risk_reasons", strings.Join(reasons, "; "))
 	}
+	auditAttrs = append(auditAttrs, "result", logging.ResultSucceeded)
 	a.audit("risk_confirmation_wait", auditAttrs...)
 }
 
 func (a *Agent) logRiskConfirmationResult(sessionID string, call llm.ToolCallRequest, risk tool.RiskLevel, action, extra, reason string) {
-	a.audit("risk_confirmation_result", "session_id", sessionID, "tool", call.Name, "risk", risk, "action", action, "extra", extra, "reason", reason)
+	a.audit("risk_confirmation_result", "session_id", sessionID, "tool", call.Name, "risk", risk, "action", action, "extra", extra, "reason", reason, "result", riskConfirmationResult(action))
+}
+
+// riskConfirmationResult 把用户的确认动作映射成操作结果。动作取值来自
+// toolrun_adapter：expire（确认过期）、stop（用户停止）、reject（用户拒绝）、
+// confirm / confirmtool / confirmall（放行）。拒绝是 rejected；过期与停止是 canceled
+// （不是故障，也不是策略拒绝）；放行记 succeeded。
+func riskConfirmationResult(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "reject", "rejected":
+		return logging.ResultRejected
+	case "expire", "expired", "stop", "stopped":
+		return logging.ResultCanceled
+	default:
+		return logging.ResultSucceeded
+	}
 }
 
 func previewLogText(text string) string {

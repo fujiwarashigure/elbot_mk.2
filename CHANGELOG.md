@@ -48,6 +48,8 @@
 
 ### Changed
 
+- 审计日志接入操作结果契约（第一批）：为来源能自行证明结果的记录补上 `result` 字段，使"失败 / 被拒绝 / 被跳过 / 被取消 / 成功"可以按字段筛选，而不再只靠 `error` 或 `reason` 文案推断。本批改动 23 个文件，`internal/agent` 现在有 69 处契约取值，覆盖失败（`asr_failed`、`budget_write_error`、`platform_send_error`、`persistence_error`、`turn_response_timeout`、`llm_error`、`message_error`、`skill_preload_failed`、三个 `*_send_error`）、拒绝（`budget_denied`、`model_denied`、`provider_concurrency_rejected`、`background_shell_rejected`）、跳过（`asr_skipped`、`inbox_queue_full`、`session_idle_expired`、`platform_recall_noop`、`group_reminder_skip`、各类预载跳过）、成功（群策略/群知识/群投票/群报名/群提醒的创建与更新、预算预占与结算、`llm_usage`、`runtime_state_reloaded`、后台预载）。少数结果由调用点上下文决定的地方把值交给函数（`tool_call` 按 `success` 映射成功/失败，`risk_confirmation_result` 按动作区分拒绝、取消与放行，预载跳过复用 `preloadSkipResult`），这 11 处无法静态判定，由各自的单元测试覆盖。ERROR 级审计入口 `auditError` 统一补 `result=failed`（调用方显式给出 `result` 时不覆盖）。
+- `internal/logging/contract_source_test.go` 新增源码级契约校验：扫描仓库内所有 `.go`（跳过测试文件）中写成常量或字面量的 `result` 值，发现未登记取值即失败。没有这层检查时，一个拼错的取值会安静写进日志、查询侧再也筛不到。
 - 新增 fork 版日志契约（`internal/logging/contract.go`）：登记合法的来源标识（`module`：app / agent / session / hook / platform / delivery / cron / elnis / model / storage / media / maintenance / tool）与操作结果（`result`：succeeded / failed / canceled / rejected / skipped），并提供 `ValidLogModule` / `ValidLogResult`。所有 Agent 审计记录现在都带 `module=agent`；此前只有 Hook 侧写 `module=hook`，而 `/log --hook`、`/audit --hook` 依赖这个字段，Agent 侧却没有任何写入端约束。新增来源必须先登记，避免出现第三套命名。日志文件格式与 `LogEntry.Fields` 查询契约本轮不变：上游的九字段 `LogRecord` 与 JSONL 落盘未实施。
 - `/resume` 与 `/fork` 返回的历史消息预览现在每条最多保留 200 个 Unicode 字符（超出加 `...`），单条长消息不再整段进入回复；`/messages` 的 40 字预览不变。
 - `/log --hook` 与 `/audit --hook` 改为筛选 `module=hook` 记录，不再使用并不存在的 `event=hook`；`--hook` 也不再覆盖同一命令里已经给出的 `--event` 筛选。Hook 运行日志与 Hook 审计事件现在统一带 `module=hook`。

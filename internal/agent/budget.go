@@ -9,6 +9,7 @@ import (
 	"elbot/internal/config"
 	"elbot/internal/contextmgr"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/storage"
 )
 
@@ -554,7 +555,7 @@ func (a *Agent) beginChatBudget(ctx context.Context, selection config.ModelSelec
 		}
 		a.markBudgetWriteFailed(false)
 	}
-	a.audit("chat_budget_reserved", "model", selection.Model, "call_id", callID, "reserved_tokens", reservedTokens, "reserved_cost_micros", reservedCost)
+	a.audit("chat_budget_reserved", "model", selection.Model, "call_id", callID, "reserved_tokens", reservedTokens, "reserved_cost_micros", reservedCost, "result", logging.ResultSucceeded)
 	return &chatBudgetReservation{key: key, callID: callID, model: strings.TrimSpace(selection.Model), reservedTokens: reservedTokens, reservedCost: reservedCost}, nil
 }
 
@@ -615,18 +616,18 @@ func (a *Agent) settleChatBudget(ctx context.Context, reservation *chatBudgetRes
 	a.budgetMu.Unlock()
 
 	if release {
-		a.audit("chat_budget_released", "model", reservation.model, "call_id", reservation.callID)
+		a.audit("chat_budget_released", "model", reservation.model, "call_id", reservation.callID, "result", logging.ResultSucceeded)
 	} else if uncertain {
 		a.audit("chat_budget_uncertain", "model", reservation.model, "call_id", reservation.callID, "charged_tokens", actualTokens, "charged_cost_micros", actualCost)
 	} else {
-		a.audit("chat_budget_settled", "model", reservation.model, "call_id", reservation.callID, "tokens", actualTokens, "cost_micros", actualCost)
+		a.audit("chat_budget_settled", "model", reservation.model, "call_id", reservation.callID, "tokens", actualTokens, "cost_micros", actualCost, "result", logging.ResultSucceeded)
 	}
 	if a.statePath == "" {
 		return
 	}
 	if err := a.saveRuntimeState(); err != nil {
 		a.markBudgetWriteFailed(true)
-		a.audit("budget_write_error", "kind", "chat_settle", "call_id", reservation.callID, "error", err.Error())
+		a.audit("budget_write_error", "kind", "chat_settle", "call_id", reservation.callID, "error", err.Error(), "result", logging.ResultFailed)
 		return
 	}
 	a.markBudgetWriteFailed(false)
@@ -678,7 +679,7 @@ func (a *Agent) recordChatUsage(ctx context.Context, model string, usage *llm.Us
 	}
 	if err := a.saveRuntimeState(); err != nil {
 		a.markBudgetWriteFailed(true)
-		a.audit("budget_write_error", "kind", "chat_usage", "model", model, "error", err.Error())
+		a.audit("budget_write_error", "kind", "chat_usage", "model", model, "error", err.Error(), "result", logging.ResultFailed)
 		return
 	}
 	a.markBudgetWriteFailed(false)
@@ -704,7 +705,7 @@ func (a *Agent) recordProviderRetry(ctx context.Context, provider string) {
 	if a.statePath != "" {
 		if err := a.saveRuntimeState(); err != nil {
 			a.markBudgetWriteFailed(true)
-			a.audit("budget_write_error", "kind", "provider_retry", "provider", provider, "error", err.Error())
+			a.audit("budget_write_error", "kind", "provider_retry", "provider", provider, "error", err.Error(), "result", logging.ResultFailed)
 		}
 	}
 }
@@ -790,7 +791,7 @@ func (a *Agent) releaseToolExecution(ctx context.Context, callID string) {
 	if a.statePath != "" {
 		if err := a.saveRuntimeState(); err != nil {
 			a.markBudgetWriteFailed(true)
-			a.audit("budget_write_error", "kind", "release_execution", "call_id", callID, "error", err.Error())
+			a.audit("budget_write_error", "kind", "release_execution", "call_id", callID, "error", err.Error(), "result", logging.ResultFailed)
 		}
 	}
 }

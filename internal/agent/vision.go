@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/media"
 )
 
@@ -67,7 +68,7 @@ func (a *Agent) describeVisionMessages(ctx context.Context, messages []llm.LLMMe
 	}
 	if strings.TrimSpace(a.visionSelection.Provider) != "" && strings.TrimSpace(a.visionSelection.Model) != "" {
 		if err := a.authorizeExecutionModelSelection(ctx, a.visionSelection); err != nil {
-			a.audit("model_denied", "kind", "vision", "provider", a.visionSelection.Provider, "model", a.visionSelection.Model, "reason", err.Error(), "scope", contextOverflowKey(a.scope(ctx)))
+			a.audit("model_denied", "kind", "vision", "provider", a.visionSelection.Provider, "model", a.visionSelection.Model, "reason", err.Error(), "scope", contextOverflowKey(a.scope(ctx)), "result", logging.ResultRejected)
 			return nil, false
 		}
 	}
@@ -89,7 +90,7 @@ func (a *Agent) describeVisionMessages(ctx context.Context, messages []llm.LLMMe
 		reservationRequests = append(reservationRequests, budgetReservationRequest{CallID: callID, Digest: digest})
 	}
 	if ok, reason := a.reserveBudgetBatchRequests(ctx, "vision", reservationRequests); !ok {
-		a.audit("budget_denied", "kind", "vision", "reason", reason, "scope", contextOverflowKey(a.scope(ctx)))
+		a.audit("budget_denied", "kind", "vision", "reason", reason, "scope", contextOverflowKey(a.scope(ctx)), "result", logging.ResultRejected)
 		return nil, false
 	}
 

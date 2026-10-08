@@ -104,15 +104,15 @@ func (a *Agent) RunBackground(ctx context.Context, req background.RunRequest) (b
 	if len(req.CachedTools) > 0 {
 		if cached := backgroundCachedTools(req.CachedTools); len(cached) > 0 {
 			a.rememberCachedTools(ctx, bgSession, cached)
-			a.audit("background_external_tools_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "tools", cachedToolNames(cached))
+			a.audit("background_external_tools_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "tools", cachedToolNames(cached), "result", logging.ResultSucceeded)
 		}
 	}
 	preloaded := a.preloadBackgroundResources(ctx, bgSession, backgroundToolListNames(req.ToolListNames))
 	if len(preloaded.Tools) > 0 {
-		a.audit("background_tool_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "tools", preloaded.Tools)
+		a.audit("background_tool_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "tools", preloaded.Tools, "result", logging.ResultSucceeded)
 	}
 	if len(preloaded.Skills) > 0 {
-		a.audit("background_skill_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "skills", preloaded.Skills)
+		a.audit("background_skill_preloaded", "session_id", bgSession.ID, "kind", req.Kind, "name", req.Name, "skills", preloaded.Skills, "result", logging.ResultSucceeded)
 	}
 	prompt := backgroundPromptWithSkills(req.Prompt, preloaded.SkillPrompt)
 	// 预载期间前台可能刚刚接管这个 Session，进入模型前再确认一次。

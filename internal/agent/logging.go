@@ -52,7 +52,22 @@ func (a *Agent) auditWarn(event string, attrs ...any) {
 }
 
 func (a *Agent) auditError(event string, attrs ...any) {
+	// ERROR 级审计记录按约定就是"这次操作失败了"：补 result=failed，除非调用方自己
+	// 明确给了 result（例如将来某个 ERROR 记录其实是被拒绝）。
+	if !auditAttrsHaveKey(attrs, "result") {
+		attrs = append([]any{"result", logging.ResultFailed}, attrs...)
+	}
 	a.auditLog(slog.LevelError, event, attrs...)
+}
+
+// auditAttrsHaveKey 报告附加属性里是否已经有该键；审计属性按 key/value 成对给出。
+func auditAttrsHaveKey(attrs []any, key string) bool {
+	for i := 0; i+1 < len(attrs); i += 2 {
+		if name, ok := attrs[i].(string); ok && name == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) auditLog(level slog.Level, event string, attrs ...any) {

@@ -9,6 +9,7 @@ import (
 
 	"elbot/internal/config"
 	"elbot/internal/groupkb"
+	"elbot/internal/logging"
 	"elbot/internal/session"
 )
 
@@ -31,9 +32,9 @@ func (a *Agent) tryGroupKnowledgeAnswer(ctx context.Context, text string) bool {
 	if answer == "" {
 		return false
 	}
-	a.audit("group_knowledge_answer", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", a.actor(ctx).ID, "knowledge_id", entry.ID)
+	a.audit("group_knowledge_answer", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", a.actor(ctx).ID, "knowledge_id", entry.ID, "result", logging.ResultSucceeded)
 	if _, err := a.sendChatWithReceipt(ctx, answer); err != nil {
-		a.audit("group_knowledge_send_error", "platform", scope.Platform, "scope", scope.PlatformScopeID, "knowledge_id", entry.ID, "error", err.Error())
+		a.audit("group_knowledge_send_error", "platform", scope.Platform, "scope", scope.PlatformScopeID, "knowledge_id", entry.ID, "error", err.Error(), "result", logging.ResultFailed)
 	}
 	return true
 }

@@ -11,6 +11,7 @@ import (
 	"elbot/internal/delivery"
 	"elbot/internal/hook"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/request"
 	runtimestatus "elbot/internal/runtime"
 	"elbot/internal/storage"
@@ -94,7 +95,7 @@ func (a *Agent) handleTurnContextDone(ctx context.Context, sessionID string, err
 		if a.logger != nil {
 			a.logger.WarnContext(ctx, "turn response timeout", "session_id", sessionID, "error", err.Error())
 		}
-		a.audit("turn_response_timeout", "session_id", sessionID, "error", err.Error())
+		a.audit("turn_response_timeout", "session_id", sessionID, "error", err.Error(), "result", logging.ResultFailed)
 		out.SendNotice(ctx, slog.LevelWarn, message)
 	}
 	return nil
@@ -433,7 +434,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 					a.mapSentAssistantMessage(ctx, session.ID, assistantMessage.ID, receipt)
 				}
 				a.auditPartialPlatformSend(session.ID, "send_assistant_message", receipt, err)
-				a.audit("platform_send_error", "session_id", session.ID, "operation", "send_assistant_message", "error", err.Error())
+				a.audit("platform_send_error", "session_id", session.ID, "operation", "send_assistant_message", "error", err.Error(), "result", logging.ResultFailed)
 				return err
 			}
 			if persistedAssistant {
@@ -447,7 +448,7 @@ func (a *Agent) runChat(ctx context.Context, session *storage.Session, text stri
 		a.mapSentAssistantMessage(ctx, session.ID, assistantMessage.ID, finalReceipt)
 	}
 	if err := a.sessions.Touch(ctx, session); err != nil {
-		a.audit("persistence_error", "session_id", session.ID, "operation", "touch_session", "error", err.Error())
+		a.audit("persistence_error", "session_id", session.ID, "operation", "touch_session", "error", err.Error(), "result", logging.ResultFailed)
 		return err
 	}
 	a.recordUsage(session.ID, usage)

@@ -9,6 +9,7 @@ import (
 
 	agentcommands "elbot/internal/agent/commands"
 	"elbot/internal/delivery"
+	"elbot/internal/logging"
 )
 
 // runtimeStateWatchEvery bounds how long an external state.toml edit can stay
@@ -70,7 +71,7 @@ func (a *Agent) pollRuntimeState(ctx context.Context) {
 	if !reload.Applied || len(reload.Changed) == 0 {
 		return
 	}
-	a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "watch")
+	a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "watch", "result", logging.ResultSucceeded)
 	_, _ = a.SendNotice(ctx, delivery.Notice{Outputs: []delivery.Output{delivery.Text(runtimeStateReloadText(reload))}, Level: slog.LevelInfo})
 }
 
@@ -85,7 +86,7 @@ func (a *Agent) ReloadRuntimeState(ctx context.Context) (agentcommands.RuntimeSt
 		return report, err
 	}
 	if reload.Applied && len(reload.Changed) > 0 {
-		a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "command")
+		a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "command", "result", logging.ResultSucceeded)
 	}
 	return report, nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/security"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
@@ -169,7 +170,7 @@ func (a *Agent) persistTurnMessage(ctx context.Context, message *storage.Message
 		message.Content = llm.SegmentsContentText(segments)
 	}
 	if err := a.store.Messages().Append(ctx, message); err != nil {
-		a.audit("persistence_error", "session_id", message.SessionID, "operation", operation, "error", err.Error())
+		a.audit("persistence_error", "session_id", message.SessionID, "operation", operation, "error", err.Error(), "result", logging.ResultFailed)
 		return err
 	}
 	return nil

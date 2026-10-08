@@ -9,6 +9,7 @@ import (
 
 	"elbot/internal/config"
 	"elbot/internal/delivery"
+	"elbot/internal/logging"
 	"elbot/internal/security"
 	"elbot/internal/session"
 )
@@ -149,7 +150,7 @@ func (a *Agent) ReminderCreate(ctx context.Context, whenText, text string) (stri
 	}); err != nil {
 		return "", err
 	}
-	a.audit("group_reminder_create", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", actor.ID, "reminder_id", entry.ID)
+	a.audit("group_reminder_create", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", actor.ID, "reminder_id", entry.ID, "result", logging.ResultSucceeded)
 	return fmt.Sprintf("提醒已创建：%s（%s）\n%s", entry.ID, dueAt.Format("2006-01-02 15:04:05"), entry.Text), nil
 }
 
@@ -286,7 +287,7 @@ func (a *Agent) processDueReminders(ctx context.Context, now time.Time) {
 				if state == groupRuntimeRemoved || state == groupRuntimeUnavailable {
 					updated[i].Status = "skipped"
 					changed = true
-					a.audit("group_reminder_skip", "platform", platform, "scope", scopeID, "reminder_id", entry.ID, "reason", state)
+					a.audit("group_reminder_skip", "platform", platform, "scope", scopeID, "reminder_id", entry.ID, "reason", state, "result", logging.ResultSkipped)
 				}
 				continue
 			}
@@ -306,19 +307,19 @@ func (a *Agent) processDueReminders(ctx context.Context, now time.Time) {
 			}
 			_, err := a.SendNotice(ctx, delivery.Notice{Target: delivery.Target{Platform: platform, ScopeID: scopeID}, Outputs: []delivery.Output{delivery.Text(text)}})
 			if err != nil {
-				a.audit("group_reminder_send_error", "platform", platform, "scope", scopeID, "reminder_id", entry.ID, "error", err.Error())
+				a.audit("group_reminder_send_error", "platform", platform, "scope", scopeID, "reminder_id", entry.ID, "error", err.Error(), "result", logging.ResultFailed)
 				continue
 			}
 			updated[i].Status = "sent"
 			changed = true
-			a.audit("group_reminder_sent", "platform", platform, "scope", scopeID, "reminder_id", entry.ID)
+			a.audit("group_reminder_sent", "platform", platform, "scope", scopeID, "reminder_id", entry.ID, "result", logging.ResultSucceeded)
 		}
 		snapshot.Reminders[key] = updated
 	}
 	if changed {
 		a.setGroupServicesSnapshot(snapshot)
 		if err := a.saveRuntimeState(); err != nil {
-			a.audit("group_services_write_error", "kind", "reminder_dispatch", "error", err.Error())
+			a.audit("group_services_write_error", "kind", "reminder_dispatch", "error", err.Error(), "result", logging.ResultFailed)
 		}
 	}
 }

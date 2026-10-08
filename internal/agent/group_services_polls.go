@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"elbot/internal/config"
+	"elbot/internal/logging"
 )
 
 func (a *Agent) PollCreate(ctx context.Context, question string, options []string) (string, error) {
@@ -77,7 +78,7 @@ func (a *Agent) PollCreate(ctx context.Context, question string, options []strin
 	}); err != nil {
 		return "", err
 	}
-	a.audit("group_poll_create", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", actor.ID, "poll_id", entry.ID)
+	a.audit("group_poll_create", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", actor.ID, "poll_id", entry.ID, "result", logging.ResultSucceeded)
 	return formatGroupPoll(entry, ""), nil
 }
 
@@ -197,7 +198,7 @@ func (a *Agent) PollClose(ctx context.Context, id string) (string, error) {
 	if !found {
 		return fmt.Sprintf("没有找到投票 %q", strings.TrimSpace(id)), nil
 	}
-	a.audit("group_poll_close", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", a.actor(ctx).ID, "poll_id", closed.ID)
+	a.audit("group_poll_close", "platform", scope.Platform, "scope", scope.PlatformScopeID, "actor_id", a.actor(ctx).ID, "poll_id", closed.ID, "result", logging.ResultSucceeded)
 	return formatGroupPoll(closed, a.actor(ctx).ID), nil
 }
 

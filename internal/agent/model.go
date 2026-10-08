@@ -17,6 +17,7 @@ import (
 	"elbot/internal/config"
 	"elbot/internal/delivery"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/redact"
 	"elbot/internal/storage"
 )
@@ -701,7 +702,7 @@ func (a *Agent) saveRuntimeState() error {
 			a.logger.Warn("reload externally edited state config", "path", a.statePath, "error", err.Error())
 		}
 	} else if reload.Applied && len(reload.Changed) > 0 {
-		a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "write_back")
+		a.audit("runtime_state_reloaded", "path", reload.Path, "sections", strings.Join(reload.Changed, ","), "trigger", "write_back", "result", logging.ResultSucceeded)
 	}
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
