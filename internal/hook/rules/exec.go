@@ -17,6 +17,7 @@ import (
 	hookoutput "elbot/internal/hook/output"
 	hookprotocol "elbot/internal/hook/protocol"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 )
 
 const (
@@ -339,11 +340,15 @@ func (m Module) handleProtocolRequest(ctx context.Context, event hook.Event, act
 		if !ok || caller == nil {
 			return nil, fmt.Errorf("platform %q does not support api calls", platformName)
 		}
-		m.audit("hook.platform_call", "module", "hook", "platform", platformName, "api", api, "rule", firstNonEmpty(action.source.FinalName, action.ActionName))
+		// 事件名与 hook_tool_call / hook_tool_error 对齐使用下划线（原为
+		// hook.platform_call，与其余 hook 审计事件分属两套命名）。结果由真实调用
+		// 结果决定，不再只看"发起过调用"。
 		resp, err := caller.CallPlatformAPI(ctx, api, callParams)
 		if err != nil {
+			m.audit("hook_platform_call", "module", logging.ModuleHook, "platform", platformName, "api", api, "rule", firstNonEmpty(action.source.FinalName, action.ActionName), "error", err.Error(), "result", logging.ResultFailed)
 			return nil, err
 		}
+		m.audit("hook_platform_call", "module", logging.ModuleHook, "platform", platformName, "api", api, "rule", firstNonEmpty(action.source.FinalName, action.ActionName), "result", logging.ResultSucceeded)
 		var decoded any
 		if len(resp) > 0 && json.Unmarshal(resp, &decoded) == nil {
 			return decoded, nil

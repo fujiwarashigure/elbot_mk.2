@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"elbot/internal/command"
+	"elbot/internal/logging"
 	"elbot/internal/security"
 	"elbot/internal/session"
 	"elbot/internal/storage"
@@ -68,7 +69,7 @@ func (e *commandExecutor) Handle(ctx context.Context, text string) (bool, error)
 		allowed = actor.Role == security.RoleSuperadmin || (e.groupAdminGrant != nil && e.groupAdminGrant(ctx, parsed.Name))
 	}
 	if hasInfo && !allowed {
-		e.audit("permission_denied", "actor_id", actor.ID, "command", text, "reason", "slash_command_requires_superadmin")
+		e.audit("permission_denied", "actor_id", actor.ID, "command", text, "reason", "slash_command_requires_superadmin", "result", logging.ResultRejected)
 		required := "超级管理员"
 		if info.GroupAdminNeedsGrant {
 			required = "超级管理员，或已由超级管理员显式授权的当前群管理员"

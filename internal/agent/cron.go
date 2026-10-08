@@ -13,6 +13,7 @@ import (
 	elcron "elbot/internal/cron"
 	"elbot/internal/delivery"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 	"elbot/internal/security"
 	"elbot/internal/session"
@@ -303,19 +304,23 @@ func (a *Agent) preloadBackgroundResources(ctx context.Context, session *storage
 			continue
 		}
 		candidate, ok := a.toolRuntime.registry.Get(name)
-		if !ok || !tool.InfoAvailableInContext(ctx, candidate.Info()) || !tool.CanAccessTool(actor, policy, candidate.Info()) {
-			a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "not_found_or_not_allowed")
+		if !ok {
+			a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", tool.ToolReasonNotFound, "result", logging.ResultSkipped)
+			continue
+		}
+		if reason := tool.ToolAvailabilityReason(ctx, actor, policy, candidate); reason != "" {
+			a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", reason, "result", preloadSkipResult(reason))
 			continue
 		}
 		if detailer, ok := candidate.(tool.DetailProvider); ok {
 			if candidate.Info().Hidden {
-				a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "hidden_skill")
+				a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", tool.ToolReasonHidden, "result", logging.ResultSkipped)
 				continue
 			}
 			block, _ := skillDetailBlock(security.WithActor(ctx, actor), candidate, detailer)
 			detail := strings.TrimSpace(tool.RenderDetailBlocks([]tool.DetailBlock{block}))
 			if detail == "" {
-				a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "empty_skill_detail")
+				a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "empty_skill_detail", "result", logging.ResultSkipped)
 				continue
 			}
 			if !seenSkills[name] {
@@ -342,12 +347,20 @@ func (a *Agent) preloadBackgroundTool(ctx context.Context, session *storage.Sess
 		return nil
 	}
 	candidate, ok := a.toolRuntime.registry.Get(name)
-	if !ok || !tool.InfoAvailableInContext(ctx, candidate.Info()) || !tool.CanAccessTool(actor, policy, candidate.Info()) || (!allowHidden && candidate.Info().Hidden) {
-		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "not_found_or_not_allowed")
+	if !ok {
+		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", tool.ToolReasonNotFound, "result", logging.ResultSkipped)
+		return nil
+	}
+	if reason := tool.ToolAvailabilityReason(ctx, actor, policy, candidate); reason != "" {
+		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", reason, "result", preloadSkipResult(reason))
+		return nil
+	}
+	if candidate.Info().Hidden && !allowHidden {
+		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", tool.ToolReasonHidden, "result", logging.ResultSkipped)
 		return nil
 	}
 	if _, isSkill := candidate.(tool.DetailProvider); isSkill {
-		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "skill_has_no_schema")
+		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "skill_has_no_schema", "result", logging.ResultSkipped)
 		return nil
 	}
 	var discovery *tool.DiscoveryResult
@@ -361,11 +374,23 @@ func (a *Agent) preloadBackgroundTool(ctx context.Context, session *storage.Sess
 		discovery, discovered = a.discoveryForBackgroundToolNames(ctx, []string{name}, actor, policy)
 	}
 	if !discovered || discovery == nil || len(discovery.Tools) == 0 {
-		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", "no_schema")
+		a.audit("background_preload_skipped", "session_id", session.ID, "name", name, "reason", tool.ToolReasonNoSchema, "result", logging.ResultSkipped)
 		return nil
 	}
 	newTools, _ := a.rememberPreloadedDiscovery(ctx, session, discovery, seen)
 	return newTools
+}
+
+// preloadSkipResult 把工具不可用原因映射成操作结果。策略与角色拒绝是明确裁决
+// （rejected），工具不存在或当前上下文不可用则是"没轮到执行"（skipped）；两者混用会
+// 让拒绝率统计失真。
+func preloadSkipResult(reason string) string {
+	switch reason {
+	case tool.ToolReasonRiskDenied, tool.ToolReasonSuperadminOnly:
+		return logging.ResultRejected
+	default:
+		return logging.ResultSkipped
+	}
 }
 
 func (a *Agent) discoveryForBackgroundToolNames(ctx context.Context, names []string, actor security.Actor, policy *security.Policy) (*tool.DiscoveryResult, bool) {

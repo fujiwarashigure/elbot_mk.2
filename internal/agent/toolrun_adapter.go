@@ -10,6 +10,7 @@ import (
 	"elbot/internal/delivery"
 	"elbot/internal/hook"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/platform"
 	"elbot/internal/request"
 	runtimestatus "elbot/internal/runtime"
@@ -167,7 +168,7 @@ func (d agentToolRunDeps) RecordToolCall(ctx context.Context, sessionID string, 
 }
 
 func (d agentToolRunDeps) AuditToolDenied(ctx context.Context, sessionID string, call llm.ToolCallRequest, risk tool.RiskLevel, reason string) {
-	d.agent.audit("permission_denied", "actor_id", d.agent.actor(ctx).ID, "session_id", sessionID, "tool", call.Name, "risk", risk, "reason", reason)
+	d.agent.audit("permission_denied", "actor_id", d.agent.actor(ctx).ID, "session_id", sessionID, "tool", call.Name, "risk", risk, "reason", reason, "result", logging.ResultRejected)
 }
 
 func (d agentToolRunDeps) RememberDiscoveryResult(ctx context.Context, session *storage.Session, result *tool.Result) {

@@ -27,6 +27,9 @@
 ### Fixed
 
 - 修复同一 Session 的并发写入互相丢字段：此前工具发现/预载、`workspace_dir`、上下文用量、压缩种子、后台会话 metadata、重命名/归档/置顶、恢复与心跳、模式激活、空闲过期和自动命名各自把手上读到的一份 Session 快照整行写回，两个写入重叠时后写的一方会把对方刚改的字段（例如预载工具时覆盖掉刚设置的 `workspace_dir`，或心跳覆盖掉工具缓存）一起回滚。`storage.SessionRepository` 新增 `Mutate(ctx, id, update)`：在单个 SQLite 事务里读取当前行、执行回调、写回并返回最新行；上述写路径全部改为在事务内基于最新行合并自己的字段，`mutateSessionMetadata` / `mutateMetadata` 只改动已知 metadata 键、保留未知键。
+- 审计日志恢复"事实可区分"：此前预载与发现路径把四类完全不同的判定压成同一个自由字符串 `reason="not_found_or_not_allowed"`（注册表里没有、当前上下文不可用、角色/策略拒绝、隐藏工具），事后无法区分策略拒绝与工具不存在。现在 `internal/tool` 提供唯一的判定入口（`ToolAvailabilityReason` / `ToolAccessReason` / `RegistryToolAvailabilityReason`），按互斥原因输出 `tool_not_found` / `tool_context_unavailable` / `tool_hidden` / `tool_requires_superadmin` / `tool_risk_above_allowed_level` / `tool_no_schema`，判定顺序与既有 `CanAccessTool` / `InfoAvailableInContext` 完全一致（有等价性测试固定），`background_preload_skipped` / `tool_preload_skipped` / `skill_wrapper_preload_skipped` 三类事件都带上新原因与 `result`；策略与角色拒绝记为 `rejected`，其余记为 `skipped`。
+- 统一 Hook 审计事件命名：`hook.tool_call`、`hook.platform_call` 改为 `hook_tool_call`、`hook_platform_call`，与 `hook_tool_call`、`hook_tool_error` 同属一套下划线命名，`/audit --event hook_tool_call` 不再漏掉 Hook 运行时桥接的工具调用；`hook_platform_call` 改为按真实调用结果记录（成功 `result=succeeded`、失败带 `error` 与 `result=failed`），不再只看"发起过调用"。
+- 审计属性里的错误对象统一转成脱敏字符串：此前部分调用点直接传 `error`（如 `skill_preload_failed`），输出取决于动态类型，可能变成无法按字段查询的结构。
 - 修复两处依赖过期快照的竞态：空闲过期现在在事务内重新判定 Session 是否仍然闲置，迟到的自动命名在事务内重新检查 `title_renamed`，不再覆盖刚完成的手动改名；后台会话创建也不再整行回写，metadata 合并与模式设置在同一事务内完成。
 - 修复后台任务的工具白名单可被绕过：此前 `toolrun.Resolve` 在缓存未命中时回落到全局 registry，后台任务按名字仍能解析并执行未预载的工具（包括本应禁止的 `discover_tool`）；现在后台上下文不再回落，`discover_tool` / `workspace` 一律不可用，`Schemas` 也按同一白名单过滤，外部声明的 `tool_cache` 在写入后台会话前先过滤。
 - 修复工具缓存重建时丢失 `ForegroundOnly` 标记：从会话 metadata 的 `discovered_tools` 重建 `toolrun.CachedTool` 时现在带上 `ForegroundOnly`，前台专用工具不会再进入后台会话。
@@ -44,6 +47,7 @@
 
 ### Changed
 
+- 新增 fork 版日志契约（`internal/logging/contract.go`）：登记合法的来源标识（`module`：app / agent / session / hook / platform / delivery / cron / elnis / model / storage / media / maintenance / tool）与操作结果（`result`：succeeded / failed / canceled / rejected / skipped），并提供 `ValidLogModule` / `ValidLogResult`。所有 Agent 审计记录现在都带 `module=agent`；此前只有 Hook 侧写 `module=hook`，而 `/log --hook`、`/audit --hook` 依赖这个字段，Agent 侧却没有任何写入端约束。新增来源必须先登记，避免出现第三套命名。日志文件格式与 `LogEntry.Fields` 查询契约本轮不变：上游的九字段 `LogRecord` 与 JSONL 落盘未实施。
 - `/resume` 与 `/fork` 返回的历史消息预览现在每条最多保留 200 个 Unicode 字符（超出加 `...`），单条长消息不再整段进入回复；`/messages` 的 40 字预览不变。
 - `/log --hook` 与 `/audit --hook` 改为筛选 `module=hook` 记录，不再使用并不存在的 `event=hook`；`--hook` 也不再覆盖同一命令里已经给出的 `--event` 筛选。Hook 运行日志与 Hook 审计事件现在统一带 `module=hook`。
 - 清理 v0.6.8 里“额度账本不含 token/货币与每用户/全局预算”的阶段性旧描述，改为与四维 token/费用账本一致的能力说明。

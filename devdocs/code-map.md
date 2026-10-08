@@ -45,13 +45,14 @@ rg -n "func Run|service run|completion|--client|RunCron" cmd internal/app intern
 先看：
 
 - `internal/config/`
-- `internal/logging/`
+- `internal/logging/`：`logging.go` 是日志中心与三份按日文件（`elbot-*` / `audit-*` / `elnis-*`，审计下限至少 info）；`reader.go` 是 `/log`、`/audit`、`/elwisp`、`/usage` 与维护报告共用的反向分块查询，读取 `LogEntry.Fields` 这种文本键值契约；`contract.go` 是 fork 版"来源标识（`module`）+ 操作结果（`result`）"最小契约的唯一出处（`ModuleAgent` / `ModuleHook` / `ResultRejected` 等常量、`ValidLogModule` / `ValidLogResult`）。**日志文件格式与字段查询契约本轮不变**：上游的九字段 LogRecord 与 JSONL 落盘未实施。
+- `internal/tool/availability.go`：`ToolAvailabilityReason` / `ToolAccessReason` / `RegistryToolAvailabilityReason` 把"工具为什么没被采用"拆成互斥的机器可读原因（`tool_not_found` / `tool_context_unavailable` / `tool_hidden` / `tool_requires_superadmin` / `tool_risk_above_allowed_level` / `tool_no_schema`），供预载与审计使用；判定顺序与 `CanAccessTool` / `InfoAvailableInContext` 一致，迁移调用点不得顺带改变准入。
 - `docs/configuration.md`
 
 常用搜索：
 
 ```bash
-rg -n "ELBOT_CONFIG_FILE|services.toml|providers.toml|state.toml|tool_tags.toml|TextHandler|audit" internal/config internal/logging docs/configuration.md
+rg -n "ELBOT_CONFIG_FILE|services.toml|providers.toml|state.toml|tool_tags.toml|TextHandler|audit|LogModule|ResultRejected|ToolReason" internal/config internal/logging internal/tool docs/configuration.md
 ```
 
 <!-- locator:health-ops -->

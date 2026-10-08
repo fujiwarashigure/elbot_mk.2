@@ -15,7 +15,8 @@
 
 - 基线：fork `main` @ `e724f4a`；上游 `refs/remotes/upstream/main` @ `8457fdd`；共同祖先 `3fb1234`。
 - 已落地：命名对齐（`api` → `api_mode`）、P0 全部 8 项、P1#3 工具发现/预载事务化、P1#5 会话整行快照 → 事务内字段更新、P1#4 后台接管（fork 原生最小版，`f9882b5`）。
-- 剩余：P1#1 日志与信号整改、P1#2 模型/会话服务化、P1#6 通知规则集中化；P2 换基路线 B（原生 Responses，待决策）。
+- 进行中：P1#1 日志与信号整改（已确认取 fork 最小版 A：只做来源/结果最小契约 + 修事实丢失缺陷，不改文件格式与查询契约）→ 见任务 2。
+- 剩余：P1#1 剩余来源分批迁移、P1#2 模型/会话服务化、P1#6 通知规则集中化；P2 换基路线 B（原生 Responses，用户已确认本轮不决策）。
 
 ---
 
@@ -71,13 +72,27 @@
 
 ---
 
-## 2. [ ] P1#1 日志与信号整改（5–8 人日）
+## 2. [~] P1#1 日志与信号整改（5–8 人日）
 
-- **上游来源**：`internal/signal/*`、`internal/logging/{record,signals}.go`、`internal/events/*` 以及各产生来源的迁移；上游自己的目标契约见其 `devdocs/signals-and-logging.md`。
-- **fork 落点**：fork 没有 `internal/events`，`internal/logging` 也没有 `record.go` / `signals.go`；需要先定"来源标识 + 事件类型"的 fork 版最小契约，再逐包把日志来源补齐（跨 30+ 包，是这项的主要成本）。
-- **前置**：无。**被依赖**：P1#6 通知规则集中化（任务 4）以本项为前置。
-- **建议拆法**：① 契约与命名定稿（含 `--log`/`/log` 过滤参数兼容）② logging 包内 record/signals 骨架 ③ 按包分批迁移来源（每批可独立提交）④ 文档。
-- **验收**：`/log`、`/audit` 的筛选参数在新来源下仍可用；每批迁移后跑受影响包测试 + `internal/app`。
+**范围已与用户确认（取 fork 最小版 A）**：只做"最小契约 + 修事实丢失缺陷"，**不改日志文件格式、不改 `LogEntry.Fields` 查询契约**；上游的九字段 `LogRecord`、JSONL 落盘、`internal/events` / `internal/signal` 全量迁移列入"不做/待决策"，不在本项范围内。
+
+**盘点结论（本次实测）**：fork 的审计事件共 **62 个名字散在 7 个包**，触发方式有 3 套并行写法——`internal/agent` 的 `a.audit("event", ...)`（消息固定 `audit event`）、`internal/hook/rules` 的 `hook_tool_call` / `hook_tool_error`、`hook/runtime` 的 `hook.tool_call` 与 `internal/hook/rules/exec.go` 的 `hook.platform_call`（带点号前缀，与前者不是同一套命名）。
+
+**已完成（本轮）**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `internal/logging/contract.go`（新） | fork 版来源标识 + 操作结果契约：`ModuleApp`…`ModuleTool` 共 13 个已登记来源、`ModuleHook` 等常量、`Result{Succeeded,Failed,Canceled,Rejected,Skipped}`、`LogModules()` / `ValidLogModule()` / `ValidLogResult()`；文件头写明与上游九字段契约的边界（正文长度、JSON 正文、JSONL 落盘本轮不实施） |
+| `internal/tool/availability.go`（新） | 工具"为什么没被采用"的互斥机器可读原因与唯一判定入口：`ToolAvailabilityReason` / `ToolAccessReason` / `RegistryToolAvailabilityReason`，原因常量 `tool_not_found` / `tool_context_unavailable` / `tool_hidden` / `tool_requires_superadmin` / `tool_risk_above_allowed_level` / `tool_no_schema` |
+| `internal/agent/cron.go`、`tool_directive.go` | `background_preload_skipped` / `tool_preload_skipped` / `skill_wrapper_preload_skipped` 不再输出 `not_found_or_not_allowed`，改为新原因 + `result`（策略/角色拒绝 `rejected`，其余 `skipped`）；`canPreloadToolRoot` / `canPreloadSkill` 改为委托给原因函数，`@skill:` 根与包装工具分成 `preloadSkillRootReason` / `preloadSkillWrapperReason`（包装工具**不**按 Hidden 拒绝——隐藏是包装工具常态） |
+| `internal/agent/logging.go` | 所有 Agent 审计记录带 `module=agent`；新增 `normalizeAuditAttrs` 把属性里的 `error` 统一转成脱敏字符串 |
+| `internal/agent/toolrun_adapter.go`、`command_runtime.go` | `permission_denied` 带 `result=rejected` |
+| `internal/hook/runtime/tool_bridge.go`、`rules/action.go`、`rules/exec.go` | `hook.tool_call` → `hook_tool_call`、`hook.platform_call` → `hook_platform_call`；`hook_platform_call` 改为按真实调用结果记录（成功/失败带 `error` 与 `result`）；错误对象统一字符串化 |
+| 测试（新） | `internal/logging/contract_test.go`、`internal/tool/availability_test.go`（含"新原因入口与 `CanAccessTool`+`InfoAvailableInContext` 判定等价"的固定测试）、`internal/agent/logging_test.go`（`module` 来源、无 logger 时 noop、错误属性转换） |
+
+**剩余步骤**：按包分批把其余 50+ 个审计事件纳入契约（补 `module` 与 `result`），并复核 `/log`、`/audit` 的筛选参数在新来源下仍可用；每批迁移后跑受影响包测试 + `internal/app`。上游式的九字段契约是否要做（含 JSONL 与 Reader 重写）需要用户另行决策，本项不擅自扩大。
+
+**验收**：`/log`、`/audit` 的筛选参数在新来源下仍可用；每批迁移后跑受影响包测试 + `internal/app`。
 
 ## 3. [ ] P1#2 模型/会话服务化（5–8 人日）
 

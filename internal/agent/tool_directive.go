@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"elbot/internal/directive"
+	"elbot/internal/logging"
 	"elbot/internal/security"
 	"elbot/internal/storage"
 	"elbot/internal/tool"
@@ -20,6 +21,15 @@ type toolDirectiveResult struct {
 	ModeBlocked bool
 	Err         error
 }
+
+// toolReasonSkillHasNoSchema 表示该名字是 Skill 本体（详情提供者），不是可注入的
+// top-level 工具 schema。它与 internal/tool 的原因常量同属一套取值，因此只在 agent
+// 内部用于包装工具路径。
+const toolReasonSkillHasNoSchema = "skill_has_no_schema"
+
+// toolReasonNotSkillLike 表示 @skill: 指向的工具不是详情提供者（是普通工具），不能按
+// Skill 注入。
+const toolReasonNotSkillLike = "not_a_skill"
 
 type skillDirectiveResult struct {
 	Text             string
@@ -239,13 +249,17 @@ func (a *Agent) preloadToolNames(ctx context.Context, session *storage.Session, 
 			continue
 		}
 		root, ok := a.toolRuntime.registry.Get(name)
-		if !ok || !a.canPreloadToolRoot(actor, policy, root) {
-			a.audit("tool_preload_skipped", "session_id", session.ID, "tool", name, "reason", "not_found_or_not_allowed")
+		if !ok {
+			a.audit("tool_preload_skipped", "session_id", session.ID, "tool", name, "reason", tool.ToolReasonNotFound, "result", logging.ResultSkipped)
+			continue
+		}
+		if reason := preloadRootReason(actor, policy, root); reason != "" {
+			a.audit("tool_preload_skipped", "session_id", session.ID, "tool", name, "reason", reason, "result", preloadSkipResult(reason))
 			continue
 		}
 		discovery, ok := a.discoveryForToolNames(ctx, []string{name}, actor, policy)
 		if !ok || discovery == nil || len(discovery.Tools) == 0 {
-			a.audit("tool_preload_skipped", "session_id", session.ID, "tool", name, "reason", "no_schema")
+			a.audit("tool_preload_skipped", "session_id", session.ID, "tool", name, "reason", tool.ToolReasonNoSchema, "result", logging.ResultSkipped)
 			continue
 		}
 		newTools, _ := a.rememberPreloadedDiscovery(ctx, session, discovery, seenInjected)
@@ -274,21 +288,63 @@ func (a *Agent) rememberPreloadedDiscovery(ctx context.Context, session *storage
 }
 
 func (a *Agent) canPreloadToolRoot(actor security.Actor, policy *security.Policy, candidate tool.Tool) bool {
+	return preloadRootReason(actor, policy, candidate) == ""
+}
+
+// preloadRootReason 报告 @tool: 预载路径拒绝根工具的原因，可用时返回空字符串。
+// discover_tool 不通过预载暴露（它自己负责发现），因此按隐藏工具归类。
+func preloadRootReason(actor security.Actor, policy *security.Policy, candidate tool.Tool) string {
 	info := candidate.Info()
-	if info.Name == "discover_tool" || info.Hidden || !tool.CanAccessTool(actor, policy, info) {
-		return false
+	if info.Name == "discover_tool" {
+		return tool.ToolReasonHidden
+	}
+	if reason := tool.ToolAccessReason(actor, policy, info); reason != "" {
+		return reason
+	}
+	if info.Hidden {
+		return tool.ToolReasonHidden
 	}
 	_, isSkillLike := candidate.(tool.DetailProvider)
-	return !isSkillLike
+	if isSkillLike {
+		return tool.ToolReasonHidden
+	}
+	return ""
 }
 
 func (a *Agent) canPreloadSkill(actor security.Actor, policy *security.Policy, candidate tool.Tool) bool {
+	return preloadSkillRootReason(actor, policy, candidate) == ""
+}
+
+// preloadSkillRootReason 报告 @skill: 根 Skill 被拒绝的原因，可用时返回空字符串。
+// 隐藏的 Skill 不通过 @skill: 暴露，因此按隐藏工具归类。
+func preloadSkillRootReason(actor security.Actor, policy *security.Policy, candidate tool.Tool) string {
 	info := candidate.Info()
-	if info.Hidden || !tool.CanAccessTool(actor, policy, info) {
-		return false
+	if reason := tool.ToolAccessReason(actor, policy, info); reason != "" {
+		return reason
 	}
-	_, isSkillLike := candidate.(tool.DetailProvider)
-	return isSkillLike
+	if info.Hidden {
+		return tool.ToolReasonHidden
+	}
+	if _, isSkillLike := candidate.(tool.DetailProvider); !isSkillLike {
+		return toolReasonNotSkillLike
+	}
+	return ""
+}
+
+// preloadSkillWrapperReason 报告 Skill 包装工具被拒绝的原因，可用时返回空字符串。
+//
+// 这里**不**按 Hidden 拒绝：隐藏正是包装工具的常态，它们由 Skill 的 activate 列表显式
+// 声明后才注入（discover_tool 无法发现隐藏工具）。判定与最初的 preloadSkillWrapper
+// 一致：存在性 + 上下文可用性（由调用方先查）+ 策略，然后才是 skill-like。
+func preloadSkillWrapperReason(actor security.Actor, policy *security.Policy, candidate tool.Tool) string {
+	info := candidate.Info()
+	if reason := tool.ToolAccessReason(actor, policy, info); reason != "" {
+		return reason
+	}
+	if _, isSkillLike := candidate.(tool.DetailProvider); isSkillLike {
+		return toolReasonSkillHasNoSchema
+	}
+	return ""
 }
 
 func containsAny(text string, values ...string) bool {
@@ -316,17 +372,17 @@ func (a *Agent) preloadSkillWrapper(ctx context.Context, session *storage.Sessio
 		return nil, nil
 	}
 	candidate, ok := a.toolRuntime.registry.Get(name)
-	if !ok || !tool.InfoAvailableInContext(ctx, candidate.Info()) || !tool.CanAccessTool(actor, policy, candidate.Info()) {
-		a.audit("skill_wrapper_preload_skipped", "session_id", session.ID, "tool", name, "reason", "not_found_or_not_allowed")
+	if !ok {
+		a.audit("skill_wrapper_preload_skipped", "session_id", session.ID, "tool", name, "reason", tool.ToolReasonNotFound, "result", logging.ResultSkipped)
 		return nil, nil
 	}
-	if _, isSkillLike := candidate.(tool.DetailProvider); isSkillLike {
-		a.audit("skill_wrapper_preload_skipped", "session_id", session.ID, "tool", name, "reason", "skill_has_no_schema")
+	if reason := preloadSkillWrapperReason(actor, policy, candidate); reason != "" {
+		a.audit("skill_wrapper_preload_skipped", "session_id", session.ID, "tool", name, "reason", reason, "result", preloadSkipResult(reason))
 		return nil, nil
 	}
 	schema := candidate.Schema()
 	if schema.Function.Name == "" {
-		a.audit("skill_wrapper_preload_skipped", "session_id", session.ID, "tool", name, "reason", "empty_schema")
+		a.audit("skill_wrapper_preload_skipped", "session_id", session.ID, "tool", name, "reason", tool.ToolReasonNoSchema, "result", logging.ResultSkipped)
 		return nil, nil
 	}
 	info := candidate.Info()

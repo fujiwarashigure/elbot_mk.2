@@ -11,6 +11,7 @@ import (
 	"elbot/internal/hook"
 	hookoutput "elbot/internal/hook/output"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/tool"
 )
 
@@ -238,14 +239,14 @@ func (m Module) callTool(ctx context.Context, event hook.Event, action Action, s
 	}
 	toolResult, err := registered.Call(ctx, tool.CallRequest{ID: call.ID, Name: name, Arguments: json.RawMessage(arguments)})
 	if err != nil {
-		m.audit("hook_tool_error", "module", "hook", "tool", name, "error", err.Error())
+		m.audit("hook_tool_error", "module", logging.ModuleHook, "tool", name, "error", err.Error(), "result", logging.ResultFailed)
 		return actionResult{Error: err.Error()}, err
 	}
 	content := ""
 	if toolResult != nil {
 		content = llm.SegmentsContentText(toolResult.LLMSegments())
 	}
-	m.audit("hook_tool_call", "module", "hook", "tool", name)
+	m.audit("hook_tool_call", "module", logging.ModuleHook, "tool", name, "result", logging.ResultSucceeded)
 	return actionResult{Result: content}, nil
 }
 

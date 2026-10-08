@@ -9,6 +9,7 @@ import (
 
 	"elbot/internal/delivery"
 	"elbot/internal/llm"
+	"elbot/internal/logging"
 	"elbot/internal/security"
 	"elbot/internal/tool"
 )
@@ -99,14 +100,18 @@ func (w *worker) callTool(raw json.RawMessage) (any, error) {
 	result, err := registered.Call(callCtx, tool.CallRequest{ID: randomID("plugin"), Name: name, Arguments: params.Arguments})
 	if w.manager.opts.Audit != nil {
 		status := "ok"
+		result := logging.ResultSucceeded
 		if err != nil {
 			status = "error"
+			result = logging.ResultFailed
 		}
 		invocation := params.ToolContext
 		if params.Background {
 			invocation = params.Origin
 		}
-		w.manager.opts.Audit("hook.tool_call", "module", "hook", "hook", w.config.ID, "invocation", invocation, "tool", name, "status", status, "elapsed_ms", time.Since(started).Milliseconds(), "platform", actor.Platform, "user_id", actor.PlatformUserID)
+		// 事件名与 agent 侧一致使用下划线：此前这里是 hook.tool_call，与
+		// hook.rules 的 hook_tool_call 分属两套命名，--event 无法统一筛选。
+		w.manager.opts.Audit("hook_tool_call", "module", logging.ModuleHook, "hook", w.config.ID, "invocation", invocation, "tool", name, "status", status, "result", result, "elapsed_ms", time.Since(started).Milliseconds(), "platform", actor.Platform, "user_id", actor.PlatformUserID)
 	}
 	if err != nil {
 		return nil, err

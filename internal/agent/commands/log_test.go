@@ -226,11 +226,11 @@ func TestAuditCommandParsesTypeFiltersAndQuotedContains(t *testing.T) {
 	}
 
 	// --hook must not wipe an event filter set in the same command.
-	_, err = NewAudit(Deps{Logs: service}).Handle(context.Background(), command.Request{Args: `--event hook.tool_call --hook`})
+	_, err = NewAudit(Deps{Logs: service}).Handle(context.Background(), command.Request{Args: `--event hook_tool_call --hook`})
 	if err != nil {
 		t.Fatalf("audit handle combined: %v", err)
 	}
-	if service.query.Fields["event"] != "hook.tool_call" || service.query.Fields["module"] != "hook" {
+	if service.query.Fields["event"] != "hook_tool_call" || service.query.Fields["module"] != "hook" {
 		t.Fatalf("combined query = %#v", service.query)
 	}
 }
