@@ -1,12 +1,17 @@
 package app
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"elbot/internal/config"
+	"elbot/internal/llm"
+	"elbot/internal/llm/openai"
 )
 
 func TestDefaultModelFactoryBuildsEveryProvider(t *testing.T) {
@@ -38,5 +43,140 @@ func TestDefaultModelFactoryReportsProviderForInvalidProxy(t *testing.T) {
 	_, err := (defaultModelFactory{}).Build(ModelRequest{Foundation: foundation, Profiler: profilerStub{events: &events}})
 	if err == nil || !strings.Contains(err.Error(), `create provider "broken" client`) || !strings.Contains(err.Error(), "invalid proxy URL") {
 		t.Fatalf("Build() error = %v", err)
+	}
+}
+
+// protocolServer answers both protocols and records the paths it was asked for.
+func protocolServer(paths *[]string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*paths = append(*paths, r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			io.WriteString(w, `data: {"choices":[{"index":0,"delta":{"content":"chat-answer"},"finish_reason":"stop"}]}`+"\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+		case "/v1/responses":
+			io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"responses-answer"}`+"\n\n")
+			io.WriteString(w, `data: {"type":"response.completed","response":{"status":"completed"}}`+"\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+		w.(http.Flusher).Flush()
+	}))
+}
+
+func providerText(t *testing.T, client llm.LLM, model string) string {
+	t.Helper()
+	stream, err := client.ChatStream(context.Background(), llm.ChatRequest{
+		Model:    model,
+		Messages: []llm.LLMMessage{{Role: llm.RoleUser, Segments: llm.TextSegments("hi")}},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream(%s): %v", model, err)
+	}
+	var text strings.Builder
+	for chunk := range stream {
+		if chunk.Error != nil {
+			t.Fatalf("stream(%s) error: %v", model, chunk.Error)
+		}
+		text.WriteString(chunk.DeltaContent)
+	}
+	return text.String()
+}
+
+func TestProviderLLMRoutesEachModelToItsProtocol(t *testing.T) {
+	var paths []string
+	srv := protocolServer(&paths)
+	defer srv.Close()
+
+	client, err := newProviderLLM("mixed", config.ProviderConfig{
+		BaseURL: srv.URL + "/v1",
+		APIMode: "chat",
+		ModelConfigs: map[string]config.ModelConfig{
+			"resp-model": {APIMode: "response"},
+		},
+	}, openai.RequestOptions{})
+	if err != nil {
+		t.Fatalf("newProviderLLM: %v", err)
+	}
+
+	if got := providerText(t, client, "plain-model"); got != "chat-answer" {
+		t.Errorf("plain model answered %q, want chat-answer", got)
+	}
+	if got := providerText(t, client, "resp-model"); got != "responses-answer" {
+		t.Errorf("responses model answered %q, want responses-answer", got)
+	}
+	if len(paths) != 2 || paths[0] != "/v1/chat/completions" || paths[1] != "/v1/responses" {
+		t.Fatalf("request paths = %#v, want chat then responses", paths)
+	}
+}
+
+func TestProviderLLMUsesResponsesDefaultWithChatModelOverride(t *testing.T) {
+	var paths []string
+	srv := protocolServer(&paths)
+	defer srv.Close()
+
+	client, err := newProviderLLM("mixed", config.ProviderConfig{
+		BaseURL: srv.URL + "/v1",
+		APIMode: "response",
+		ModelConfigs: map[string]config.ModelConfig{
+			"legacy-model": {APIMode: "chat"},
+		},
+	}, openai.RequestOptions{})
+	if err != nil {
+		t.Fatalf("newProviderLLM: %v", err)
+	}
+
+	if got := providerText(t, client, "gpt-5.1"); got != "responses-answer" {
+		t.Errorf("default model answered %q, want responses-answer", got)
+	}
+	if got := providerText(t, client, "legacy-model"); got != "chat-answer" {
+		t.Errorf("override model answered %q, want chat-answer", got)
+	}
+	if len(paths) != 2 || paths[0] != "/v1/responses" || paths[1] != "/v1/chat/completions" {
+		t.Fatalf("request paths = %#v, want responses then chat", paths)
+	}
+}
+
+func TestProviderLLMStaysChatOnlyWithoutResponsesConfig(t *testing.T) {
+	var paths []string
+	srv := protocolServer(&paths)
+	defer srv.Close()
+
+	client, err := newProviderLLM("plain", config.ProviderConfig{BaseURL: srv.URL + "/v1"}, openai.RequestOptions{})
+	if err != nil {
+		t.Fatalf("newProviderLLM: %v", err)
+	}
+	if _, isRouter := client.(*protocolRouter); isRouter {
+		t.Fatal("a chat-only provider must not pay for a routing client")
+	}
+	if got := providerText(t, client, "any-model"); got != "chat-answer" {
+		t.Errorf("answer = %q, want chat-answer", got)
+	}
+}
+
+func TestDefaultModelFactoryBuildsResponsesProvider(t *testing.T) {
+	events := []string{}
+	foundation := &FoundationComponents{
+		Config: &config.Config{Providers: map[string]config.ProviderConfig{
+			"openai_resp": {BaseURL: "https://api.openai.com/v1", APIMode: "response"},
+		}},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	clients, err := (defaultModelFactory{}).Build(ModelRequest{Foundation: foundation, Profiler: profilerStub{events: &events}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	client := clients.ByProvider["openai_resp"]
+	if client == nil {
+		t.Fatal("responses provider client is missing")
+	}
+	// The breaker/health wrappers keep forwarding the optional interfaces, so
+	// retry notices and /models metadata must survive the routing client.
+	if _, ok := client.(llm.RetryNotifier); !ok {
+		t.Fatal("wrapped client must keep RetryNotifier")
+	}
+	if _, ok := client.(llm.ModelMetadataProvider); !ok {
+		t.Fatal("wrapped client must keep ModelMetadataProvider")
 	}
 }

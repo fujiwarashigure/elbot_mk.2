@@ -292,11 +292,13 @@ extra_payload = { provider_field = "xxx" }  # 可选，Provider 级 extra payloa
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 models = ["gpt-4o-mini"]             # 手动补充模型列表（API 获取不到时使用）
+api_mode = "chat"                    # chat（默认）/ response，见下方说明
 
 # 可选：为特定模型配置 context_window 或 extra_payload
 # [providers.openai.model_configs."gpt-4o-mini"]
 # context_window = 128000
 # extra_payload = { }
+# api_mode = "response"              # 按模型覆盖 Provider 级协议
 
 [model_metadata]
 default_context_window = 256000
@@ -305,6 +307,7 @@ default_context_window = 256000
 说明：
 
 - `base_url` 使用 Provider 的 OpenAI-compatible API 地址。
+- `api_mode` 选择上游协议：`chat`（默认）请求 `POST {base_url}/chat/completions`，`response` 请求 `POST {base_url}/responses`；也兼容 `chat_completions`、`responses` 等写法，其他值在启动阶段直接报错，不会静默回退。协议与会话模式（`chat` / `work` / `background`）相互独立。`[providers.<name>.model_configs."<model>"].api_mode` 可按模型覆盖 Provider 级设置，所以同一个 Provider 能混用两种协议（例如默认 `response`，个别只有 chat 的模型单独写 `chat`）。选 `response` 时 `base_url` 要写到包含 `/v1` 的前缀，因为端点只拼 `/responses`；请求会把 system 段合并为 `instructions`、把工具调用/结果转成 `function_call` / `function_call_output` item、把工具定义扁平化，并固定带 `store = false`（`store` 不在保留字段里，可用 `extra_payload` 覆盖）。Responses 的流式事件会归一化成与 chat 相同的文本 / reasoning / 工具调用 / usage 输出，熔断、健康状态、视觉兜底和用量统计无需额外配置。
 - `api_key_env` 指向环境变量名，推荐用这种方式保存密钥。
 - `proxy` 可选，支持 `http://` 和 `socks5://` 代理地址；省略或留空时直连，不继承 ElBot 进程的 `HTTP_PROXY`、`HTTPS_PROXY` 等环境代理。该设置同时作用于模型列表和聊天请求。
 - `models` 是手动补充的模型名列表，当 Provider 的模型列表接口获取不到某些模型时使用。

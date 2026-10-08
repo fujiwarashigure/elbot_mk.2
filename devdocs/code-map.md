@@ -65,7 +65,7 @@ rg -n "ELBOT_CONFIG_FILE|services.toml|providers.toml|state.toml|tool_tags.toml|
 - `internal/app/health.go`、`ops_health.go`、`health_llm.go`、`health_handler.go`：启动健康接口、读取 `ELBOT_HEALTH_*` / `ELBOT_OPS_TOKEN` / 重启原因文件、组装 `/metrics`、`/diagnostics` 以及只读插件状态 `/plugins/memory`、`/plugins/learning`。
 - `internal/app/doctor.go`、`internal/launcher/cli.go`、`cmd/elbot/main.go`：`elbot doctor` 配置/端口/平台/模型验收；`platform_ok` 独立于 `config_ok`，`--require-platform` 要求平台状态存在，`--e2e` 使用唯一探测标记做 CLI 真实消息往返。
 - `internal/character/store.go`、`write.go`：角色/图片 `version`、`source` 与 `Manifest`/`WriteManifest` 备份清单。
-- `internal/app/breaker_llm.go`、`internal/app/models.go`、`internal/llm/breaker/`：Provider 熔断、`fallback_mode` / `fallback_on_error`、备用 Provider 和总超时。
+- `internal/app/breaker_llm.go`、`internal/app/models.go`、`internal/llm/breaker/`：Provider 熔断、`fallback_mode` / `fallback_on_error`、备用 Provider 和总超时；`models.go` 的 `newProviderLLM` 按 `[providers.*].api_mode` / `model_configs.<model>.api_mode` 选择 chat 或 responses 适配器，混用两种协议时返回按请求模型分发的 `protocolRouter`。
 - `internal/agent/ratelimit.go`、`internal/ops/ratelimit/ratelimit.go`：用户级/群级令牌桶叠加；阈值和拒绝原因进入 `/metrics.rate_limit`。
 - `internal/processenv/environment.go`：Shell / Go Skill 子进程凭据变量过滤。
 - `deploy/elbot-watchdog.sh`、`deploy/restore-verify.sh`、`deploy/backup.sh`：阈值/冷却/诊断脱敏、重启原因文件、sha256 备份清单和隔离恢复验证；在线 SQLite 模式先做数据库快照再复制媒体并按引用补齐，恢复结果区分 `passed` / `static_passed` / `static_passed_with_skips`，并在启动隔离实例前移除旧 PID 标记。
@@ -362,12 +362,12 @@ rg -n "ContextLoader|Compress|Window|System Prompt|MessageSegment|usage" interna
 <!-- locator:llm -->
 ## LLM Adapter
 
-适用任务：LLM 抽象、OpenAI-compatible 请求、SSE、usage、reasoning、tool call delta、多模态消息转换。
+适用任务：LLM 抽象、OpenAI-compatible 请求（chat / responses 两种协议）、SSE、usage、reasoning、tool call delta、多模态消息转换。
 
 先看：
 
 - `internal/llm/`：LLM 抽象和 MessageSegment。
-- `internal/llm/openai/`：OpenAI-compatible adapter。
+- `internal/llm/openai/`：OpenAI-compatible adapter。`openai.go` 是 Chat Completions 适配器（`{base_url}/chat/completions`），`responses.go` 是 Responses 适配器（`{base_url}/responses`，内嵌前者以复用重试、`/models`、SSE 行扫描与 `parseError` 错误分类，只替换请求信封和流式事件翻译）；`[providers.*].api_mode` 决定用哪个，两者对上层输出同一套 `llm.StreamChunk`。
 - `internal/agent/model.go`：模型运行态、模型切换、provider client 缓存。
 - `internal/agent/chat_llm.go`：Agent LLM 调用适配。
 

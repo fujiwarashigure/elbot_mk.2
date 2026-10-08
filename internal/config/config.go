@@ -114,6 +114,10 @@ type ProviderConfig struct {
 	// FallbackTimeoutSeconds bounds one provider attempt (including fallback)
 	// before it is aborted with a total timeout error. 0 disables the extra bound.
 	FallbackTimeoutSeconds int `toml:"fallback_timeout_seconds"`
+	// APIMode selects the upstream protocol: "chat" (default, POST {base_url}/chat/completions)
+	// or "response" (POST {base_url}/responses). A per-model value in
+	// [providers.<name>.model_configs.<model>] overrides this default.
+	APIMode string `toml:"api_mode"`
 }
 
 // UsesFallbackOnError reports whether this provider should switch to its
@@ -139,6 +143,8 @@ type ModelConfig struct {
 	// Audio overrides the provider-level transcription capability for this
 	// single model.
 	Audio *bool `toml:"audio"`
+	// APIMode overrides [providers.<name>].api_mode for this single model.
+	APIMode string `toml:"api_mode"`
 }
 
 type ModelConfigs map[string]ModelConfig
@@ -230,6 +236,68 @@ func audioSupportFromBool(supported bool) AudioSupport {
 		return AudioSupported
 	}
 	return AudioUnsupported
+}
+
+// APIProtocol selects the upstream request/response protocol of an
+// OpenAI-compatible provider.
+type APIProtocol int
+
+const (
+	// APIProtocolChat is the OpenAI Chat Completions protocol
+	// (POST {base_url}/chat/completions). It is the default.
+	APIProtocolChat APIProtocol = iota
+	// APIProtocolResponses is the OpenAI Responses protocol
+	// (POST {base_url}/responses).
+	APIProtocolResponses
+)
+
+// ParseAPIProtocol parses a raw [providers.*].api_mode value. Canonical values
+// are "chat" and "response"; the chat_completions / responses_api spellings are
+// tolerated for convenience. An empty value means the default protocol. ok is
+// false for an unrecognized value so config loading can fail loudly instead of
+// silently falling back to another endpoint.
+func ParseAPIProtocol(raw string) (APIProtocol, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "chat", "chat_completions", "chat-completions":
+		return APIProtocolChat, true
+	case "response", "responses", "responses_api", "responses-api":
+		return APIProtocolResponses, true
+	default:
+		return APIProtocolChat, false
+	}
+}
+
+// APIProtocolFor resolves the protocol for one model: the model-level override
+// in [providers.<name>.model_configs.<model>] wins over the provider default,
+// and both default to chat.
+func (p ProviderConfig) APIProtocolFor(model string) APIProtocol {
+	if modelConfig, ok := p.ModelConfigs[model]; ok && strings.TrimSpace(modelConfig.APIMode) != "" {
+		if protocol, ok := ParseAPIProtocol(modelConfig.APIMode); ok {
+			return protocol
+		}
+	}
+	if protocol, ok := ParseAPIProtocol(p.APIMode); ok {
+		return protocol
+	}
+	return APIProtocolChat
+}
+
+// UsesResponsesAPI reports whether this provider needs a Responses client,
+// either because of its own [providers.<name>].api_mode value or because one of
+// its model_configs overrides the protocol.
+func (p ProviderConfig) UsesResponsesAPI() bool {
+	if protocol, ok := ParseAPIProtocol(p.APIMode); ok && protocol == APIProtocolResponses {
+		return true
+	}
+	for _, modelConfig := range p.ModelConfigs {
+		if strings.TrimSpace(modelConfig.APIMode) == "" {
+			continue
+		}
+		if protocol, ok := ParseAPIProtocol(modelConfig.APIMode); ok && protocol == APIProtocolResponses {
+			return true
+		}
+	}
+	return false
 }
 
 type ModelMetadataConfig struct {
@@ -1496,6 +1564,9 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	if err := cfg.validateProviderProtocols(); err != nil {
+		return nil, err
+	}
 	if err := cfg.validateModeModels(); err != nil {
 		return nil, err
 	}
@@ -2493,6 +2564,22 @@ func (c *Config) resolveProviderAPIKeys(configDir string) error {
 		}
 		provider.APIKey = value
 		c.Providers[name] = provider
+	}
+	return nil
+}
+
+// validateProviderProtocols rejects unrecognized api_mode values instead of
+// letting them silently fall back to the chat protocol.
+func (c *Config) validateProviderProtocols() error {
+	for name, provider := range c.Providers {
+		if _, ok := ParseAPIProtocol(provider.APIMode); !ok {
+			return fmt.Errorf("[providers.%s].api_mode must be chat or response, got %q", name, provider.APIMode)
+		}
+		for model, modelConfig := range provider.ModelConfigs {
+			if _, ok := ParseAPIProtocol(modelConfig.APIMode); !ok {
+				return fmt.Errorf("[providers.%s.model_configs.%q].api_mode must be chat or response, got %q", name, model, modelConfig.APIMode)
+			}
+		}
 	}
 	return nil
 }

@@ -1348,7 +1348,7 @@ func TestChatStream_ReservedExtraFieldsAreIgnored(t *testing.T) {
 		t.Fatalf("extra fields were dropped: %#v", body)
 	}
 	for _, option := range []string{"model", "messages", "stream", "stream_options"} {
-		if _, reserved := reservedRequestFields[option]; !reserved {
+		if _, reserved := chatReservedRequestFields[option]; !reserved {
 			t.Fatalf("%s should be reserved", option)
 		}
 	}

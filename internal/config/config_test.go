@@ -1112,3 +1112,166 @@ func TestGroupKnowledgeConfigNormalizedDefaults(t *testing.T) {
 		t.Fatal("explicit disabled must win")
 	}
 }
+
+func TestProviderAPIProtocolDefaultsToChat(t *testing.T) {
+	provider := ProviderConfig{}
+	if got := provider.APIProtocolFor("any"); got != APIProtocolChat {
+		t.Fatalf("protocol = %v, want chat", got)
+	}
+	if provider.UsesResponsesAPI() {
+		t.Fatal("a provider without api config must not need a responses client")
+	}
+}
+
+func TestProviderAPIProtocolModelOverrideWins(t *testing.T) {
+	provider := ProviderConfig{
+		APIMode: "response",
+		ModelConfigs: map[string]ModelConfig{
+			"chat-model": {APIMode: "chat"},
+		},
+	}
+	if got := provider.APIProtocolFor("chat-model"); got != APIProtocolChat {
+		t.Fatalf("model override = %v, want chat", got)
+	}
+	if got := provider.APIProtocolFor("other-model"); got != APIProtocolResponses {
+		t.Fatalf("provider default = %v, want responses", got)
+	}
+	if !provider.UsesResponsesAPI() {
+		t.Fatal("provider default responses must need a responses client")
+	}
+}
+
+func TestProviderAPIProtocolModelOverrideNeedsResponsesClient(t *testing.T) {
+	provider := ProviderConfig{
+		APIMode: "chat",
+		ModelConfigs: map[string]ModelConfig{
+			"resp-model": {APIMode: "response"},
+		},
+	}
+	if !provider.UsesResponsesAPI() {
+		t.Fatal("a responses model override must need a responses client")
+	}
+	if got := provider.APIProtocolFor("resp-model"); got != APIProtocolResponses {
+		t.Fatalf("protocol = %v, want responses", got)
+	}
+	if got := provider.APIProtocolFor("plain-model"); got != APIProtocolChat {
+		t.Fatalf("protocol = %v, want chat", got)
+	}
+}
+
+func TestParseAPIProtocol(t *testing.T) {
+	for _, raw := range []string{"", "chat", " Chat ", "chat_completions"} {
+		protocol, ok := ParseAPIProtocol(raw)
+		if !ok || protocol != APIProtocolChat {
+			t.Fatalf("ParseAPIProtocol(%q) = %v, %v, want chat, true", raw, protocol, ok)
+		}
+	}
+	for _, raw := range []string{"responses", "Responses", "response", "responses_api"} {
+		protocol, ok := ParseAPIProtocol(raw)
+		if !ok || protocol != APIProtocolResponses {
+			t.Fatalf("ParseAPIProtocol(%q) = %v, %v, want responses, true", raw, protocol, ok)
+		}
+	}
+	if _, ok := ParseAPIProtocol("grpc"); ok {
+		t.Fatal("an unknown protocol must not be accepted")
+	}
+}
+
+func TestLoadProviderAPIProtocol(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	appPath := filepath.Join(configDir, "app.toml")
+	writeFile(t, appPath, ``)
+	writeFile(t, filepath.Join(configDir, "providers.toml"), `
+[providers.responses]
+base_url = "https://api.openai.com/v1"
+api_mode = "response"
+
+[providers.responses.model_configs."gpt-4o-mini"]
+api_mode = "chat"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+`)
+	writeFile(t, filepath.Join(configDir, "state.toml"), `
+[mode_models.work]
+provider = "responses"
+model = "gpt-5.1"
+
+[mode_models.chat]
+provider = "responses"
+model = "gpt-5.1"
+`)
+
+	cfg, err := Load(appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	responses := cfg.Providers["responses"]
+	if got := responses.APIProtocolFor("gpt-5.1"); got != APIProtocolResponses {
+		t.Fatalf("provider protocol = %v, want responses", got)
+	}
+	if got := responses.APIProtocolFor("gpt-4o-mini"); got != APIProtocolChat {
+		t.Fatalf("model protocol = %v, want chat", got)
+	}
+	if !responses.UsesResponsesAPI() {
+		t.Fatal("the provider must need a responses client")
+	}
+	if cfg.Providers["deepseek"].UsesResponsesAPI() {
+		t.Fatal("a provider without api config must keep the chat client only")
+	}
+}
+
+func TestLoadRejectsUnknownProviderAPIProtocol(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	appPath := filepath.Join(configDir, "app.toml")
+	writeFile(t, appPath, ``)
+	writeFile(t, filepath.Join(configDir, "providers.toml"), `
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_mode = "grpc"
+`)
+	writeFile(t, filepath.Join(configDir, "state.toml"), `
+[mode_models.work]
+provider = "deepseek"
+model = "deepseek-chat"
+
+[mode_models.chat]
+provider = "deepseek"
+model = "deepseek-chat"
+`)
+
+	_, err := Load(appPath)
+	if err == nil || !strings.Contains(err.Error(), "api_mode must be chat or response") {
+		t.Fatalf("Load error = %v, want a rejected api_mode value", err)
+	}
+}
+
+func TestLoadRejectsUnknownModelAPIProtocol(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	appPath := filepath.Join(configDir, "app.toml")
+	writeFile(t, appPath, ``)
+	writeFile(t, filepath.Join(configDir, "providers.toml"), `
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+
+[providers.deepseek.model_configs."deepseek-chat"]
+api_mode = "websocket"
+`)
+	writeFile(t, filepath.Join(configDir, "state.toml"), `
+[mode_models.work]
+provider = "deepseek"
+model = "deepseek-chat"
+
+[mode_models.chat]
+provider = "deepseek"
+model = "deepseek-chat"
+`)
+
+	_, err := Load(appPath)
+	if err == nil || !strings.Contains(err.Error(), "api_mode must be chat or response") {
+		t.Fatalf("Load error = %v, want a rejected model api_mode value", err)
+	}
+}

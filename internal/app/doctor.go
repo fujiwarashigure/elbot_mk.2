@@ -151,7 +151,7 @@ func RunDoctor(ctx context.Context, opts DoctorOptions) (DoctorReport, error) {
 	} else if keyErr != nil {
 		add("model", "chat_call", "failed", workModel.Provider+"/"+workModel.Model, keyErr)
 		report.ConfigOK = false
-	} else if err := doctorModelCall(ctx, cfg, provider, apiKey, workModel.Model); err != nil {
+	} else if err := doctorModelCall(ctx, cfg, workModel.Provider, provider, apiKey, workModel.Model); err != nil {
 		add("model", "chat_call", "failed", workModel.Provider+"/"+workModel.Model, err)
 		report.ConfigOK = false
 	} else {
@@ -373,16 +373,19 @@ func snapshotHasPlatform(snapshot health.Snapshot, name string) bool {
 	return false
 }
 
-func doctorModelCall(ctx context.Context, cfg *config.Config, provider config.ProviderConfig, apiKey, model string) error {
+func doctorModelCall(ctx context.Context, cfg *config.Config, providerName string, provider config.ProviderConfig, apiKey, model string) error {
 	if strings.TrimSpace(provider.BaseURL) == "" {
 		return fmt.Errorf("provider base_url is empty")
 	}
 	if strings.TrimSpace(model) == "" {
 		return fmt.Errorf("work model is empty")
 	}
+	// The caller resolves the key (api_key first, then api_key_env); the adapter
+	// only reads provider.APIKey.
+	provider.APIKey = apiKey
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	client, err := openai.NewWithOptions(provider.BaseURL, apiKey, provider.ExtraPayload, nil, openai.RequestOptions{
+	client, err := newProviderLLM(providerName, provider, openai.RequestOptions{
 		FirstChunkTimeout: 15 * time.Second,
 		StreamIdleTimeout: 15 * time.Second,
 		MaxRetries:        0,

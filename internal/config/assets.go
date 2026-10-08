@@ -499,6 +499,7 @@ api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 models = ["gpt-4o-mini"]
+# api_mode = "chat"                 # chat（默认，POST {base_url}/chat/completions）/ response（POST {base_url}/responses）
 # fallback_provider = "deepseek"
 # fallback_model = "deepseek-chat"
 # fallback_mode = "circuit"          # circuit（默认，熔断后接管）/ on_error（首个失败请求即切换）/ off
@@ -508,6 +509,7 @@ models = ["gpt-4o-mini"]
 # [providers.openai.model_configs."gpt-4o-mini"]
 # context_window = 128000
 # extra_payload = { }
+# api_mode = "response"             # 按模型覆盖 Provider 级协议，同一个 Provider 可以混用两种协议
 
 [model_metadata]
 default_context_window = 256000

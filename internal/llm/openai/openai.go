@@ -156,10 +156,10 @@ func (a *Adapter) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan l
 	}
 
 	// Merge provider-, model- and request-level extra payloads (later wins).
-	// Reserved protocol fields are never replaced: see reservedRequestFields.
-	dropped := mergeExtraFields(body, a.extraPayload)
-	dropped = append(dropped, mergeExtraFields(body, a.modelExtraPayloads[req.Model])...)
-	dropped = append(dropped, mergeExtraFields(body, req.ExtraBody)...)
+	// Reserved protocol fields are never replaced: see chatReservedRequestFields.
+	dropped := mergeExtraFields(body, a.extraPayload, chatReservedRequestFields)
+	dropped = append(dropped, mergeExtraFields(body, a.modelExtraPayloads[req.Model], chatReservedRequestFields)...)
+	dropped = append(dropped, mergeExtraFields(body, req.ExtraBody, chatReservedRequestFields)...)
 	a.logDroppedExtraFields(dropped)
 
 	bodyBytes, err := marshalJSONNoEscape(body)
@@ -271,13 +271,13 @@ func retryableStatusError(resp *http.Response) error {
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
 }
 
-// reservedRequestFields are the JSON fields owned by the adapter. ElBot always
-// streams and the envelope must describe the messages and model the caller
-// actually sent, so an extra payload may add provider-specific parameters but
-// never replace these. Applying them silently would let a hook turn streaming
-// off (the reader would then wait for an SSE body that never arrives) or swap
-// the model/messages behind the caller's back.
-var reservedRequestFields = map[string]struct{}{
+// chatReservedRequestFields are the chat-completions JSON fields owned by the
+// adapter. ElBot always streams and the envelope must describe the messages and
+// model the caller actually sent, so an extra payload may add provider-specific
+// parameters but never replace these. Applying them silently would let a hook
+// turn streaming off (the reader would then wait for an SSE body that never
+// arrives) or swap the model/messages behind the caller's back.
+var chatReservedRequestFields = map[string]struct{}{
 	"model":          {},
 	"messages":       {},
 	"stream":         {},
@@ -285,14 +285,14 @@ var reservedRequestFields = map[string]struct{}{
 }
 
 // mergeExtraFields copies extras into the request body and returns the reserved
-// keys it refused to apply.
-func mergeExtraFields(body, extra map[string]any) []string {
+// keys it refused to apply. Each adapter passes the field set it owns.
+func mergeExtraFields(body, extra map[string]any, reservedFields map[string]struct{}) []string {
 	if len(extra) == 0 {
 		return nil
 	}
 	var dropped []string
 	for key, value := range extra {
-		if _, reserved := reservedRequestFields[strings.ToLower(strings.TrimSpace(key))]; reserved {
+		if _, reserved := reservedFields[strings.ToLower(strings.TrimSpace(key))]; reserved {
 			dropped = append(dropped, key)
 			continue
 		}
@@ -321,17 +321,24 @@ func (a *Adapter) logDroppedExtraFields(fields []string) {
 }
 
 func (a *Adapter) logChatRequest(req llm.ChatRequest, bodyBytes []byte) {
+	a.logRequest("openai chat request", a.endpoint(), req, bodyBytes)
+}
+
+// logRequest records the request summary under the given debug message and
+// endpoint. The endpoint is passed in because the embedded adapter cannot see
+// the protocol of the adapter it is embedded in.
+func (a *Adapter) logRequest(message, endpoint string, req llm.ChatRequest, bodyBytes []byte) {
 	if a.logger == nil {
 		return
 	}
 	a.logFirstSystemMessage(req)
-	attrs := []any{"endpoint", a.endpoint(), "model", req.Model, "session_id", req.SessionID, "latest_message_json", latestMessageJSON(req.Messages)}
+	attrs := []any{"endpoint", endpoint, "model", req.Model, "session_id", req.SessionID, "latest_message_json", latestMessageJSON(req.Messages)}
 	// Debug 日志默认只记录请求摘要，不记录 Authorization 和完整 body。
 	// 完整 body 可能包含用户正文、图片 URL、工具参数等敏感信息，
 	// 需要临时排查时再手动打开。
-	// attrs := []any{"endpoint", a.endpoint(), "model", req.Model, "body_json", string(bodyBytes)}
+	// attrs := []any{"endpoint", endpoint, "model", req.Model, "body_json", string(bodyBytes)}
 	attrs = append(attrs, chatRequestLogSummary(req, bodyBytes)...)
-	a.logger.Debug("openai chat request", attrs...)
+	a.logger.Debug(message, attrs...)
 }
 
 func (a *Adapter) logFirstSystemMessage(req llm.ChatRequest) {
