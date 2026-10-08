@@ -445,7 +445,7 @@ ws_url = "ws://host.docker.internal:6700/"
 
 不要写 `127.0.0.1`，因为那是容器自己的回环地址。
 
-### 9.3 数据卷权限
+### 9.3 数据卷权限与"从非 C 盘挂载会静默卡住"
 
 容器以 UID/GID `10001` 运行。Windows 绑定挂载通常可写；如果日志出现
 `permission denied` 或 SQLite 无法写入，按顺序检查：
@@ -454,6 +454,29 @@ ws_url = "ws://host.docker.internal:6700/"
 .\deploy\windows\elbot.ps1 logs -Tail 200
 docker compose -f deploy\docker-compose.yml exec -u root elbot chown -R 10001:10001 /data
 ```
+
+**另一类完全不同的失败：绑定的宿主目录所在磁盘没有被 Docker Desktop 共享时，容器会停在
+`Created` 且没有任何报错。** 实测（Docker Desktop，WSL2 后端，仓库位于 `M:\`）：
+
+```powershell
+docker compose -f deploy\docker-compose.yml up -d
+docker ps -a                  # 状态一直是 Created，不是 Up
+docker inspect elbot --format '{{.State.Status}} {{.State.Error}}'   # created  <空>
+docker logs elbot             # 没有任何输出
+```
+
+`docker run -d` 照样返回容器 ID，`State.Error` 为空、容器日志为空，所以看起来像"启动很慢"，
+实际是绑定挂载没成功、进程从未启动。判据：**同一个镜像不加 `-v` 时立刻进入 `running`，
+把数据目录换到 `C:\` 也正常。**
+
+处理方式（任选其一，改完先 `docker rm -f elbot` 再重新 `up -d`）：
+
+1. 把 `./data` 换成 `C:` 下的目录（例如把仓库放到 `C:\`，或让 compose 指向 `C:\elbot-data`）；
+2. 在 Docker Desktop **Settings → Resources → File sharing** 里把该磁盘（如 `M:`）加进共享列表；
+3. 把仓库放到 WSL2 文件系统（例如 `\\wsl$\Ubuntu\home\...`），挂载走 WSL 后端。
+
+> 注意本指南第 2.1 节建议把 Docker Desktop 程序装到 `M:` 盘 —— 那是"程序与 WSL 数据"的位置，
+> **不等于** `M:` 已对容器绑定挂载共享。仓库放在 `M:` 时仍需按上面第 1 或第 2 条处理。
 
 如果仍然失败，建议把仓库放到 WSL2 文件系统（例如 `\\wsl$\Ubuntu\home\...`），
 或在 Docker Desktop 中重新启用该磁盘的文件共享。
@@ -466,6 +489,7 @@ docker compose -f deploy\docker-compose.yml exec -u root elbot chown -R 10001:10
 | --- | --- |
 | `docker info` 失败 | Docker Desktop 未启动，或切换到了 Windows containers；启动并切回 Linux containers |
 | `start` 很慢 | 首次构建要拉基础镜像并编译 Go，后续会使用 Docker 层缓存 |
+| `up -d` 后 `docker ps -a` 一直是 `Created`、日志为空 | 数据目录所在磁盘未对 Docker Desktop 共享，绑定挂载静默失败（不是"启动慢"）。按第 9.3 节处理：把 `./data` 放到 `C:`、或在 File sharing 里共享该磁盘、或把仓库放进 WSL2 |
 | 容器反复重启 | `.\deploy\windows\elbot.ps1 logs -Tail 200`；多数是 TOML 语法错误 / Key 未填 / 数据目录不可写 |
 | `32171` 连接被拒绝 | 容器未运行、端口映射未生效，或 `ELBOT_HEALTH_ADDR` 被错误改成不监听；先看 `status` |
 | `/ready` 长期 `not_ready` | 检查数据目录可写、调度心跳是否过期、`ELBOT_HEALTH_ADDR` 是否配置；平台/模型故障不会让它失败 |
