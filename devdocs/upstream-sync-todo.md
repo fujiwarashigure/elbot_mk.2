@@ -14,7 +14,7 @@
 ## 0. 现状快照
 
 - 基线：fork `main` @ `e724f4a`；上游 `refs/remotes/upstream/main` @ `8457fdd`；共同祖先 `3fb1234`。
-- 已落地：命名对齐（`api` → `api_mode`）、P0 全部 8 项、P1#3 工具发现/预载事务化、P1#5 会话整行快照 → 事务内字段更新、**P1#4 后台接管（fork 原生最小版，`2cda46c`）**。
+- 已落地：命名对齐（`api` → `api_mode`）、P0 全部 8 项、P1#3 工具发现/预载事务化、P1#5 会话整行快照 → 事务内字段更新、P1#4 后台接管（fork 原生最小版，`f9882b5`）。
 - 剩余：P1#1 日志与信号整改、P1#2 模型/会话服务化、P1#6 通知规则集中化；P2 换基路线 B（原生 Responses，待决策）。
 
 ---
@@ -60,7 +60,7 @@
 - [x] `CHANGELOG.md` 按补丁式（旧状态 → 新状态）追加"后台会话可被前台接管"条目。
 - [x] `devdocs/code-map.md` 的 Session 段补 `internal/session/promotion.go`（提升/接管判定）与 agent 侧接管检查点；Agent 对话流程段补 `RunBackground` 的 `TakenOver` 出口。
 - [x] `docs/commands.md` 的 `/resume` 行为说明补一句：恢复后台（cron/Elnis）Session 会中断该 Session 在途的后台任务；并同步 `docs/concepts.md` 第 194 行附近的 cron 后台 Session 说明（`docs.en/`、`README.md`、`CHANGELOG.en.md` 未手改）。
-- [x] 提交 `2cda46c`：中文 `feat:` 前缀 + 说明"提升事务化 + 安全点取消 + cron/Elnis 不投递"的正文，提交信息写无 BOM 文件；提交前核对 `git status` 只包含本任务改动（提交后工作区干净）。
+- [x] 提交 `f9882b5`：中文 `feat:` 前缀 + 说明"提升事务化 + 安全点取消 + cron/Elnis 不投递"的正文，提交信息写无 BOM 文件；提交前核对 `git status` 只包含本任务改动（提交后工作区干净）。
 - [!] 回写 `D:\GIT\elbot-upstream-sync-plan.md` 台账与表 5.4 第 4 行：**本机没有 D 盘**（只有 C / G / M），该仓库外方案文件在此环境中不存在，无法回写。已改为在本文件内维护完成状态；若需要台账，请在持有该文件的机器上同步，或在仓库内新建台账文件。
 
 **验收标准**：
