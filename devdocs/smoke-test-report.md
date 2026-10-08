@@ -12,6 +12,7 @@
 | 同样 17 个包在 **Linux 容器**内跑 | **全部 `ok`，0 失败**（含 `internal/agent`） |
 | 生产镜像构建（`deploy/Dockerfile` → `runtime` target） | **成功**，镜像内 `elbot --version` = `0.6.8` |
 | 容器运行冒烟 | **通过**：`/live`、`/ready`、`/healthz`（带 token）、`/metrics`（带 token）均 200；无 token 时 `/healthz` 为 401；数据目录自动生成；SIGTERM 退出码 0 |
+| 进程级冒烟：`state.toml [model_snapshots]` 分片 | **通过**：真实进程启动后手工追加该分片，15 秒轮询内热加载生效并记录 `sections=model_snapshots`（见 §6） |
 
 ## 2. 那两个失败只是"本机没有 sh"
 
@@ -88,7 +89,35 @@ APT_MIRROR=mirrors.aliyun.com`）。
 表现）。此时 `docker ps` 本身也开始变慢。实测**把卡住的容器删掉后，普通容器又能正常
 启动**，因此不是镜像问题；如果再次出现，优先怀疑 daemon 需要重启，而不是应用回归。
 
-## 6. 未覆盖的部分（诚实标注）
+## 6. 进程级冒烟：`state.toml` 新增分片与热加载（后续追加）
+
+命名模型快照给 `state.toml` 增加了 `[model_snapshots]` 分片，光有单元测试不足以证明它接进了
+**真实启动与热加载链路**，因此补了一次本机进程级冒烟（无 Docker，直接跑构建产物）：
+
+```
+go build -o <space-free-dir>\elbot.exe ./cmd/elbot
+set APPDATA=<space-free-dir>\appdata          # 让默认配置目录可写（否则默认目录 mkdir 被拒）
+set ELBOT_HEALTH_ADDR=127.0.0.1:33281
+set ELBOT_OPS_TOKEN=smoke-token
+elbot.exe service run                          # 不传 --config，走平台默认配置目录并自动生成
+```
+
+实测结果：
+
+| 项目 | 结果 |
+| --- | --- |
+| 首次启动自动生成配置 | `app.toml`、`services.toml`、`state.toml`、`elnis.toml`、`tool_tags.toml`、`memories.toml`、`SOUL.md`、`angel_memory.db`、`self_learning.db`、`data/*.db`、`data/logs/*`、`plugins/`、`skills/` 全部生成 |
+| `GET /live` / `/ready` / `/metrics`（带 `X-Elbot-Ops-Token`） | 全部 `200`；`/ready` 的 4 项检查全 `ok` |
+| 启动耗时 | stderr 打印 `elbot startup completed in 103.3ms` |
+| 手工往 `state.toml` 追加 `[model_snapshots.smoke]` 后 | 15 秒轮询内被热加载，审计日志出现 `event=runtime_state_reloaded module=agent sections=model_snapshots trigger=watch result=succeeded` —— 说明新分片真的进了 `applyRuntimeState` / `runtimeStateDigest`，不只是能解析 |
+| 热加载后文件内容 | `[model_snapshots.smoke]` 仍在，进程全程 ready，无 stderr 报错 |
+
+两点本机事实（不是产品缺陷）：
+
+- `--config <不存在的文件>` 会直接失败（`read config ... cannot find the file specified`），自动生成默认配置只发生在**不传 `--config`** 时；
+- 默认配置目录在 `%APPDATA%\ElBot`，本机 dpx 环境的 `%APPDATA%` 目录 mkdir 被拒（`Access is denied`），因此冒烟把 `APPDATA` 指到工作目录下的可写目录。仓库路径带空格时 `Start-Process` 的 `-ArgumentList` 会被拆开，冒烟目录放在无空格路径下。
+
+## 7. 未覆盖的部分（诚实标注）
 
 - 没有跑完整 `go test ./...` 全仓（只覆盖了改动相关的包集合 + `hook/...`）。
 - 没有用真实平台（OneBot / Telegram / QQ 官方）做端到端消息冒烟：这些需要外部服务与
