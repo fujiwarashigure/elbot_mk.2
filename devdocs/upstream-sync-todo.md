@@ -150,10 +150,13 @@
 
 ## 5. [ ] P2 换基路线 B：原生 Responses 协议（20–35 人日，**需先决策**）
 
+**决策材料已就绪：[`p2-native-responses-decision.md`](p2-native-responses-decision.md)**（提交 `2a26c17`）——本文只留结论摘要，取证与逐项对比见那份文档。
+
 - **目标收益**：服务端续链（`previous_response_id`）、原生压缩、reasoning 加密内容、`additional_tools` 增量工具定义、原生 checkpoint。
-- **现实结论**：这不是"再写一个客户端"，而是换内核——LLM 分层（fork 的 `internal/llm/openai` 在上游已删除）、agent 路由（会替换 fork 的 `chat.go` / `chat_llm.go` / `chat_tools.go` / `core.go`）、压缩、存储（3 个新迁移：`session_llm_origin`、`native_dialogue`、`native_material_roots`）、模型来源、工具可用性。
+- **现实结论**：这不是"再写一个客户端"，而是换内核——LLM 分层（fork 的 `internal/llm/openai` 在上游已删除）、agent 路由（会替换 fork 的 `chat.go` / `chat_llm.go` / `chat_tools.go` / `core.go`，正是 P0/P1 刚加固过的地方）、压缩、存储（3 个新迁移：`session_llm_origin`、`native_dialogue`、`native_material_roots`）、模型来源、工具可用性。
+- **取证结论（本次核对）**：fork 的 Responses 支持是协议翻译层——`store=false` 明确写在 `responses.go` 注释里（重放完整历史、从不读回已存响应），`previous_response_id` 与 `additional_tools` 在全仓库出现 **0** 次，压缩仍是客户端的。
 - **决策点**：若确定要它，走路线 C（另建 `upstream-track` 分支，先把 fork 定制层插件化/接口化再换基），不要在 fork 现有 agent 上继续加协议分支（会长期维护两套会话语义）。
-- **当前替代方案**：fork 已自带的 Responses 适配器（`internal/llm/openai/responses.go`，协议翻译层 + 复用 chat 会话循环）够用；新增能力时通过接口查询协议（工具可用性、压缩分派、存储协议来源），为将来换基留接缝。
+- **当前替代方案（也是本文建议）**：fork 已自带的 Responses 适配器（`internal/llm/openai/responses.go`，协议翻译层 + 复用 chat 会话循环）够用；新增能力时通过接口查询协议（工具可用性、压缩分派、存储协议来源），为将来换基留接缝。这条低风险增量同时是路线 C 的第一步。
 
 ---
 
