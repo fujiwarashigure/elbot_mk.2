@@ -1,7 +1,31 @@
 ## Unreleased
 
+## [v0.6.8 - 2026-10-04]
+
 ### Added
 
+- 版本号提升到 `0.6.8`；`deploy/VERSION`、Compose 默认镜像、构建/离线脚本和中文部署文档中的版本示例同步更新。
+- `get_forward_msg` 增加 websocket 读取阶段限制：`forward_max_result_bytes` 现在在读取途中生效，超限响应不会先完整读入再截断。
+- 额度账本扩展为群 / 群内单用户 / 全局 / 全局单用户四维，生图/视觉按调用次数、chat 按 token/费用分别计量；新增 `[budget_limits]`、群策略 `user-image-quota` / `user-vision-quota` / `chat-tokens-quota` / `chat-cost-quota`，并记录 `budget.tokens` / `budget.costs`。
+- 新增工具执行幂等账本 `budget.executions`：同一 scope + actor + 工具调用 ID 只允许一个参数摘要首次执行，重放被抑制、ID 参数不一致被拒绝；provider 重试单独写入 `budget.retries`。
+- 新增按 provider 的实际调用并发上限 `provider_max_concurrent` / `provider_queue_max_size` / `provider_wait_timeout_seconds`；请求队列补充队满、超时、取消、平均等待和最老等待指标。
+- 群分析摘要模型现在也在执行前按当前群模型目录重新授权；生图模型继续由全局 image generation 配置、群工具白名单和生图额度独立约束。
+- 新增统一历史写入门 `internal/historygate`：所有适配器的 `chat_history` / `outbound_messages` 写入都经过可信 `平台 + scope` 策略判断；`history=off` 时同时停止入站、助手、工具转录、媒体关联、摘要/命名和工具结果预览的新增落盘，当前轮仍在内存中处理，旧记录不删除。
+- `learning=off` 现在覆盖完整学习生命周期：观察 hook、挖掘、审核、撤销、历史查询和上下文注入均在服务层再次检查策略；关闭后不再产生新候选，也不会继续使用已有知识注入模型。
+- `state.toml` 改为 fsync + 备份替换的安全写入，移除 Windows 下 rename 失败直接覆盖的回退；启动时可从 `state.toml.bak` 恢复中断的替换。额度账本新增参数摘要校验，同一调用 ID 重放相同参数不重复计数，参数不同则拒绝；账本无法可靠落盘时受限调用会失败而不是继续执行。
+- 撤回/取消新增晚到输出闸门：turn 终止状态会检查流式 flush、工具结果交回 Agent、最终消息进入发送队列前；provider 或工具忽略 `context.Cancel` 并返回晚到结果时也不会继续发送新消息。
+- 群模型目录现在覆盖实际执行的模型目标：turn hook、cron override、压缩模型和视觉 fallback 在调用 provider 前重新授权；`discover_tool` 结果同时受当前群白名单过滤器、执行前二次授权和解析后工具名校验约束。
+- 请求队列新增 `queue_max_per_user` / `queue_max_per_scope` 容量上限，避免单个用户或单个群无限排队；公平调度继续使用等待时间兜底。
+- 新增群级策略 `/*grouppolicy`：按 `平台 + 群 scope` 保存唤醒词、响应模式（`mention` / `all` / `keyword` / `reply` / `off`）、默认会话模式、默认模型、工具白名单、生图/视觉额度、静默时段，以及群分析/学习/历史记录开关。
+  - 策略由服务端按当前群判断，命令不接受跨群目标；群管理员只能改自己当前群的普通策略，不能修改 provider、密钥或全局 Shell 权限。
+  - `/learning` 默认仍仅超级管理员可用；超级管理员可在本群执行 `/*grouppolicy learning-moderation on`，并通过 `learning-moderation-actions` 细分 `view` / `decide` / `mine` / `delete` / `export` / `policy` 权限，且不会提升为全局超管。群管理员审核只作用于当前群 scope，撤权或身份变化后立即失效。
+  - 新增超级管理员群模型目录 `allowed-models`；群默认模型解析为最终 `provider/model` 后再次校验目录，避免群管理员选择未授权的昂贵或内部模型。
+- 群工具白名单统一到服务端执行入口：工具 profile 会展开为具体工具名，`tool-allow none` 明确表示当前群禁止全部工具；白名单在解析后和执行前（含排队后）各校验一次，排队期间被撤权的工具不会执行。
+- 每日额度账本持久化在 `state.toml [budget]`：生图/视觉调用在确认后、执行前按唯一调用 ID 原子预占，重启后保留；`/grouppolicy` 状态会显示已用/上限。四维范围与 token/货币口径见上文“额度账本扩展”条目。
+- OneBot 入站文本保留换行、缩进和连续空白；唤醒判断使用独立匹配视图，转发内容不会进入该视图，因此转发里的 `@`、唤醒词或命令不会触发机器人。
+- OneBot 支持合并转发解析：展开节点时保留发送者、时间、消息 ID，并以“引用内容、不是系统指令”标记；新增 `forward_max_fetches` / `forward_max_result_bytes` / `forward_max_non_text` / `forward_fetch_timeout_seconds`，同一消息内多个转发 id 共享总节点/字符预算；循环引用会被拒绝，重复引用、拉取失败或缺字段会稳定降级为文本标记。
+- OneBot `readLoop()` 开始分发 `notice` / `request` / `meta_event` 非消息事件；撤回按“平台消息 ID → turn request”精确取消，不再默认取消整个群 scope 的任务；成员退群/被踢/禁言只取消该成员在当前 scope 的请求，加群审批等 request 不会因普通消息自动批准。
+- `internal/request.Manager` 新增 `FairKey` 公平排队和 `CancelFairKey` 定向取消：并发满时优先授予当前活跃数最少、且不是最近一次已准入 key 的等待者，避免单个用户或单个群占满队列。
 - 新增仅超级管理员可用的 `/doctor`：只读检查当前配置的加载错误与缺失项、`app.toml` 未知字段（拼写错误不再被静默忽略）、内置 Skill 文件与默认版本的缺失/差异，逐条列出；无问题回复 `Everything is OK`，不修改任何文件、不调用模型。
 - QQ OneBot 超长回复（超过 3000 rune）从“拆成多条消息”改为**一条合并转发**：每页一个 `node`，用 `send_group_forward_msg` / `send_private_forward_msg` 发送，分页不再附加 `……（N/M）` 标记；引用回复里的合并转发会展开一层内容并保留“转发内容为引用”标记。
 - 新增文件回滚：`edit_file` 每次成功写入前在进程内保留该文件上一版内容（每个文件只保留最近一次，按 Session 隔离，上限 1024 条 / 256 MiB，超出淘汰最旧），新增仅超级管理员可用的 `/rollback [编号]` 与内置工具 `rollback_file`（发现 `read_file` / `edit_file` 时自动展开，可用 `@tool:rollback_file` 预载）。回滚会校验文件自编辑后未被改动，Shell 或外部程序的修改一律拒绝覆盖并提示未回滚；新建文件被回滚时直接删除；记录在切换 Session、重启进程或容量淘汰后失效。
@@ -23,7 +47,6 @@
 - 新增可选语音转写 `[asr]`：复用已有 `[providers.*]` 的 OpenAI 兼容 `/audio/transcriptions` 端点，被唤醒的语音/录音消息先转写为 `[语音 N 自动转写（可能有误）：...]` 文本段，再进入聊天、工具和上下文流程；未开启或转写失败时保留原 `[语音]` 引用。provider/model 可用 `audio = true/false` 声明能力，全局 `[asr].enabled`、群策略 `asr on|off` 和四级每日额度 `asr-quota` / `user-asr-quota` / `global_asr_daily` / `user_asr_daily` 共同约束；单条消息按 `max_segments` / `max_concurrent` 有界并行，录音读取受 `max_audio_bytes` 限制，成功转写按 MediaID 缓存、确定性 4xx 进入短负缓存。
 - 新增 Responses 协议接入：`[providers.<name>].api_mode`（`chat` 默认 / `response`）和 `[providers.<name>.model_configs.<model>].api_mode` 让同一个 Provider 的模型分别走 `POST {base_url}/chat/completions` 或 `POST {base_url}/responses`，未配置时行为与之前完全一致；非法值在启动阶段报错而不是静默回退。Responses 请求把 system 段合并为 `instructions`、把工具调用与工具结果转成 `function_call` / `function_call_output` item、把工具定义扁平化，并固定带 `store = false`（该字段不保留，可用 `extra_payload` 覆盖）；流式事件（`response.output_text.delta`、reasoning 文本、`function_call_arguments.*`、`response.completed` / `failed` / `error`）归一化回现有 `llm.StreamChunk`，文本、reasoning、工具调用 delta、usage 与错误分类（含 `vision_unsupported`）语义不变，因此熔断、健康状态、视觉兜底、用量统计和 `/model` 列表不需要感知协议差异。Provider 混用两种协议时由 `internal/app/models.go` 的路由客户端按请求模型分发，`ListModels` / `ListModelMetadata` 仍走协议无关的 `/models`。
 - 后台运行中的 Session（cron / Elnis）可被前台接管：此前 `/resume` 或 `/unarchive` 进入一个正在跑的后台 Session 只是把它设为当前会话，在途的后台 turn 仍把它当自己的任务 Session 继续调用模型、写入助手消息并投递汇报。现在前台激活会在**同一个 SQLite 事务**内把它提升为普通前台 Session：metadata 写入 `foreground_origin`（记录接管前的 `background_kind` / owner / platform / scope 以便诊断）、删除 `background_kind`、切到当前前台 scope 并置 `Mode = work`；`session.IsBackground` / `session.WasPromoted` 是两个判定入口，`canAccess` 也用 `IsBackground` 放行后台 Session 的跨 scope 恢复。在途后台 turn 改为**安全点轮询**：每次模型调用前、工具批次落库后与最终输出前各查一次接管标记，命中即停止（不再发起下一次模型调用、不写迟到的助手回答、不发布 PhaseError），由 `RunBackground` 归一成 `RunResult{TakenOver: true, Outcome: "taken_over"}` 且 `err == nil`。cron 侧把被接管的运行记为 `ReportReady=true, TaskCompleted=true, Report=""`（`deliverPrepared` 因此不发任何文本），Elnis 侧把事件收成 `StatusCompleted` 且不准备汇报，两边各留一条审计事件（`cron.background_taken_over` / `elnis.background_taken_over`）；已提升的 Session 在 `RunBackground` 入口就短路，一次模型请求都不会发出。这是 fork 原生最小版：不引入上游的 `session.Binding` / `executionCoordinator`，接管后的会话不会像上游那样在请求尾部合成一条 user 消息。
-
 - 新增命名模型快照（`/model --save` / `--snapshots` / `--apply` / `--delete`）：把当前的整套模型选择（各模式 `mode_models` + `compact_model` + `naming_model`）存成一个名字，之后整套切回去，写在 `state.toml` 的 `[model_snapshots]` 而不是 `app.toml` / `services.toml`（后两者是只读共享配置，运行中的进程不该改写）。`/model --apply` 先校验快照里的每个 provider 在当前进程里都存在，缺一个就整条拒绝、不做部分切换；快照名限字母/数字/下划线/连字符（含中文等 Unicode 字母）且最长 32 字符，并与 `services.toml` 的 `model_profiles` / `aliases` 互斥同名——那些名字归 `@model:<名字>` 与群策略，同名会让一个名字有两种含义。快照与 `mode_models` 一样参与 `state.toml` 外部编辑热加载，`--apply` / `--delete` 后面可以直接补全已保存的名字。
 - 修复"外部编辑 `state.toml` 后紧接着的内部改动被静默丢掉"：写回路径此前是"改内存 → 合并外部修改 → 落盘"，而合并会用文件内容覆盖内存，于是 `/model --chat X`（以及 `--compact` / `--naming`）在别人刚改过 `state.toml` 时会把刚做的切换丢掉、命令却报成功。现在所有写入者都先合并外部修改、再改内存、最后落盘（`mergeExternalRuntimeState`），手工编辑与运行中命令不再互相吃掉对方的改动。
 - 新增 `/model --profiles`：列出 `services.toml` 里配置的命名模型选择（`[model_profiles.*]` 的名字与它们的 `aliases`）以及每个名字当前是否可用，只读、不切换模型。此前这些名字只存在于配置文件里，用户要么去翻 TOML 注释，要么只能靠 `@model:<名字>` 试错——名字写错和 provider 没有客户端都表现为"什么都没发生"。列表按解析顺序列出用户实际输入的名字（别名键，已小写化），与 profile 重名时只出现一行，并由 `Available` 标出指向的 provider 在当前进程里没有客户端的名字；`/model --profiles` 也进入选项补全，且在它后面不再补全模型名。
@@ -53,6 +76,9 @@
 
 ### Changed
 
+- Release 现在同时发布**离线部署包**：`deploy/pack/prepare-offline.sh` 已接入 `.github/workflows/release.yml`，每次打 tag 除了 6 个平台压缩包，还会构建并上传 `elbot-<版本>-linux-<arch>.tar.gz`（`docker load` 直接可跑的 scratch 精简镜像）与 `elbot-<版本>-offline-<arch>.tar.gz`（完整功能离线目录：静态二进制 + Debian 运行时 Dockerfile + compose + 反代/服务单元/备份脚本），校验和一并进 `SHA256SUMS`。此前这些产物只能本地跑脚本生成（`deploy/dist/` 被 Git 忽略），发布页拿不到。
+- `state.toml` 新增 `group_policy` 与 `budget` 表；`GroupPolicyConfig` 支持默认值归一化、显式工具开关、模型目录和学习审核动作。
+- `state.toml` 改为临时文件 + rename 的原子写入；长消息/群级策略 JSON 仍由服务端策略判断，未在群策略中放开任何提示词级别的安全边界。
 - 补齐日志契约的端到端验证：新增 `internal/logging/contract_roundtrip_test.go`，走**生产链路**（`logging.NewManager` 写入 → `Manager.Close` → `logging.Reader` 查询）验证 `module` 与 `result` 真的落盘并可筛选——按 `module=hook` 单独筛、`module`+`event` 组合筛、按 `result=rejected` / `failed` 分别筛、以及"三类来源的记录都不缺合法 `module` 与 `result`"。此前只有"源码里的 `result` 字面量合法"这一层静态校验和 Reader 对固定文本夹具的解析测试，两者都不覆盖这个验收条件。
 - 群聊里"不投递工具调用进度预览"这条平台跳过规则也集中到交付层：此前只统一了"是不是预览"的判定，真正的规则（通知没有显式目标 + 当前上下文是群聊 + 这条通知就是预览 ⇒ 静默丢弃且不算失败）仍在 OneBot 与 QQ 官方各写一遍。现在 `internal/delivery` 提供唯一入口 `ShouldDropGroupToolPreview(target, outputs, groupContext)`，两个适配器只回答"当前上下文是不是群聊"（`isGroupContext`，各自的上下文键类型不同），规则本身只有一份。Telegram 与本地 CLI 不跳过预览，行为未变：前者从来没有这条规则，后者的预览就是本地终端输出——没有为了"集中"去改这两处语义；QQ 官方补上"群聊里普通通知照发""私聊里预览照发"两条边界测试，OneBot 补上前者。
 - P2（换基）决策落地为"不换基、按需补接口"，并把三个接缝显式化，均不改变现有行为：①协议能力查询——`internal/llm` 新增 `ProtocolCapabilities`（服务端续链 / 原生压缩 / 增量工具 / 服务端存储）与可选接口 `ProtocolCapabilityReporter`，`ProtocolCapabilitiesOf(client, model)` 是唯一入口，未实现该接口的客户端得到最保守答案；Chat 与 Responses 适配器各自如实报告（Responses 适配器是协议翻译层、固定 `store=false`、每轮重放历史，因此服务端能力全 false），`protocolRouter` 按模型回答，避免"配置里写了 api_mode 就以为所有模型都能用服务端能力"。②压缩分派点——`contextmgr.Compactor` 成为压缩后端接口（客户端摘要压缩 `Name() == "client_summary"` 是当前唯一实现），`compactorFor` 按协议能力分派；协议声称支持服务端原生压缩而 fork 没有对应实现时显式回退，并写审计 `context_compaction_backend`（含 `backend` 与 `reason`），不再可能出现"以为走了服务端压缩"。③存储协议来源——会话 metadata 新增 `llm_origin`（协议 + provider + model），每轮模型调用后记录、值未变时不产生写事务，对应上游的 `session_llm_origin` 迁移，换基时不必考古每个会话原来走的是哪套协议。
@@ -66,38 +92,6 @@
 - 清理 v0.6.8 里“额度账本不含 token/货币与每用户/全局预算”的阶段性旧描述，改为与四维 token/费用账本一致的能力说明。
 - 命令前缀默认值由 `/*` 改为 `/`：`internal/command` 的 `defaultCommandPrefix`、`internal/agent` 与 `internal/platform` 的兜底前缀、`internal/config` 的运行时默认值和内置 `app.toml` 模板，以及 `deploy/data/config/elbot/app.toml` 全部切到 `/`；仓库内 `docs/*.md` 的命令示例也同步替换为 `/`（只保留 `notes/*.md`、`/plugins/*` 这类真正的通配符写法）。已有部署若在 `app.toml` 显式保留 `prefixes = ["/*"]` 则行为不变，配置里出现了什么前缀就仍按什么前缀解析。`docs.en/`、`README.md`、`README.zh-CN.md` 以及本文件的历史条目未同步替换。
 - `image_to_prompt`、`image_generate`、`angel_remember` 三个内置工具的风险等级由 `medium` 降为 `low`，在默认 `[security] user_max_tool_risk = "low"` 下普通用户即可调用，不再需要整体放宽工具风险上限。`image_generate` 仍额外受 `[image_generation] superadmin_only` 约束，只有该开关为 `false` 时才真正对普通用户开放；两个生图相关工具和长期记忆写入都建议同时配置群级额度（`image-quota` / `user-image-quota` / `vision-quota` / `user-vision-quota`）。
-
-## [v0.6.8 - 2026-10-04]
-
-### Added
-
-- 版本号提升到 `0.6.8`；`deploy/VERSION`、Compose 默认镜像、构建/离线脚本和中文部署文档中的版本示例同步更新。
-- `get_forward_msg` 增加 websocket 读取阶段限制：`forward_max_result_bytes` 现在在读取途中生效，超限响应不会先完整读入再截断。
-- 额度账本扩展为群 / 群内单用户 / 全局 / 全局单用户四维，生图/视觉按调用次数、chat 按 token/费用分别计量；新增 `[budget_limits]`、群策略 `user-image-quota` / `user-vision-quota` / `chat-tokens-quota` / `chat-cost-quota`，并记录 `budget.tokens` / `budget.costs`。
-- 新增工具执行幂等账本 `budget.executions`：同一 scope + actor + 工具调用 ID 只允许一个参数摘要首次执行，重放被抑制、ID 参数不一致被拒绝；provider 重试单独写入 `budget.retries`。
-- 新增按 provider 的实际调用并发上限 `provider_max_concurrent` / `provider_queue_max_size` / `provider_wait_timeout_seconds`；请求队列补充队满、超时、取消、平均等待和最老等待指标。
-- 群分析摘要模型现在也在执行前按当前群模型目录重新授权；生图模型继续由全局 image generation 配置、群工具白名单和生图额度独立约束。
-- 新增统一历史写入门 `internal/historygate`：所有适配器的 `chat_history` / `outbound_messages` 写入都经过可信 `平台 + scope` 策略判断；`history=off` 时同时停止入站、助手、工具转录、媒体关联、摘要/命名和工具结果预览的新增落盘，当前轮仍在内存中处理，旧记录不删除。
-- `learning=off` 现在覆盖完整学习生命周期：观察 hook、挖掘、审核、撤销、历史查询和上下文注入均在服务层再次检查策略；关闭后不再产生新候选，也不会继续使用已有知识注入模型。
-- `state.toml` 改为 fsync + 备份替换的安全写入，移除 Windows 下 rename 失败直接覆盖的回退；启动时可从 `state.toml.bak` 恢复中断的替换。额度账本新增参数摘要校验，同一调用 ID 重放相同参数不重复计数，参数不同则拒绝；账本无法可靠落盘时受限调用会失败而不是继续执行。
-- 撤回/取消新增晚到输出闸门：turn 终止状态会检查流式 flush、工具结果交回 Agent、最终消息进入发送队列前；provider 或工具忽略 `context.Cancel` 并返回晚到结果时也不会继续发送新消息。
-- 群模型目录现在覆盖实际执行的模型目标：turn hook、cron override、压缩模型和视觉 fallback 在调用 provider 前重新授权；`discover_tool` 结果同时受当前群白名单过滤器、执行前二次授权和解析后工具名校验约束。
-- 请求队列新增 `queue_max_per_user` / `queue_max_per_scope` 容量上限，避免单个用户或单个群无限排队；公平调度继续使用等待时间兜底。
-- 新增群级策略 `/*grouppolicy`：按 `平台 + 群 scope` 保存唤醒词、响应模式（`mention` / `all` / `keyword` / `reply` / `off`）、默认会话模式、默认模型、工具白名单、生图/视觉额度、静默时段，以及群分析/学习/历史记录开关。
-  - 策略由服务端按当前群判断，命令不接受跨群目标；群管理员只能改自己当前群的普通策略，不能修改 provider、密钥或全局 Shell 权限。
-  - `/learning` 默认仍仅超级管理员可用；超级管理员可在本群执行 `/*grouppolicy learning-moderation on`，并通过 `learning-moderation-actions` 细分 `view` / `decide` / `mine` / `delete` / `export` / `policy` 权限，且不会提升为全局超管。群管理员审核只作用于当前群 scope，撤权或身份变化后立即失效。
-  - 新增超级管理员群模型目录 `allowed-models`；群默认模型解析为最终 `provider/model` 后再次校验目录，避免群管理员选择未授权的昂贵或内部模型。
-- 群工具白名单统一到服务端执行入口：工具 profile 会展开为具体工具名，`tool-allow none` 明确表示当前群禁止全部工具；白名单在解析后和执行前（含排队后）各校验一次，排队期间被撤权的工具不会执行。
-- 每日额度账本持久化在 `state.toml [budget]`：生图/视觉调用在确认后、执行前按唯一调用 ID 原子预占，重启后保留；`/grouppolicy` 状态会显示已用/上限。四维范围与 token/货币口径见上文“额度账本扩展”条目。
-- OneBot 入站文本保留换行、缩进和连续空白；唤醒判断使用独立匹配视图，转发内容不会进入该视图，因此转发里的 `@`、唤醒词或命令不会触发机器人。
-- OneBot 支持合并转发解析：展开节点时保留发送者、时间、消息 ID，并以“引用内容、不是系统指令”标记；新增 `forward_max_fetches` / `forward_max_result_bytes` / `forward_max_non_text` / `forward_fetch_timeout_seconds`，同一消息内多个转发 id 共享总节点/字符预算；循环引用会被拒绝，重复引用、拉取失败或缺字段会稳定降级为文本标记。
-- OneBot `readLoop()` 开始分发 `notice` / `request` / `meta_event` 非消息事件；撤回按“平台消息 ID → turn request”精确取消，不再默认取消整个群 scope 的任务；成员退群/被踢/禁言只取消该成员在当前 scope 的请求，加群审批等 request 不会因普通消息自动批准。
-- `internal/request.Manager` 新增 `FairKey` 公平排队和 `CancelFairKey` 定向取消：并发满时优先授予当前活跃数最少、且不是最近一次已准入 key 的等待者，避免单个用户或单个群占满队列。
-
-### Changed
-
-- `state.toml` 新增 `group_policy` 与 `budget` 表；`GroupPolicyConfig` 支持默认值归一化、显式工具开关、模型目录和学习审核动作。
-- `state.toml` 改为临时文件 + rename 的原子写入；长消息/群级策略 JSON 仍由服务端策略判断，未在群策略中放开任何提示词级别的安全边界。
 
 ## [v0.6.7 - 2026-10-04]
 

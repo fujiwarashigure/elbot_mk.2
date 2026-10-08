@@ -131,10 +131,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Build offline deployment bundle
+        run: bash deploy/pack/prepare-offline.sh
 
       - name: Collect assets
         run: |
@@ -142,6 +149,11 @@ jobs:
           echo "--- dist contents ---"
           ls -la dist 2>/dev/null || echo "(dist missing)"
           find dist -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release-assets/ \; 2>/dev/null || true
+          # 离线部署包（docker load 镜像 tar / 完整功能离线目录）。deploy/dist/SHA256SUMS
+          # 不拷：发布页的 SHA256SUMS 由下面统一生成，两者同名会互相覆盖。
+          echo "--- deploy/dist contents ---"
+          ls -la deploy/dist 2>/dev/null || echo "(deploy/dist missing)"
+          find deploy/dist -maxdepth 1 -type f -name '*.tar.gz' -exec cp {} release-assets/ \; 2>/dev/null || true
           echo "--- release-assets contents ---"
           ls -la release-assets
           if [ -z "$(ls -A release-assets 2>/dev/null)" ]; then
